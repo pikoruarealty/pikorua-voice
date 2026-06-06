@@ -1,21 +1,35 @@
 import { Module } from "@nestjs/common";
 import { DeepgramService } from "../stt/deepgram.service";
+import { DeepgramRealtimeService } from "../stt/deepgram-realtime.service";
+import { RealtimeGateway } from "../stt/realtime.gateway";
 import { LlmService } from "../llm/llm.service";
 import { ElevenlabsService } from "../tts/elevenlabs.service";
 import { CallRuntimeService } from "./call-runtime.service";
 import { CallTurnRepository } from "@pikorua/db";
+import { CallRepository } from "@pikorua/db";
 import { CallRuntimeController } from "./call-runtime.controller";
+import { GuardrailService } from "../llm/guardrail.service";
+import { IvrService } from "../ivr/ivr.service";
 
 @Module({
   providers: [
     DeepgramService,
+    DeepgramRealtimeService,
+    RealtimeGateway,
     LlmService,
     ElevenlabsService,
+    GuardrailService,
     {
       provide: CallTurnRepository,
       useFactory: (db: any) => new CallTurnRepository(db),
       inject: ["DATABASE"],
     },
+    {
+      provide: CallRepository,
+      useFactory: (db: any) => new CallRepository(db),
+      inject: ["DATABASE"],
+    },
+    IvrService,
     CallRuntimeService,
   ],
   controllers: [CallRuntimeController],

@@ -16,6 +16,8 @@
     "@pikorua/shared": "workspace:*",
     "reflect-metadata": "^0.2.2",
     "@deepgram/sdk": "^2.0.0",
+    "bullmq": "^2.7.5",
+    "ws": "^8.13.0",
     "anthropic": "^0.4.0",
     "@google/generative-ai": "^0.1.0",
     "@elevenlabs/node": "^1.0.0",

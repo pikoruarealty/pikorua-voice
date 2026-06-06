@@ -2,6 +2,8 @@ import { Module } from "@nestjs/common";
 import { WebhookController } from "./webhook.controller";
 import { WebhookService } from "./webhook.service";
 import { WebhookEventRepository, CallRepository, CallEventRepository } from "@pikorua/db";
+import { PostCallQueueService } from "../postcall/postcall.queue";
+import { IvrService } from "../ivr/ivr.service";
 
 @Module({
   controllers: [WebhookController],
@@ -21,6 +23,8 @@ import { WebhookEventRepository, CallRepository, CallEventRepository } from "@pi
       useFactory: (db: any) => new CallEventRepository(db),
       inject: ["DATABASE"],
     },
+    PostCallQueueService,
+    IvrService,
     WebhookService,
   ],
 })

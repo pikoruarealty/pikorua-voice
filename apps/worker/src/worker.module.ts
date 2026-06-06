@@ -4,7 +4,11 @@ import { resolve } from "path";
 import { validateWorkerEnv } from "./config/env";
 import { DatabaseModule } from "./database/database.module";
 import { DialService } from "./dial/dial.service";
-import { CampaignTargetRepository, CallRepository } from "@pikorua/db";
+import { CampaignTargetRepository, CallRepository, LeadScoreRepository, CrmSyncLogRepository, CallEventRepository, CallTurnRepository } from "@pikorua/db";
+import { PostCallProcessingService } from "./postcall/postcall.service";
+import { PostCallWorker } from "./postcall/postcall.worker";
+import { CrmRetryWorker } from "./postcall/crm-retry.worker";
+import { CrmRetryScheduler } from "./postcall/crm-retry.scheduler";
 
 @Module({
   imports: [
@@ -27,7 +31,31 @@ import { CampaignTargetRepository, CallRepository } from "@pikorua/db";
       useFactory: (db: any) => new CallRepository(db),
       inject: ["DATABASE"],
     },
+    {
+      provide: LeadScoreRepository,
+      useFactory: (db: any) => new LeadScoreRepository(db),
+      inject: ["DATABASE"],
+    },
+    {
+      provide: CrmSyncLogRepository,
+      useFactory: (db: any) => new CrmSyncLogRepository(db),
+      inject: ["DATABASE"],
+    },
+    {
+      provide: CallEventRepository,
+      useFactory: (db: any) => new CallEventRepository(db),
+      inject: ["DATABASE"],
+    },
+    {
+      provide: CallTurnRepository,
+      useFactory: (db: any) => new CallTurnRepository(db),
+      inject: ["DATABASE"],
+    },
     DialService,
+    PostCallProcessingService,
+    PostCallWorker,
+    CrmRetryWorker,
+    CrmRetryScheduler,
   ],
 })
 export class WorkerModule {}

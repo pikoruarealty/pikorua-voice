@@ -8,6 +8,7 @@ export const exotelWebhookSchema = z
     CallStatus: z.string().optional(),
     From: z.string().optional(),
     To: z.string().optional(),
+    Digits: z.string().optional(),
     Direction: z.string().optional(),
     Event: z.string().optional(),
     Sid: z.string().optional(),

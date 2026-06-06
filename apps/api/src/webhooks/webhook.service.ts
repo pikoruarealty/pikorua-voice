@@ -2,6 +2,7 @@ import { Injectable, Inject, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import crypto from "crypto";
 import { WebhookEventRepository, CallRepository, CallEventRepository } from "@pikorua/db";
+import { PostCallQueueService } from "../postcall/postcall.queue";
 import type { ExotelWebhookDto } from "./exotel.dto";
 
 @Injectable()
@@ -13,6 +14,8 @@ export class WebhookService {
     @Inject(WebhookEventRepository) private readonly webhookRepo: WebhookEventRepository,
     @Inject(CallRepository) private readonly callRepo: CallRepository,
     @Inject(CallEventRepository) private readonly eventRepo: CallEventRepository,
+    private readonly postcallQueue: PostCallQueueService,
+    private readonly ivr: IvrService,
   ) {}
 
   verifySignature(secret: string | undefined, rawBody: string, headerSig?: string | null) {
@@ -78,9 +81,29 @@ export class WebhookService {
             failed: "failed",
           };
           const mapped = statusMap[String(payload.CallStatus ?? payload.Event ?? "").toLowerCase()] ?? undefined;
-          if (mapped) {
-            await this.callRepo.updateByProviderCallSid(providerCallSid, { status: mapped as any });
-            await this.eventRepo.create({ callId: call.id, campaignId: call.campaignId ?? null, type: "worker_failure", severity: "info", message: `Provider event: ${eventType}`, payload: payload as unknown as Record<string, unknown> });
+            if (mapped) {
+              await this.callRepo.updateByProviderCallSid(providerCallSid, { status: mapped as any });
+              await this.eventRepo.create({ callId: call.id, campaignId: call.campaignId ?? null, type: "worker_failure", severity: "info", message: `Provider event: ${eventType}`, payload: payload as unknown as Record<string, unknown> });
+              // If call completed, enqueue post-call processing
+              if (mapped === "completed") {
+                try {
+                  await this.postcallQueue.enqueue(call.id);
+                } catch (err) {
+                  this.logger.warn("Failed to enqueue post-call job", err instanceof Error ? err.stack : String(err));
+                }
+              }
+            }
+            // If IVR DTMF digits provided, map and persist locale/provider
+            try {
+              const digits = String(payload.Digits ?? "");
+              if (digits) {
+                const mapped = this.ivr.mapDigitToLocale(digits);
+                await this.callRepo.update(call.id, { locale: mapped.locale as any });
+                await this.eventRepo.create({ callId: call.id, campaignId: call.campaignId ?? null, type: "escalation", severity: "info", message: `IVR selection: ${digits} -> ${mapped.locale}`, payload: { digits, mapped } });
+              }
+            } catch (err) {
+              this.logger.warn("Failed to process IVR digits", err instanceof Error ? err.stack : String(err));
+            }
           }
         }
       } catch (err) {

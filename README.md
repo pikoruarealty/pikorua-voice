@@ -25,6 +25,35 @@ over REST.
 | LLM            | Anthropic (primary) · Google Generative AI (fallback) |
 | Monorepo       | pnpm workspaces + Turborepo                            |
 
+## Language & Routing (updated)
+
+- Primary language mix: Hindi primary (~60%), English (~25%), Gujarati (~15%).
+- Voice pipeline split:
+	- English calls route to the Vapi.ai path (Deepgram + Cartesia + Claude) — configured to handle ~25% of total calls.
+	- Hindi + Gujarati calls route to the Gemini Live path (Google Generative AI) — ~75% of total calls.
+- IVR mapping (new): Press 1 = English (Vapi path), Press 2 = Hindi (Gemini), Press 3 = Gujarati (Gemini). Default (no press) = Hindi.
+
+## Call volume assumptions & billing
+
+- Expected total calls: 5,000/month = 1,000 inbound + 4,000 outbound.
+- Outbound answer rate ~50% → ~2,000 no-answers (no AI cost). Expected AI-billed connected calls ≈ 3,000.
+- Budget: ₹30,000/month (locked). Estimated monthly cost after language/traffic split ≈ ₹26,000–28,500.
+
+## Config / ENV additions
+
+- `GEMINI_LANGUAGE_DEFAULT` — default language sent to Gemini when call locale absent (default `hi-IN`).
+- `VAPI_PERCENT` — percentage (0-100) of English calls routed to the Vapi.ai path (default 25).
+
+## Tech stack version notes (requested updates)
+
+- NestJS: 11.x (was 10.x)
+- TypeScript: 5.8 (was 5.7)
+- Queue library: BullMQ 5.x + @nestjs/bullmq (was Bull 4 + @nestjs/bull)
+- Google AI SDK: @google/genai (unified) (was @google/generative-ai)
+- LLM model strings: update to latest dev assignments (claude-sonnet-4-6, etc.)
+
+These updates are reflected in the PRD and environment defaults; package upgrades may be scheduled as a follow-up to avoid large breaking changes during this phase.
+
 ## Layout
 
 ```

@@ -1,0 +1,26 @@
+{
+  "name": "pikorua-voice",
+  "version": "0.0.1",
+  "private": true,
+  "scripts": {
+    "predev": "turbo build --filter=@pikorua/shared --filter=@pikorua/db",
+    "dev": "turbo dev",
+    "build": "turbo build",
+    "type-check": "turbo type-check",
+    "format": "prettier --write \"**/*.{ts,json,md,yaml,yml}\" --ignore-path .gitignore",
+    "format:check": "prettier --check \"**/*.{ts,json,md,yaml,yml}\" --ignore-path .gitignore",
+    "db:generate": "turbo db:generate --filter=@pikorua/db",
+    "db:migrate": "turbo db:migrate --filter=@pikorua/db",
+    "db:studio": "turbo db:studio --filter=@pikorua/db"
+  },
+  "devDependencies": {
+    "prettier": "^3.3.3",
+    "turbo": "^2.3.3",
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=9.0.0"
+  },
+  "packageManager": "pnpm@9.15.0"
+}

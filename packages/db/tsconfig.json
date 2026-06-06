@@ -1,0 +1,16 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "module": "CommonJS",
+    "moduleResolution": "node",
+    "baseUrl": ".",
+    "paths": {
+      "@pikorua/shared": ["../shared/dist/index.d.ts"],
+      "@pikorua/shared/*": ["../shared/dist/*"]
+    },
+    "outDir": "./dist",
+    "noUncheckedIndexedAccess": false
+  },
+  "include": ["src/**/*", "drizzle.config.ts"],
+  "exclude": ["node_modules", "dist"]
+}

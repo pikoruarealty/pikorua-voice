@@ -1,0 +1,8 @@
+export { CallEventRepository } from "./call-event.repository";
+export { CallRepository } from "./call.repository";
+export { CallTurnRepository } from "./call-turn.repository";
+export { CampaignRepository } from "./campaign.repository";
+export { CampaignTargetRepository } from "./campaign-target.repository";
+export { CrmSyncLogRepository } from "./crm-sync-log.repository";
+export { LeadScoreRepository } from "./lead-score.repository";
+export { WebhookEventRepository } from "./webhook-event.repository";

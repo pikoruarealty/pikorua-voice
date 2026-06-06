@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "compilerOptions": {
+    "target": "ES2022",
+    "strict": true,
+    "skipLibCheck": true,
+    "baseUrl": ".",
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "resolveJsonModule": true,
+    "forceConsistentCasingInFileNames": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "paths": {
+      "@pikorua/shared": ["packages/shared/src/index.ts"],
+      "@pikorua/shared/*": ["packages/shared/src/*"],
+      "@pikorua/db": ["packages/db/src/index.ts"],
+      "@pikorua/db/*": ["packages/db/src/*"]
+    }
+  },
+  "exclude": ["node_modules"]
+}

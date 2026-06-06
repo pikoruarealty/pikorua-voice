@@ -1,0 +1,38 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: pikorua_voice_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: pikorua_voice
+    ports:
+      # host 5433 → container 5432 (distinct from CRM / ai-leads on 5432)
+      - "5433:5432"
+    volumes:
+      - pikorua_voice_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: pikorua_voice_redis
+    restart: unless-stopped
+    ports:
+      # host 6380 → container 6379 (distinct from CRM / ai-leads on 6379)
+      - "6380:6379"
+    volumes:
+      - pikorua_voice_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pikorua_voice_postgres_data:
+  pikorua_voice_redis_data:

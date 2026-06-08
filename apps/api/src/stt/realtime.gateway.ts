@@ -1,5 +1,5 @@
 import { WebSocketGateway, WebSocketServer, OnGatewayConnection, OnGatewayDisconnect } from '@nestjs/websockets';
-import { Server, WebSocket } from 'ws';
+import { Server, WebSocket, RawData } from 'ws';
 import { Injectable, Logger } from '@nestjs/common';
 import { DeepgramRealtimeService } from './deepgram-realtime.service';
 
@@ -12,7 +12,7 @@ type ClientState = {
 export class RealtimeGateway implements OnGatewayConnection, OnGatewayDisconnect {
   private readonly logger = new Logger('RealtimeGateway');
   @WebSocketServer()
-  server: Server;
+  server!: Server;
 
   private clients = new Map<WebSocket, ClientState>();
 
@@ -22,7 +22,7 @@ export class RealtimeGateway implements OnGatewayConnection, OnGatewayDisconnect
     this.clients.set(client, { chunks: [] });
     this.logger.log('Client connected for realtime STT');
 
-    client.on('message', async (data) => {
+    client.on('message', async (data: RawData) => {
       // Expect binary audio chunks or control JSON messages
       try {
         if (typeof data === 'string') {

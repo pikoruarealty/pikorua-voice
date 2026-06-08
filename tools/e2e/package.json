@@ -1,0 +1,13 @@
+{
+  "name": "pikorua-e2e-tools",
+  "version": "0.0.1",
+  "private": true,
+  "scripts": {
+    "run": "node run-e2e.js",
+    "start-mock-crm": "node mock-crm/server.js"
+  },
+  "dependencies": {
+    "pg": "^8.11.0",
+    "express": "^4.18.2"
+  }
+}

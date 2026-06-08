@@ -46,7 +46,6 @@ export class CallRuntimeService {
       sttResult = await this.stt.transcribeBuffer(audioBuffer, "audio/wav", locale);
     }
     const { text, sttMs } = sttResult;
-    const { text, sttMs } = sttResult;
 
     // Build system prompt based on locale. Production would include richer
     // system instructions, conversation history, guardrails and locale handling.
@@ -65,8 +64,6 @@ export class CallRuntimeService {
     const llmStart = Date.now();
     let provider: "anthropic" | "google" | "auto" = "auto";
     try {
-      const call = await this.callRepo.findById(callId);
-      const locale = String(call?.locale ?? this.config.get("GEMINI_LANGUAGE_DEFAULT") ?? "hi-IN");
       const vapiPercent = Number(this.config.get("VAPI_PERCENT") ?? 25);
       // If locale is English, allow Vapi path for configured percent, else use Gemini (google)
       if (locale.toLowerCase().startsWith("en")) {

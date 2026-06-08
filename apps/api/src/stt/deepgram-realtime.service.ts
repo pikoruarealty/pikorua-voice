@@ -1,6 +1,6 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
-import WebSocket from "ws";
+import WebSocket, { RawData } from "ws";
 
 @Injectable()
 export class DeepgramRealtimeService {
@@ -55,7 +55,7 @@ export class DeepgramRealtimeService {
         try { ws.send(JSON.stringify({ type: "Stop" })); } catch (e) {}
       });
 
-      ws.on("message", (data) => {
+      ws.on("message", (data: RawData) => {
         try {
           const text = data.toString();
           const parsed = JSON.parse(text);
@@ -80,7 +80,7 @@ export class DeepgramRealtimeService {
         }
       });
 
-      ws.on("error", (err) => {
+      ws.on("error", (err: Error) => {
         this.logger.warn("Realtime STT socket error", err instanceof Error ? err.stack : String(err));
         if (!resolved) {
           resolved = true;

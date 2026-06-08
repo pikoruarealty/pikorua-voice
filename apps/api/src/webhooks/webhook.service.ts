@@ -2,7 +2,9 @@ import { Injectable, Inject, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import crypto from "crypto";
 import { WebhookEventRepository, CallRepository, CallEventRepository } from "@pikorua/db";
+import type { WebhookEvent } from "@pikorua/db";
 import { PostCallQueueService } from "../postcall/postcall.queue";
+import { IvrService } from "../ivr/ivr.service";
 import type { ExotelWebhookDto } from "./exotel.dto";
 
 @Injectable()
@@ -19,8 +21,7 @@ export class WebhookService {
   ) {}
 
   verifySignature(secret: string | undefined, rawBody: string, headerSig?: string | null) {
-    if (!secret) return false;
-    if (!headerSig) return false;
+    if (!secret || !headerSig) return false;
     try {
       const h = crypto.createHmac("sha256", secret).update(rawBody).digest("hex");
       return crypto.timingSafeEqual(Buffer.from(h), Buffer.from(headerSig));
@@ -37,20 +38,22 @@ export class WebhookService {
     const providerCallSid = String(payload.CallSid ?? payload.Sid ?? "");
     const eventType = String(payload.Event ?? payload.CallStatus ?? "unknown");
 
-    // Idempotency: check existing events for identical raw payload
+    // Idempotency: skip duplicate events with identical raw payload
     try {
-      const existing = providerCallSid ? await this.webhookRepo.findByProviderCallSid(providerCallSid) : [];
+      const existing = providerCallSid
+        ? await this.webhookRepo.findByProviderCallSid(providerCallSid)
+        : [];
       const already = existing.find((e) => JSON.stringify(e.rawPayload) === rawBody);
       if (already) {
-        this.logger.log(`Duplicate webhook received for sid=${providerCallSid}; marking ignored`);
+        this.logger.log(`Duplicate webhook for sid=${providerCallSid}; ignoring`);
         return { status: "ignored" } as const;
       }
     } catch (err) {
       this.logger.warn("Failed to check existing webhooks", err instanceof Error ? err.stack : String(err));
     }
 
-    // Persist webhook event
-    let eventRow;
+    // Persist webhook event (Rule 10: inbound webhook received)
+    let eventRow: WebhookEvent | undefined;
     try {
       eventRow = await this.webhookRepo.create({
         provider: "exotel",
@@ -59,18 +62,17 @@ export class WebhookService {
         rawPayload: payload as unknown as Record<string, unknown>,
         signatureValid: !!signatureValid,
       });
-      this.logger.log(`Inbound webhook received: id=${eventRow.id} sid=${providerCallSid} event=${eventType}`);
+      this.logger.log(`Inbound webhook: id=${eventRow.id} sid=${providerCallSid} event=${eventType}`);
     } catch (err) {
       this.logger.error("Failed to persist webhook event", err instanceof Error ? err.stack : String(err));
       throw err;
     }
 
-    // Correlate to call and update status
+    // Correlate to a call row and update its status
     if (providerCallSid) {
       try {
         const call = await this.callRepo.findByProviderCallSid(providerCallSid);
         if (call) {
-          // Map provider statuses to internal call statuses conservatively
           const statusMap: Record<string, string> = {
             ringing: "ringing",
             in_progress: "in_progress",
@@ -80,42 +82,73 @@ export class WebhookService {
             busy: "busy",
             failed: "failed",
           };
-          const mapped = statusMap[String(payload.CallStatus ?? payload.Event ?? "").toLowerCase()] ?? undefined;
-            if (mapped) {
-              await this.callRepo.updateByProviderCallSid(providerCallSid, { status: mapped as any });
-              await this.eventRepo.create({ callId: call.id, campaignId: call.campaignId ?? null, type: "worker_failure", severity: "info", message: `Provider event: ${eventType}`, payload: payload as unknown as Record<string, unknown> });
-              // If call completed, enqueue post-call processing
-              if (mapped === "completed") {
-                try {
-                  await this.postcallQueue.enqueue(call.id);
-                } catch (err) {
-                  this.logger.warn("Failed to enqueue post-call job", err instanceof Error ? err.stack : String(err));
-                }
+          const mappedStatus =
+            statusMap[String(payload.CallStatus ?? payload.Event ?? "").toLowerCase()];
+
+          if (mappedStatus) {
+            await this.callRepo.updateByProviderCallSid(providerCallSid, {
+              status: mappedStatus as any,
+            });
+            await this.eventRepo.create({
+              callId: call.id,
+              campaignId: call.campaignId ?? null,
+              type: "worker_failure",
+              severity: "info",
+              message: `Provider event: ${eventType}`,
+              payload: payload as unknown as Record<string, unknown>,
+            } as any);
+            if (mappedStatus === "completed") {
+              try {
+                await this.postcallQueue.enqueue(call.id);
+              } catch (queueErr) {
+                this.logger.warn(
+                  "Failed to enqueue post-call job",
+                  queueErr instanceof Error ? queueErr.stack : String(queueErr),
+                );
               }
             }
-            // If IVR DTMF digits provided, map and persist locale/provider
-            try {
-              const digits = String(payload.Digits ?? "");
-              if (digits) {
-                const mapped = this.ivr.mapDigitToLocale(digits);
-                await this.callRepo.update(call.id, { locale: mapped.locale as any });
-                await this.eventRepo.create({ callId: call.id, campaignId: call.campaignId ?? null, type: "escalation", severity: "info", message: `IVR selection: ${digits} -> ${mapped.locale}`, payload: { digits, mapped } });
-              }
-            } catch (err) {
-              this.logger.warn("Failed to process IVR digits", err instanceof Error ? err.stack : String(err));
+          }
+
+          // Map IVR DTMF digit to locale
+          try {
+            const digits = String(payload.Digits ?? "");
+            if (digits) {
+              const ivrResult = this.ivr.mapDigitToLocale(digits);
+              await this.callRepo.update(call.id, { locale: ivrResult.locale as any });
+              await this.eventRepo.create({
+                callId: call.id,
+                campaignId: call.campaignId ?? null,
+                type: "escalation",
+                severity: "info",
+                message: `IVR selection: ${digits} -> ${ivrResult.locale}`,
+                payload: { digits, mapped: ivrResult },
+              } as any);
             }
+          } catch (ivrErr) {
+            this.logger.warn(
+              "Failed to process IVR digits",
+              ivrErr instanceof Error ? ivrErr.stack : String(ivrErr),
+            );
           }
         }
       } catch (err) {
-        this.logger.error("Failed to correlate webhook to call", err instanceof Error ? err.stack : String(err));
+        this.logger.error(
+          "Failed to correlate webhook to call",
+          err instanceof Error ? err.stack : String(err),
+        );
       }
     }
 
     // Mark processed
-    try {
-      await this.webhookRepo.markProcessed(eventRow.id);
-    } catch (err) {
-      this.logger.warn("Failed to mark webhook processed", err instanceof Error ? err.stack : String(err));
+    if (eventRow) {
+      try {
+        await this.webhookRepo.markProcessed(eventRow.id);
+      } catch (err) {
+        this.logger.warn(
+          "Failed to mark webhook processed",
+          err instanceof Error ? err.stack : String(err),
+        );
+      }
     }
 
     return { status: "processed" } as const;

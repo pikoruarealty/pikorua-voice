@@ -1,6 +1,6 @@
 import { Injectable, Inject, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
-import axios from "axios";
+import axios, { type AxiosError } from "axios";
 import {
   LeadScoreRepository,
   CrmSyncLogRepository,
@@ -110,8 +110,9 @@ export class PostCallProcessingService {
       await this.crmLogRepo.updateStatus(log.id, "success", { httpStatus: resp.status, responsePayload: resp.data, attempts: (log.attempts ?? 0) + 1 } as any);
     } catch (err) {
       this.logger.warn("CRM sync failed", err instanceof Error ? err.stack : String(err));
-      const status = err?.response?.status ?? null;
-      const data = err?.response?.data ?? { message: String(err) };
+      const axiosErr = err as AxiosError;
+      const status = axiosErr?.response?.status ?? null;
+      const data = axiosErr?.response?.data ?? { message: String(err) };
       await this.crmLogRepo.updateStatus(log.id, "failed", { httpStatus: status, responsePayload: data, attempts: (log.attempts ?? 0) + 1, error: String(err) } as any);
     }
   }

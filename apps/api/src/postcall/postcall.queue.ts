@@ -1,16 +1,19 @@
 import { Injectable, Logger, OnModuleDestroy } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { Queue } from "bullmq";
+import { Redis } from "ioredis";
 
 @Injectable()
 export class PostCallQueueService implements OnModuleDestroy {
   private readonly logger = new Logger("PostCallQueueService");
   private queue: Queue | null = null;
+  private redis: Redis | null = null;
 
   constructor(private readonly config: ConfigService) {
-    const redis = String(this.config.get("REDIS_URL") ?? "");
-    if (redis) {
-      this.queue = new Queue("postcall", { connection: redis });
+    const redisUrl = String(this.config.get("REDIS_URL") ?? "");
+    if (redisUrl) {
+      this.redis = new Redis(redisUrl);
+      this.queue = new Queue("postcall", { connection: this.redis });
       this.logger.log("Postcall queue initialized");
     } else {
       this.logger.warn("REDIS_URL not set; postcall queue disabled");
@@ -24,5 +27,6 @@ export class PostCallQueueService implements OnModuleDestroy {
 
   async onModuleDestroy() {
     await this.queue?.close().catch(() => undefined);
+    await this.redis?.quit().catch(() => undefined);
   }
 }

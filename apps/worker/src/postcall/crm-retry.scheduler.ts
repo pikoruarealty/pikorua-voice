@@ -1,36 +1,49 @@
 import { Injectable, OnModuleInit, OnModuleDestroy, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { Queue } from "bullmq";
+import { Redis } from "ioredis";
 
 @Injectable()
 export class CrmRetryScheduler implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger("CrmRetryScheduler");
   private queue: Queue | null = null;
+  private redis: Redis | null = null;
 
   constructor(private readonly config: ConfigService) {}
 
   async onModuleInit() {
-    const redis = String(this.config.get("REDIS_URL") ?? "");
-    if (!redis) {
+    const redisUrl = String(this.config.get("REDIS_URL") ?? "");
+    if (!redisUrl) {
       this.logger.warn("REDIS_URL not set; CRM retry scheduler disabled");
       return;
     }
 
-    this.queue = new Queue("crm-retry", { connection: redis });
+    this.redis = new Redis(redisUrl);
+    this.queue = new Queue("crm-retry", { connection: this.redis });
+
     try {
-      // Add a repeatable job that triggers the worker to scan pending CRM syncs
+      // Repeatable job that triggers the CrmRetryWorker every 5 minutes.
+      // BullMQ v4+: use `pattern` (not `cron`) for cron expressions.
       await this.queue.add(
         "cron-trigger",
         {},
-        { repeat: { cron: "*/5 * * * *" }, removeOnComplete: true, removeOnFail: false },
+        {
+          repeat: { pattern: "*/5 * * * *" },
+          removeOnComplete: true,
+          removeOnFail: false,
+        },
       );
       this.logger.log("Scheduled crm-retry repeatable job (every 5 minutes)");
     } catch (err) {
-      this.logger.warn("Failed to schedule crm-retry job", err instanceof Error ? err.stack : String(err));
+      this.logger.warn(
+        "Failed to schedule crm-retry job",
+        err instanceof Error ? err.stack : String(err),
+      );
     }
   }
 
   async onModuleDestroy() {
     await this.queue?.close().catch(() => undefined);
+    await this.redis?.quit().catch(() => undefined);
   }
 }

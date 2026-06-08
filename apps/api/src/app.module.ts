@@ -11,6 +11,7 @@ import { CampaignModule } from "./campaign/campaign.module";
 import { WebhookModule } from "./webhooks/webhook.module";
 import { CallRuntimeModule } from "./call-runtime/call-runtime.module";
 import { MediaIngressModule } from "./media-ingress/media-ingress.module";
+import { MetricsModule } from "./metrics/metrics.module";
 
 @Module({
   imports: [
@@ -26,6 +27,7 @@ import { MediaIngressModule } from "./media-ingress/media-ingress.module";
     WebhookModule,
     CallRuntimeModule,
     MediaIngressModule,
+    MetricsModule,
   ],
   controllers: [AppController],
   providers: [{ provide: APP_GUARD, useClass: ApiAuthGuard }],

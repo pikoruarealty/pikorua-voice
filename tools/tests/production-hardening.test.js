@@ -60,6 +60,11 @@ test("webhook signatures and event keys are stable", () => {
     CallSid: "sid-1",
   });
   assert.equal(keyA, keyB);
+
+  const malformedA = service.buildEventKey("", "unknown", undefined, { CallStatus: "completed" });
+  const malformedB = service.buildEventKey("", "unknown", undefined, { CallStatus: "busy" });
+  assert.notEqual(malformedA, malformedB);
+  assert.match(malformedA, /^exotel:payload:/);
 });
 
 test("active campaign creation enqueues targets and marks them queued", async () => {
@@ -143,4 +148,55 @@ test("CRM retry worker uses retryable failed/pending logs and idempotency header
   assert.match(read("apps/worker/src/postcall/crm-retry.worker.ts"), /findRetryable\(25, 5\)/);
   assert.match(read("apps/worker/src/postcall/crm-retry.worker.ts"), /Idempotency-Key/);
   assert.match(read("packages/db/src/repositories/crm-sync-log.repository.ts"), /findRetryable/);
+});
+
+test("WebSocket auth accepts bearer, x-api-key, and token query string", () => {
+  const { isWebSocketAuthorized } = require("../../apps/api/dist/auth/ws-auth");
+  const config = { get: (key) => (key === "API_AUTH_TOKEN" ? "secret" : "production") };
+
+  assert.equal(
+    isWebSocketAuthorized(config, { headers: { authorization: "Bearer secret" }, url: "/" }),
+    true,
+  );
+  assert.equal(
+    isWebSocketAuthorized(config, { headers: { "x-api-key": "secret" }, url: "/" }),
+    true,
+  );
+  assert.equal(
+    isWebSocketAuthorized(config, { headers: {}, url: "/media-ingress?token=secret" }),
+    true,
+  );
+  assert.equal(isWebSocketAuthorized(config, { headers: {}, url: "/" }), false);
+});
+
+test("dial windows defer calls outside local campaign window", () => {
+  const { nextDialWindowAt } = require("../../apps/worker/dist/dial/dial-window");
+  const campaign = {
+    dialWindowStart: "09:30",
+    dialWindowEnd: "18:00",
+  };
+
+  assert.equal(nextDialWindowAt(campaign, new Date("2026-06-08T10:00:00+05:30")), null);
+  assert.equal(
+    nextDialWindowAt(campaign, new Date("2026-06-08T08:00:00+05:30")).toISOString(),
+    new Date("2026-06-08T09:30:00+05:30").toISOString(),
+  );
+  assert.equal(
+    nextDialWindowAt(campaign, new Date("2026-06-08T20:00:00+05:30")).toISOString(),
+    new Date("2026-06-09T09:30:00+05:30").toISOString(),
+  );
+});
+
+test("metrics endpoint exists and is protected by the global auth guard", () => {
+  assert.match(read("apps/api/src/app.module.ts"), /MetricsModule/);
+  assert.match(read("apps/api/src/metrics/metrics.controller.ts"), /@Controller\("metrics"\)/);
+  assert.doesNotMatch(read("apps/api/src/metrics/metrics.controller.ts"), /@Public/);
+  assert.match(read("apps/api/src/main.ts"), /pikorua_http_requests_total/);
+});
+
+test("provider staging smoke script is explicit opt-in for live calls", () => {
+  const script = read("tools/staging/provider-smoke.js");
+  assert.match(script, /RUN_LIVE_PROVIDER_SMOKE/);
+  assert.match(script, /Deepgram auth ok/);
+  assert.match(script, /ElevenLabs auth ok/);
 });

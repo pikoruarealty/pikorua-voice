@@ -214,10 +214,28 @@ export class WebhookService {
     mappedStatus: Call["status"] | undefined,
     payload: ExotelWebhookDto,
   ): string {
-    const sid = providerCallSid || "unknown";
+    const sid = providerCallSid || `payload:${this.payloadHash(payload)}`;
     const status = mappedStatus ?? "unknown";
     const digits = String(payload.Digits ?? "");
     return ["exotel", sid, eventType.toLowerCase(), status, digits].join(":");
+  }
+
+  private payloadHash(payload: ExotelWebhookDto): string {
+    return crypto.createHash("sha256").update(this.canonicalJson(payload)).digest("hex").slice(0, 32);
+  }
+
+  private canonicalJson(value: unknown): string {
+    if (Array.isArray(value)) {
+      return `[${value.map((item) => this.canonicalJson(item)).join(",")}]`;
+    }
+    if (value && typeof value === "object") {
+      const record = value as Record<string, unknown>;
+      return `{${Object.keys(record)
+        .sort()
+        .map((key) => `${JSON.stringify(key)}:${this.canonicalJson(record[key])}`)
+        .join(",")}}`;
+    }
+    return JSON.stringify(value);
   }
 
   private mapCallStatus(payload: ExotelWebhookDto): Call["status"] | undefined {

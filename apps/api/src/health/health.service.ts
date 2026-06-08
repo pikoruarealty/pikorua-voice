@@ -1,4 +1,4 @@
-import { Injectable, Inject, Logger } from "@nestjs/common";
+import { Injectable, Inject, Logger, OnModuleDestroy } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { Redis } from "ioredis";
 import type { Database } from "@pikorua/db";
@@ -6,13 +6,17 @@ import type { Database } from "@pikorua/db";
 type ProbeStatus = "ok" | { status: "error"; error: string };
 
 @Injectable()
-export class HealthService {
+export class HealthService implements OnModuleDestroy {
   private readonly logger = new Logger("HealthService");
+  private readonly redis: Redis;
 
   constructor(
     @Inject("DATABASE") private readonly db: Database,
     private readonly config: ConfigService,
-  ) {}
+  ) {
+    const redisUrl = String(this.config.get("REDIS_URL") ?? "");
+    this.redis = new Redis(redisUrl, { lazyConnect: true, maxRetriesPerRequest: 1 });
+  }
 
   async check() {
     const uptimeMs = process.uptime() * 1000;
@@ -38,12 +42,13 @@ export class HealthService {
   }
 
   private async checkRedis(): Promise<ProbeStatus> {
-    const redisUrl = String(this.config.get("REDIS_URL") ?? "");
-    const redis = new Redis(redisUrl, { lazyConnect: true, maxRetriesPerRequest: 1 });
-
     try {
-      await redis.connect();
-      await redis.ping();
+      if (this.redis.status === "end" || this.redis.status === "close") {
+        await this.redis.connect();
+      } else if (this.redis.status === "wait") {
+        await this.redis.connect();
+      }
+      await this.redis.ping();
       return "ok";
     } catch (err) {
       this.logger.error(
@@ -51,8 +56,10 @@ export class HealthService {
         err instanceof Error ? err.stack : String(err),
       );
       return { status: "error", error: String(err) };
-    } finally {
-      await redis.quit().catch(() => undefined);
     }
+  }
+
+  async onModuleDestroy() {
+    await this.redis.quit().catch(() => undefined);
   }
 }

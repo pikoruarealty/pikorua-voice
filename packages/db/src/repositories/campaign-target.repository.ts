@@ -20,6 +20,10 @@ export class CampaignTargetRepository {
   }
 
   async findPendingDials(limit: number): Promise<CampaignTarget[]> {
+    return this.findRepairableDials(limit);
+  }
+
+  async findRepairableDials(limit: number): Promise<CampaignTarget[]> {
     const now = new Date();
     return this.db
       .select({ target: campaignTargets })
@@ -28,7 +32,7 @@ export class CampaignTargetRepository {
       .where(
         and(
           eq(campaigns.status, "active"),
-          eq(campaignTargets.dialStatus, "pending"),
+          or(eq(campaignTargets.dialStatus, "pending"), eq(campaignTargets.dialStatus, "queued")),
           or(isNull(campaignTargets.nextAttemptAt), lte(campaignTargets.nextAttemptAt, now)),
         ),
       )

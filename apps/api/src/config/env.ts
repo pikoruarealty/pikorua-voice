@@ -16,11 +16,9 @@ const booleanFlag = z.preprocess((value) => {
 
 // ─── Environment schema ──────────────────────────────────────────────────────
 // All external input is untrusted and validated here. Core infrastructure
-// variables are required so the process fails fast on misconfiguration. Provider
-// credentials (Exotel, Deepgram, ElevenLabs, Anthropic, Google) and the CRM
-// integration are optional at this stage and tightened to required as their
-// build steps land — they are declared here so configuration stays centralized
-// and strongly typed.
+// variables are required so the process fails fast on misconfiguration. In
+// production, public-facing auth and active voice provider credentials are
+// required explicitly so the service never boots into a half-live state.
 
 export const envSchema = z
   .object({

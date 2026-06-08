@@ -35,7 +35,7 @@ export class DialRepairScheduler implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    const pending = await this.targetRepo.findPendingDials(100);
+    const pending = await this.targetRepo.findRepairableDials(100);
     for (const target of pending) {
       await this.queue.add("dial-target", { targetId: target.id }, { jobId: `dial:${target.id}` });
       await this.targetRepo.updateDialStatus(target.id, "queued");

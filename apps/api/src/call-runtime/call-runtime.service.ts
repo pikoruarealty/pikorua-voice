@@ -56,8 +56,7 @@ export class CallRuntimeService {
       throw new ServiceUnavailableException("Speech provider returned no transcript");
     }
 
-    // Build system prompt based on locale. Production would include richer
-    // system instructions, conversation history, guardrails and locale handling.
+    // Build the locale-specific system prompt for this turn.
     let systemPrompt = "Respond concisely as Pikorua's Concierge, ask one question.";
     if (locale.toLowerCase().startsWith("hi")) {
       systemPrompt = "आप पिको́रुआ के कंसियरज हैं। संक्षेप में उत्तर दें और एक प्रश्न पूछें।";

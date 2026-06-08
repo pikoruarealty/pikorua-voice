@@ -4,7 +4,10 @@ import { NestFactory } from "@nestjs/core";
 import { ConfigService } from "@nestjs/config";
 import { WsAdapter } from "@nestjs/platform-ws";
 import { SERVICE } from "@pikorua/shared";
+import type { NextFunction, Request, Response } from "express";
+import { randomUUID } from "crypto";
 import { AppModule } from "./app.module";
+import { MetricsService } from "./metrics/metrics.service";
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, { rawBody: true });
@@ -13,10 +16,23 @@ async function bootstrap() {
   app.useWebSocketAdapter(new WsAdapter(app));
 
   const config = app.get(ConfigService);
+  const metrics = app.get(MetricsService);
   const port = Number(config.get("API_PORT") ?? 4100);
   const nodeEnv = String(config.get("NODE_ENV") ?? "development");
 
   app.setGlobalPrefix("api");
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    const requestId = String(req.headers["x-request-id"] ?? randomUUID());
+    res.setHeader("x-request-id", requestId);
+    res.on("finish", () => {
+      metrics.increment("pikorua_http_requests_total", {
+        method: req.method,
+        route: req.path,
+        status: res.statusCode,
+      });
+    });
+    next();
+  });
   app.enableShutdownHooks();
   // Request-body validation uses Zod (Rule 8); a Zod validation pipe is added
   // alongside the first DTOs (campaign module / webhooks).

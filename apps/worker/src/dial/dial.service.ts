@@ -3,8 +3,9 @@ import { ConfigService } from "@nestjs/config";
 import { Queue, Worker, Job } from "bullmq";
 import { Redis } from "ioredis";
 import axios from "axios";
-import { CampaignTargetRepository, CallRepository } from "@pikorua/db";
+import { CampaignRepository, CampaignTargetRepository, CallRepository } from "@pikorua/db";
 import type { NewCall } from "@pikorua/db";
+import { nextDialWindowAt } from "./dial-window";
 
 @Injectable()
 export class DialService implements OnModuleDestroy {
@@ -16,6 +17,7 @@ export class DialService implements OnModuleDestroy {
 
   constructor(
     private readonly config: ConfigService,
+    private readonly campaignRepo: CampaignRepository,
     private readonly targetRepo: CampaignTargetRepository,
     private readonly callRepo: CallRepository,
   ) {
@@ -69,6 +71,22 @@ export class DialService implements OnModuleDestroy {
     }
     if (["do_not_call", "exhausted", "completed"].includes(target.dialStatus)) {
       this.logger.log(`Skipping target ${target.id}; dialStatus=${target.dialStatus}`);
+      return;
+    }
+
+    const campaign = await this.campaignRepo.findById(target.campaignId);
+    if (!campaign || campaign.status !== "active") {
+      await this.targetRepo.updateDialStatus(target.id, "pending");
+      this.logger.log(`Skipping target ${target.id}; campaign is not active`);
+      return;
+    }
+
+    const nextWindowAt = nextDialWindowAt(campaign, new Date());
+    if (nextWindowAt) {
+      await this.targetRepo.updateDialStatus(target.id, "pending", {
+        nextAttemptAt: nextWindowAt,
+      });
+      this.logger.log(`Deferring target ${target.id} until ${nextWindowAt.toISOString()}`);
       return;
     }
 
@@ -136,7 +154,7 @@ export class DialService implements OnModuleDestroy {
         );
       }
     } else {
-      this.logger.log("Exotel not configured; leaving call queued for manual testing");
+      this.logger.warn("Exotel not configured; leaving call queued without provider dispatch");
       await this.targetRepo.updateDialStatus(target.id, "queued");
     }
   }

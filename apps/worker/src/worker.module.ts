@@ -6,6 +6,7 @@ import { DatabaseModule } from "./database/database.module";
 import { DialService } from "./dial/dial.service";
 import { DialRepairScheduler } from "./dial/dial-repair.scheduler";
 import {
+  CampaignRepository,
   CampaignTargetRepository,
   CallRepository,
   LeadScoreRepository,
@@ -30,6 +31,11 @@ import { CrmRetryScheduler } from "./postcall/crm-retry.scheduler";
     DatabaseModule,
   ],
   providers: [
+    {
+      provide: CampaignRepository,
+      useFactory: (db: any) => new CampaignRepository(db),
+      inject: ["DATABASE"],
+    },
     {
       provide: CampaignTargetRepository,
       useFactory: (db: any) => new CampaignTargetRepository(db),

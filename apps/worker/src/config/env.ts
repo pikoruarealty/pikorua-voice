@@ -8,8 +8,8 @@ const optionalNonEmpty = z.preprocess(
 // ─── Worker environment schema ───────────────────────────────────────────────
 // The dial worker consumes the BullMQ queue (Redis), places outbound calls via
 // Exotel (Step 6), and writes call records to PostgreSQL + syncs the CRM
-// (Step 9). REDIS_URL is required so the process fails fast; the rest are
-// optional at this stage and tightened to required as their build steps land.
+// (Step 9). Core infrastructure is required so the process fails fast; live
+// provider credentials are required in production.
 
 export const workerEnvSchema = z
   .object({

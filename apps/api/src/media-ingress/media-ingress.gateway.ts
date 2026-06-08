@@ -1,4 +1,5 @@
 import { Injectable, Logger } from "@nestjs/common";
+import type { IncomingMessage } from "http";
 import {
   WebSocketGateway,
   WebSocketServer,
@@ -9,6 +10,7 @@ import { Server, WebSocket, RawData } from "ws";
 import { ConfigService } from "@nestjs/config";
 import { DeepgramRealtimeService } from "../stt/deepgram-realtime.service";
 import { CallRuntimeService } from "../call-runtime/call-runtime.service";
+import { closeUnauthorized, isWebSocketAuthorized } from "../auth/ws-auth";
 
 type MediaIngressState = {
   callId: string | null;
@@ -89,7 +91,12 @@ export class MediaIngressGateway implements OnGatewayConnection, OnGatewayDiscon
     return Buffer.from(data);
   }
 
-  handleConnection(client: WebSocket) {
+  handleConnection(client: WebSocket, request?: IncomingMessage) {
+    if (!isWebSocketAuthorized(this.config, request)) {
+      closeUnauthorized(client);
+      return;
+    }
+
     const defaultLanguage = String(this.config.get("GEMINI_LANGUAGE_DEFAULT") ?? "hi-IN");
     this.clients.set(client, { callId: null, language: defaultLanguage, turnIndex: 0, chunks: [] });
     this.logger.log("Media ingress client connected");

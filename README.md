@@ -46,9 +46,12 @@ Standalone outbound voice-concierge service for Pikorua Realty. It places campai
 
 - Public HTTP routes are mounted under `/api`; for example Exotel posts to `/api/webhooks/exotel`.
 - Internal HTTP routes require `Authorization: Bearer API_AUTH_TOKEN` or `x-api-key` when `API_AUTH_TOKEN` is configured; production requires it.
+- WebSocket endpoints (`/media-ingress`, `/realtime-stt`) use the same token model via `Authorization`, `x-api-key`, or `?token=...`.
 - Exotel outbound calls include `StatusCallback` pointing at `PUBLIC_BASE_URL/api/webhooks/exotel`.
 - Webhooks, CRM syncs, and dial jobs use deterministic idempotency keys.
+- Dialing windows are enforced by the worker before provider calls are created; outside-window targets are deferred.
 - Health returns HTTP 503 when PostgreSQL or Redis is unhealthy.
+- `/api/metrics` exposes process and HTTP request counters and is protected by API auth.
 - In production, provider secrets required for the active voice path are validated at boot.
 - Post-call scoring prefers caller transcript turns and falls back to the full transcript only for legacy data.
 
@@ -99,8 +102,10 @@ curl http://localhost:4100/api
 pnpm dev           # run all apps (turbo)
 pnpm build         # build all packages + apps
 pnpm type-check    # type-check the whole workspace
+pnpm test          # build + production hardening regression tests
 pnpm format        # prettier --write
 pnpm db:generate   # generate Drizzle migration SQL (from Step 3)
 pnpm db:migrate    # apply pending migrations
+pnpm staging:providers # validate provider credentials; set RUN_LIVE_PROVIDER_SMOKE=true for live auth checks
 pnpm db:studio     # open Drizzle Studio
 ```

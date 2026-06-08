@@ -6,6 +6,7 @@ import { DatabaseModule } from "./database/database.module";
 import { DialService } from "./dial/dial.service";
 import { CampaignTargetRepository, CallRepository, LeadScoreRepository, CrmSyncLogRepository, CallEventRepository, CallTurnRepository } from "@pikorua/db";
 import { PostCallProcessingService } from "./postcall/postcall.service";
+import { LeadScoreLlmService } from "./postcall/lead-score-llm.service";
 import { PostCallWorker } from "./postcall/postcall.worker";
 import { CrmRetryWorker } from "./postcall/crm-retry.worker";
 import { CrmRetryScheduler } from "./postcall/crm-retry.scheduler";
@@ -52,6 +53,7 @@ import { CrmRetryScheduler } from "./postcall/crm-retry.scheduler";
       inject: ["DATABASE"],
     },
     DialService,
+    LeadScoreLlmService,
     PostCallProcessingService,
     PostCallWorker,
     CrmRetryWorker,

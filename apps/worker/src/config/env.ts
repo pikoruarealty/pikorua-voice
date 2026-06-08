@@ -22,6 +22,14 @@ export const workerEnvSchema = z.object({
   // CRM integration (REST only — Step 9)
   CRM_API_BASE_URL: z.string().url().default("http://localhost:4000"),
   CRM_API_TOKEN: z.string().optional(),
+
+  // Optional LLM scoring configuration (falls back to heuristics if absent)
+  LLM_SCORING_PROVIDER: z.enum(["anthropic", "google", "auto"]).default("auto"),
+  LLM_SCORING_MODEL: z.string().optional(),
+  ANTHROPIC_API_KEY: z.string().optional(),
+  ANTHROPIC_MODEL: z.string().optional(),
+  GOOGLE_GENERATIVE_AI_API_KEY: z.string().optional(),
+  GOOGLE_MODEL: z.string().optional(),
 });
 
 export type WorkerEnv = z.infer<typeof workerEnvSchema>;

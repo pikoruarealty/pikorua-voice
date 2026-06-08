@@ -10,7 +10,7 @@ export class DeepgramRealtimeService {
 
   // Transcribes a buffer by opening a Deepgram realtime websocket, sending
   // audio in chunks, and waiting for a final transcript message or timeout.
-  async transcribeRealtime(buffer: Buffer, sampleRate = 16000, timeoutMs = 5000) {
+  async transcribeRealtime(buffer: Buffer, sampleRate = 16000, timeoutMs = 5000, language = "en-IN") {
     const started = Date.now();
     const apiKey = String(this.config.get("DEEPGRAM_API_KEY") ?? "");
     if (!apiKey) {
@@ -18,7 +18,7 @@ export class DeepgramRealtimeService {
       return { text: "", sttMs: 0 };
     }
 
-    const url = `wss://api.deepgram.com/v1/realtime?encoding=linear16&sample_rate=${sampleRate}&channels=1`;
+    const url = `wss://api.deepgram.com/v1/realtime?encoding=linear16&sample_rate=${sampleRate}&channels=1&language=${encodeURIComponent(language)}`;
     const ws = new WebSocket(url, {
       headers: {
         Authorization: `Bearer ${apiKey}`,

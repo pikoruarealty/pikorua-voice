@@ -8,6 +8,7 @@ import { HealthModule } from "./health/health.module";
 import { CampaignModule } from "./campaign/campaign.module";
 import { WebhookModule } from "./webhooks/webhook.module";
 import { CallRuntimeModule } from "./call-runtime/call-runtime.module";
+import { MediaIngressModule } from "./media-ingress/media-ingress.module";
 
 @Module({
   imports: [
@@ -22,6 +23,7 @@ import { CallRuntimeModule } from "./call-runtime/call-runtime.module";
     CampaignModule,
     WebhookModule,
     CallRuntimeModule,
+    MediaIngressModule,
   ],
   controllers: [AppController],
 })

@@ -50,14 +50,21 @@ export class DeepgramService {
     }
 
     try {
-      // Approximate bytes for chunkMs at 16kHz, 16-bit mono
+      // Probe a few small windows. If the smallest slice is empty, move up to
+      // slightly larger windows before falling back to the caller's size.
       const sampleRate = 16000;
       const bytesPerSample = 2; // 16-bit
-      const approxBytes = Math.max(1024, Math.floor((sampleRate * bytesPerSample * chunkMs) / 1000));
-      const firstSlice = buffer.slice(0, approxBytes);
+      const windows = Array.from(new Set([180, Math.max(220, Math.floor(chunkMs * 0.75)), chunkMs]));
 
-      // Quick partial transcription (awaited)
-      const partial = await this.transcribeBuffer(firstSlice, mime, language);
+      let partial = { text: "", sttMs: 0 };
+      for (const windowMs of windows) {
+        const approxBytes = Math.max(1024, Math.floor((sampleRate * bytesPerSample * windowMs) / 1000));
+        const slice = buffer.slice(0, approxBytes);
+        partial = await this.transcribeBuffer(slice, mime, language);
+        if (partial.text.trim()) {
+          break;
+        }
+      }
 
       // Fire-and-forget full transcription to warm caches / logs
       this.transcribeBuffer(buffer, mime, language)

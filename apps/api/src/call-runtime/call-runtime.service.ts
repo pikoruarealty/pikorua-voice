@@ -36,7 +36,7 @@ export class CallRuntimeService {
     const useLowLatency = String(this.config.get("STT_STREAMING_ENABLED") ?? "false") === "true";
     let sttResult: { text: string; sttMs?: number };
     if (useRealtime) {
-      sttResult = await this.sttRealtime.transcribeRealtime(audioBuffer).catch(async (err) => {
+      sttResult = await this.sttRealtime.transcribeRealtime(audioBuffer, 16000, 5000, locale).catch(async (err) => {
         this.logger.warn("Realtime STT failed, falling back to low-latency", err instanceof Error ? err.stack : String(err));
         return this.stt.transcribeLowLatency(audioBuffer, "audio/wav", 300, locale);
       });
@@ -110,7 +110,7 @@ export class CallRuntimeService {
       turnIndex,
       role: "assistant",
       content: reply,
-      locale: "en-IN",
+      locale,
       sttMs: sttMs ?? Math.max(0, Date.now() - sttStart),
       llmMs: llmMs ?? Math.max(0, Date.now() - llmStart),
       ttsMs: ttsMs ?? Math.max(0, Date.now() - ttsStart),

@@ -1,4 +1,4 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable, Logger, ServiceUnavailableException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import axios from "axios";
 
@@ -37,8 +37,7 @@ export class LlmService {
               timeout: 8000,
             },
           );
-          const text: string =
-            res.data?.content?.[0]?.text ?? res.data?.content?.[0]?.value ?? "";
+          const text: string = res.data?.content?.[0]?.text ?? res.data?.content?.[0]?.value ?? "";
           const ms = Date.now() - start;
           this.logger.log(`LLM(anthropic/${anthropicModel}) ${ms}ms`);
           return { text, llmMs: ms, model: anthropicModel, tokens: null };
@@ -48,7 +47,7 @@ export class LlmService {
             err instanceof Error ? err.stack : String(err),
           );
           if (provider === "anthropic") {
-            return { text: "", llmMs: Date.now() - start, model: anthropicModel, tokens: null };
+            throw new ServiceUnavailableException("Anthropic request failed");
           }
         }
       }
@@ -65,8 +64,7 @@ export class LlmService {
             { contents: [{ role: "user", parts: [{ text: prompt }] }] },
             { params: { key: googleKey }, timeout: 8000 },
           );
-          const text: string =
-            res.data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+          const text: string = res.data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
           const ms = Date.now() - start;
           this.logger.log(`LLM(google/${googleModel}) ${ms}ms`);
           return { text, llmMs: ms, model: googleModel, tokens: null };
@@ -76,13 +74,13 @@ export class LlmService {
             err instanceof Error ? err.stack : String(err),
           );
           if (provider === "google") {
-            return { text: "", llmMs: Date.now() - start, model: googleModel, tokens: null };
+            throw new ServiceUnavailableException("Google Gemini request failed");
           }
         }
       }
     }
 
     this.logger.error("No LLM provider available or configured");
-    return { text: "", llmMs: Date.now() - start, model: "none", tokens: null };
+    throw new ServiceUnavailableException("No LLM provider available or configured");
   }
 }

@@ -88,12 +88,7 @@ export const crmSyncType = pgEnum("crm_sync_type", [
   "update_status",
 ]);
 
-export const crmSyncStatus = pgEnum("crm_sync_status", [
-  "pending",
-  "success",
-  "failed",
-  "skipped",
-]);
+export const crmSyncStatus = pgEnum("crm_sync_status", ["pending", "success", "failed", "skipped"]);
 
 export const callEventType = pgEnum("call_event_type", [
   "escalation",
@@ -279,6 +274,7 @@ export const crmSyncLog = pgTable(
     callId: uuid("call_id").references(() => calls.id, { onDelete: "cascade" }),
     crmLeadId: varchar("crm_lead_id", { length: 120 }),
     syncType: crmSyncType("sync_type").notNull(),
+    idempotencyKey: varchar("idempotency_key", { length: 160 }),
     status: crmSyncStatus("status").notNull().default("pending"),
     httpStatus: integer("http_status"),
     attempts: smallint("attempts").notNull().default(0),
@@ -292,6 +288,7 @@ export const crmSyncLog = pgTable(
   (t) => [
     index("crm_sync_log_call_idx").on(t.callId),
     index("crm_sync_log_status_idx").on(t.status),
+    uniqueIndex("crm_sync_log_idempotency_key_uq").on(t.idempotencyKey),
   ],
 );
 
@@ -310,10 +307,7 @@ export const callEvents = pgTable(
     payload: jsonb("payload").$type<Record<string, unknown>>(),
     createdAt,
   },
-  (t) => [
-    index("call_events_call_idx").on(t.callId),
-    index("call_events_type_idx").on(t.type),
-  ],
+  (t) => [index("call_events_call_idx").on(t.callId), index("call_events_type_idx").on(t.type)],
 );
 
 // ─── webhook_events ──────────────────────────────────────────────────────────
@@ -325,6 +319,7 @@ export const webhookEvents = pgTable(
     id: uuid("id").primaryKey().defaultRandom(),
     provider: varchar("provider", { length: 40 }).notNull().default("exotel"),
     eventType: varchar("event_type", { length: 80 }),
+    eventKey: varchar("event_key", { length: 160 }),
     providerCallSid: varchar("provider_call_sid", { length: 120 }),
     callId: uuid("call_id").references(() => calls.id, { onDelete: "set null" }),
     signatureValid: boolean("signature_valid").notNull().default(false),
@@ -337,6 +332,7 @@ export const webhookEvents = pgTable(
   (t) => [
     index("webhook_events_sid_idx").on(t.providerCallSid),
     index("webhook_events_status_idx").on(t.status),
+    uniqueIndex("webhook_events_event_key_uq").on(t.eventKey),
   ],
 );
 

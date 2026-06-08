@@ -1,4 +1,4 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable, Logger, ServiceUnavailableException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { Deepgram } from "@deepgram/sdk";
 
@@ -20,7 +20,7 @@ export class DeepgramService {
   async transcribeBuffer(buffer: Buffer, mime = "audio/wav", language = "en-IN") {
     const started = Date.now();
     if (!this.client) {
-      return { text: "", sttMs: Date.now() - started };
+      throw new ServiceUnavailableException("Deepgram API key is not configured");
     }
     try {
       const resp = await this.client.transcription.preRecorded(
@@ -33,7 +33,7 @@ export class DeepgramService {
       return { text, sttMs: ms };
     } catch (err) {
       this.logger.error("STT failed", err instanceof Error ? err.stack : String(err));
-      return { text: "", sttMs: Date.now() - started };
+      throw new ServiceUnavailableException("Deepgram transcription failed");
     }
   }
 
@@ -42,11 +42,16 @@ export class DeepgramService {
   // starting a background full transcription. This is an approximation that
   // avoids a full realtime websocket implementation but gives faster first
   // words for interactive voice flows.
-  async transcribeLowLatency(buffer: Buffer, mime = "audio/wav", chunkMs = 300, language = "en-IN") {
+  async transcribeLowLatency(
+    buffer: Buffer,
+    mime = "audio/wav",
+    chunkMs = 300,
+    language = "en-IN",
+  ) {
     const started = Date.now();
 
     if (!this.client) {
-      return { text: "", sttMs: Date.now() - started };
+      throw new ServiceUnavailableException("Deepgram API key is not configured");
     }
 
     try {
@@ -54,11 +59,16 @@ export class DeepgramService {
       // slightly larger windows before falling back to the caller's size.
       const sampleRate = 16000;
       const bytesPerSample = 2; // 16-bit
-      const windows = Array.from(new Set([180, Math.max(220, Math.floor(chunkMs * 0.75)), chunkMs]));
+      const windows = Array.from(
+        new Set([180, Math.max(220, Math.floor(chunkMs * 0.75)), chunkMs]),
+      );
 
       let partial = { text: "", sttMs: 0 };
       for (const windowMs of windows) {
-        const approxBytes = Math.max(1024, Math.floor((sampleRate * bytesPerSample * windowMs) / 1000));
+        const approxBytes = Math.max(
+          1024,
+          Math.floor((sampleRate * bytesPerSample * windowMs) / 1000),
+        );
         const slice = buffer.slice(0, approxBytes);
         partial = await this.transcribeBuffer(slice, mime, language);
         if (partial.text.trim()) {
@@ -69,12 +79,17 @@ export class DeepgramService {
       // Fire-and-forget full transcription to warm caches / logs
       this.transcribeBuffer(buffer, mime, language)
         .then((full) => this.logger.log(`Background full STT completed (${full.sttMs}ms)`))
-        .catch((err) => this.logger.warn("Background full STT failed", err instanceof Error ? err.stack : String(err)));
+        .catch((err) =>
+          this.logger.warn(
+            "Background full STT failed",
+            err instanceof Error ? err.stack : String(err),
+          ),
+        );
 
       return { text: partial.text, sttMs: Date.now() - started };
     } catch (err) {
       this.logger.error("Low-latency STT failed", err instanceof Error ? err.stack : String(err));
-      return { text: "", sttMs: Date.now() - started };
+      throw new ServiceUnavailableException("Deepgram low-latency transcription failed");
     }
   }
 }

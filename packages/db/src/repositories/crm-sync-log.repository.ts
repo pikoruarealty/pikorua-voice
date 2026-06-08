@@ -19,6 +19,12 @@ export class CrmSyncLogRepository {
     });
   }
 
+  async findByIdempotencyKey(idempotencyKey: string): Promise<CrmSyncLogEntry | undefined> {
+    return this.db.query.crmSyncLog.findFirst({
+      where: eq(crmSyncLog.idempotencyKey, idempotencyKey),
+    });
+  }
+
   async findPending(limit: number): Promise<CrmSyncLogEntry[]> {
     return this.db.query.crmSyncLog.findMany({
       where: eq(crmSyncLog.status, "pending"),
@@ -42,6 +48,24 @@ export class CrmSyncLogRepository {
     const [row] = await this.db.insert(crmSyncLog).values(data).returning();
     if (!row) throw new Error("Insert returned no rows");
     return row;
+  }
+
+  async createOrGetByIdempotencyKey(data: NewCrmSyncLogEntry): Promise<CrmSyncLogEntry> {
+    if (!data.idempotencyKey) {
+      return this.create(data);
+    }
+
+    const existing = await this.findByIdempotencyKey(data.idempotencyKey);
+    if (existing) {
+      return existing;
+    }
+
+    const [row] = await this.db
+      .insert(crmSyncLog)
+      .values(data)
+      .onConflictDoNothing({ target: crmSyncLog.idempotencyKey })
+      .returning();
+    return row ?? (await this.findByIdempotencyKey(data.idempotencyKey))!;
   }
 
   async updateStatus(

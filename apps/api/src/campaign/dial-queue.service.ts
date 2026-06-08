@@ -30,6 +30,7 @@ export class DialQueueService implements OnModuleDestroy {
       "dial-target",
       { targetId },
       {
+        jobId: `dial:${targetId}`,
         attempts: 3,
         backoff: { type: "exponential", delay: 30000 },
         removeOnComplete: true,

@@ -3,8 +3,9 @@
 WebSocket endpoint: `/media-ingress`
 
 Messages
-- `{"type":"start","callId":"...","language":"hi-IN"}` begins buffering for a call.
-- `{"type":"media","payload":"<base64 audio>"}` appends an audio frame.
-- `{"type":"stop"}` transcribes the buffered audio and returns `{"type":"transcript", ...}`.
 
-This gateway is intentionally lightweight and reuses the existing Deepgram realtime helper so the API can accept provider-style media frames without a separate media server.
+- `{"type":"start","callId":"...","language":"hi-IN","turnIndex":0}` begins buffering for a call.
+- `{"type":"media","payload":"<base64 audio>"}` appends an audio frame.
+- `{"type":"stop"}` processes the buffered audio.
+
+When `callId` is present, `stop` runs the same STT → LLM → TTS runtime path as the HTTP turn endpoint and returns `{"type":"response","transcript":"...","reply":"...","audioBase64":"..."}`. Without a `callId`, it falls back to transcript-only mode and returns `{"type":"transcript", ...}`.

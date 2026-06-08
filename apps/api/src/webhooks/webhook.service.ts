@@ -7,7 +7,7 @@ import {
   CallEventRepository,
   CampaignTargetRepository,
 } from "@pikorua/db";
-import type { WebhookEvent } from "@pikorua/db";
+import type { Call, CampaignTarget, NewCallEvent, WebhookEvent } from "@pikorua/db";
 import { PostCallQueueService } from "../postcall/postcall.queue";
 import { IvrService } from "../ivr/ivr.service";
 import type { ExotelWebhookDto } from "./exotel.dto";
@@ -54,24 +54,55 @@ export class WebhookService {
     }
 
     const providerCallSid = String(payload.CallSid ?? payload.Sid ?? "");
-    const eventType = String(payload.Event ?? payload.CallStatus ?? "unknown");
+    const eventType = String(payload.Event ?? payload.EventType ?? payload.CallStatus ?? "unknown");
+    const mappedStatus = this.mapCallStatus(payload);
+    const eventKey = this.buildEventKey(providerCallSid, eventType, mappedStatus, payload);
 
-    // Idempotency: skip duplicate events with identical raw payload
-    try {
-      const existing = providerCallSid
-        ? await this.webhookRepo.findByProviderCallSid(providerCallSid)
-        : [];
-      const payloadJson = JSON.stringify(payload);
-      const already = existing.find((e) => JSON.stringify(e.rawPayload) === payloadJson);
-      if (already) {
-        this.logger.log(`Duplicate webhook for sid=${providerCallSid}; ignoring`);
+    if (eventKey) {
+      try {
+        const existing = await this.webhookRepo.findByEventKey(eventKey);
+        if (existing) {
+          this.logger.log(`Duplicate webhook event=${eventKey}; ignoring`);
+          return { status: "ignored" } as const;
+        }
+      } catch (err) {
+        this.logger.warn(
+          "Failed to check existing webhook event key",
+          err instanceof Error ? err.stack : String(err),
+        );
+      }
+    }
+
+    let call: Call | undefined;
+    if (providerCallSid) {
+      try {
+        call = await this.callRepo.findByProviderCallSid(providerCallSid);
+        if (mappedStatus === "completed" && call) {
+          const alreadyQueued = await this.webhookRepo.findByEventKey(
+            this.buildEventKey(providerCallSid, eventType, mappedStatus, payload),
+          );
+          if (alreadyQueued) {
+            this.logger.log(`Completed webhook already processed for sid=${providerCallSid}`);
+            return { status: "ignored" } as const;
+          }
+        }
+      } catch (err) {
+        this.logger.warn(
+          "Failed to pre-correlate webhook to call",
+          err instanceof Error ? err.stack : String(err),
+        );
+      }
+    }
+
+    if (mappedStatus === "completed" && call?.status === "completed") {
+      const existingCompleted = providerCallSid
+        ? await this.webhookRepo.findByEventKey(
+            this.buildEventKey(providerCallSid, eventType, mappedStatus, payload),
+          )
+        : undefined;
+      if (existingCompleted) {
         return { status: "ignored" } as const;
       }
-    } catch (err) {
-      this.logger.warn(
-        "Failed to check existing webhooks",
-        err instanceof Error ? err.stack : String(err),
-      );
     }
 
     // Persist webhook event (Rule 10: inbound webhook received)
@@ -80,7 +111,9 @@ export class WebhookService {
       eventRow = await this.webhookRepo.create({
         provider: "exotel",
         eventType,
+        eventKey,
         providerCallSid: providerCallSid || null,
+        callId: call?.id ?? null,
         rawPayload: payload as unknown as Record<string, unknown>,
         signatureValid: !!signatureValid,
       });
@@ -98,51 +131,26 @@ export class WebhookService {
     // Correlate to a call row and update its status
     if (providerCallSid) {
       try {
-        const call = await this.callRepo.findByProviderCallSid(providerCallSid);
+        call = call ?? (await this.callRepo.findByProviderCallSid(providerCallSid));
         if (call) {
-          const statusMap: Record<string, string> = {
-            ringing: "ringing",
-            answered: "in_progress",
-            in_progress: "in_progress",
-            initiated: "initiated",
-            completed: "completed",
-            "no-answer": "no_answer",
-            no_answer: "no_answer",
-            busy: "busy",
-            failed: "failed",
-          };
-          const mappedStatus =
-            statusMap[
-              String(
-                payload.CallStatus ?? payload.Status ?? payload.Event ?? payload.EventType ?? "",
-              ).toLowerCase()
-            ];
-
           if (mappedStatus) {
+            const status = mappedStatus;
             const terminal = ["completed", "no_answer", "busy", "failed", "canceled"].includes(
-              mappedStatus,
+              status,
             );
             const duration = Number(payload.ConversationDuration ?? NaN);
             await this.callRepo.updateByProviderCallSid(providerCallSid, {
-              status: mappedStatus as any,
+              status,
               endedAt: terminal ? new Date() : undefined,
-              answeredAt: mappedStatus === "in_progress" ? new Date() : undefined,
+              answeredAt: status === "in_progress" ? new Date() : undefined,
               recordingUrl: payload.RecordingUrl,
               durationSeconds: Number.isFinite(duration) ? duration : undefined,
               hangupCause: payload.HangupCause,
             });
             if (call.targetId && terminal) {
-              const targetStatus =
-                mappedStatus === "completed"
-                  ? "completed"
-                  : mappedStatus === "no_answer"
-                    ? "no_answer"
-                    : mappedStatus === "busy"
-                      ? "busy"
-                      : "failed";
-              await this.targetRepo.updateDialStatus(call.targetId, targetStatus as any);
+              await this.targetRepo.updateDialStatus(call.targetId, this.mapTargetStatus(status));
             }
-            if (mappedStatus === "completed") {
+            if (status === "completed") {
               try {
                 await this.postcallQueue.enqueue(call.id);
               } catch (queueErr) {
@@ -159,15 +167,16 @@ export class WebhookService {
             const digits = String(payload.Digits ?? "");
             if (digits) {
               const ivrResult = this.ivr.mapDigitToLocale(digits);
-              await this.callRepo.update(call.id, { locale: ivrResult.locale as any });
-              await this.eventRepo.create({
+              await this.callRepo.update(call.id, { locale: ivrResult.locale });
+              const event: NewCallEvent = {
                 callId: call.id,
                 campaignId: call.campaignId ?? null,
                 type: "escalation",
                 severity: "info",
                 message: `IVR selection: ${digits} -> ${ivrResult.locale}`,
                 payload: { digits, mapped: ivrResult },
-              } as any);
+              };
+              await this.eventRepo.create(event);
             }
           } catch (ivrErr) {
             this.logger.warn(
@@ -197,5 +206,43 @@ export class WebhookService {
     }
 
     return { status: "processed" } as const;
+  }
+
+  buildEventKey(
+    providerCallSid: string,
+    eventType: string,
+    mappedStatus: Call["status"] | undefined,
+    payload: ExotelWebhookDto,
+  ): string {
+    const sid = providerCallSid || "unknown";
+    const status = mappedStatus ?? "unknown";
+    const digits = String(payload.Digits ?? "");
+    return ["exotel", sid, eventType.toLowerCase(), status, digits].join(":");
+  }
+
+  private mapCallStatus(payload: ExotelWebhookDto): Call["status"] | undefined {
+    const statusMap: Record<string, Call["status"]> = {
+      ringing: "ringing",
+      answered: "in_progress",
+      in_progress: "in_progress",
+      initiated: "initiated",
+      completed: "completed",
+      "no-answer": "no_answer",
+      no_answer: "no_answer",
+      busy: "busy",
+      failed: "failed",
+    };
+
+    const raw = String(
+      payload.CallStatus ?? payload.Status ?? payload.Event ?? payload.EventType ?? "",
+    ).toLowerCase();
+    return statusMap[raw];
+  }
+
+  private mapTargetStatus(mappedStatus: Call["status"]): CampaignTarget["dialStatus"] {
+    if (mappedStatus === "completed") return "completed";
+    if (mappedStatus === "no_answer") return "no_answer";
+    if (mappedStatus === "busy") return "busy";
+    return "failed";
   }
 }

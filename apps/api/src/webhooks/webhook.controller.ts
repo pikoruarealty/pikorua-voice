@@ -1,9 +1,11 @@
 import { BadRequestException, Body, Controller, Headers, Logger, Post, Req } from "@nestjs/common";
 import { Request } from "express";
+import { Public } from "../auth/public.decorator";
 import { exotelWebhookSchema } from "./exotel.dto";
 import { WebhookService } from "./webhook.service";
 
 @Controller("webhooks")
+@Public()
 export class WebhookController {
   private readonly logger = new Logger("WebhookController");
 

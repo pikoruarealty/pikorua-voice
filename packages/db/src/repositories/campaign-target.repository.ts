@@ -1,9 +1,9 @@
 import { and, eq, isNull, lte, or } from "drizzle-orm";
 import type { Database } from "../client";
-import { campaignTargets } from "../schema";
+import { campaigns, campaignTargets } from "../schema";
 import type { CampaignTarget, NewCampaignTarget } from "../schema";
 
-type DialStatus = typeof campaignTargets.dialStatus.enumValues[number];
+type DialStatus = (typeof campaignTargets.dialStatus.enumValues)[number];
 
 export class CampaignTargetRepository {
   constructor(private readonly db: Database) {}
@@ -21,14 +21,20 @@ export class CampaignTargetRepository {
 
   async findPendingDials(limit: number): Promise<CampaignTarget[]> {
     const now = new Date();
-    return this.db.query.campaignTargets.findMany({
-      where: and(
-        eq(campaignTargets.dialStatus, "pending"),
-        or(isNull(campaignTargets.nextAttemptAt), lte(campaignTargets.nextAttemptAt, now)),
-      ),
-      limit,
-      orderBy: (t, { asc }) => [asc(t.nextAttemptAt)],
-    });
+    return this.db
+      .select({ target: campaignTargets })
+      .from(campaignTargets)
+      .innerJoin(campaigns, eq(campaignTargets.campaignId, campaigns.id))
+      .where(
+        and(
+          eq(campaigns.status, "active"),
+          eq(campaignTargets.dialStatus, "pending"),
+          or(isNull(campaignTargets.nextAttemptAt), lte(campaignTargets.nextAttemptAt, now)),
+        ),
+      )
+      .orderBy(campaignTargets.nextAttemptAt)
+      .limit(limit)
+      .then((rows) => rows.map((row) => row.target));
   }
 
   async create(data: NewCampaignTarget): Promise<CampaignTarget> {
@@ -39,11 +45,7 @@ export class CampaignTargetRepository {
 
   async createMany(data: NewCampaignTarget[]): Promise<CampaignTarget[]> {
     if (data.length === 0) return [];
-    return this.db
-      .insert(campaignTargets)
-      .values(data)
-      .onConflictDoNothing()
-      .returning();
+    return this.db.insert(campaignTargets).values(data).onConflictDoNothing().returning();
   }
 
   async updateDialStatus(
@@ -59,10 +61,7 @@ export class CampaignTargetRepository {
     return row;
   }
 
-  async incrementAttempts(
-    id: string,
-    nextAttemptAt?: Date,
-  ): Promise<CampaignTarget | undefined> {
+  async incrementAttempts(id: string, nextAttemptAt?: Date): Promise<CampaignTarget | undefined> {
     const current = await this.findById(id);
     if (!current) return undefined;
     const attempts = (current.attempts ?? 0) + 1;

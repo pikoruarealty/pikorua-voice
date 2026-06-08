@@ -1,9 +1,6 @@
 # Pikorua Voice
 
-Standalone outbound voice-concierge service for Pikorua Realty. It places
-campaign calls over Exotel, runs a live Speech-to-Text → LLM → Text-to-Speech
-conversation loop, scores each lead, and syncs results back to the Pikorua CRM
-over REST.
+Standalone outbound voice-concierge service for Pikorua Realty. It places campaign calls over Exotel, runs a Deepgram → LLM → ElevenLabs conversation loop, scores each lead, and syncs results back to the Pikorua CRM over REST.
 
 > **Standalone repository.** This service owns its PostgreSQL database and Redis
 > instance and never touches the CRM database directly — all CRM communication
@@ -28,10 +25,11 @@ over REST.
 ## Language & Routing
 
 - Primary language mix: Hindi primary (~60%), English (~25%), Gujarati (~15%).
-- Voice pipeline split:
-  - English calls route to the Vapi.ai path (Deepgram + Cartesia + Claude) — configured to handle ~25% of total calls.
-  - Hindi + Gujarati calls route to the Gemini Live path (Google Generative AI) — ~75% of total calls.
-- IVR mapping (new): Press 1 = English (Vapi path), Press 2 = Hindi (Gemini), Press 3 = Gujarati (Gemini). Default (no press) = Hindi.
+- Current implemented voice stack:
+  - STT: Deepgram buffered or realtime helper.
+  - LLM: Anthropic first when configured, Google Generative AI fallback.
+  - TTS: ElevenLabs.
+- IVR mapping: Press 1 = English, Press 2 = Hindi, Press 3 = Gujarati. Default/no press = Hindi.
 
 ## Call volume assumptions & billing
 
@@ -42,12 +40,15 @@ over REST.
 ## Config / ENV additions
 
 - `GEMINI_LANGUAGE_DEFAULT` — default language sent to Gemini when call locale absent (default `hi-IN`).
-- `VAPI_PERCENT` — percentage (0-100) of English calls routed to the Vapi.ai path (default 25).
+- `ENGLISH_ANTHROPIC_PERCENT` — percentage (0-100) of English turns routed to Anthropic before falling back to Google.
 
 ## Production notes
 
 - Public HTTP routes are mounted under `/api`; for example Exotel posts to `/api/webhooks/exotel`.
+- Internal HTTP routes require `Authorization: Bearer API_AUTH_TOKEN` or `x-api-key` when `API_AUTH_TOKEN` is configured; production requires it.
 - Exotel outbound calls include `StatusCallback` pointing at `PUBLIC_BASE_URL/api/webhooks/exotel`.
+- Webhooks, CRM syncs, and dial jobs use deterministic idempotency keys.
+- Health returns HTTP 503 when PostgreSQL or Redis is unhealthy.
 - In production, provider secrets required for the active voice path are validated at boot.
 - Post-call scoring prefers caller transcript turns and falls back to the full transcript only for legacy data.
 

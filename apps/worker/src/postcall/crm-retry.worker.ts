@@ -3,6 +3,7 @@ import { ConfigService } from "@nestjs/config";
 import { Worker, Job } from "bullmq";
 import { Redis } from "ioredis";
 import { CrmSyncLogRepository } from "@pikorua/db";
+import type { NewCrmSyncLogEntry } from "@pikorua/db";
 import axios, { type AxiosError } from "axios";
 
 @Injectable()
@@ -41,21 +42,25 @@ export class CrmRetryWorker implements OnModuleDestroy {
             const crmBase = String(this.config.get("CRM_API_BASE_URL") ?? "");
             const crmToken = String(this.config.get("CRM_API_TOKEN") ?? "");
             if (!crmBase) {
-              await this.crmLogRepo.updateStatus(entry.id, "skipped", {
+              const patch: Partial<NewCrmSyncLogEntry> = {
                 responsePayload: { reason: "CRM not configured" },
-              } as any);
+              };
+              await this.crmLogRepo.updateStatus(entry.id, "skipped", patch);
               continue;
             }
             const url = `${crmBase.replace(/\/$/, "")}/leads`;
             const resp = await axios.post(url, entry.requestPayload, {
-              headers: crmToken ? { Authorization: `Bearer ${crmToken}` } : undefined,
+              headers: {
+                ...(crmToken ? { Authorization: `Bearer ${crmToken}` } : {}),
+                ...(entry.idempotencyKey ? { "Idempotency-Key": entry.idempotencyKey } : {}),
+              },
               timeout: 5000,
             });
             await this.crmLogRepo.updateStatus(entry.id, "success", {
               httpStatus: resp.status,
-              responsePayload: resp.data,
+              responsePayload: this.toRecord(resp.data),
               attempts: (entry.attempts ?? 0) + 1,
-            } as any);
+            });
           } catch (err) {
             this.logger.warn(
               "Retry failed for crm sync",
@@ -66,10 +71,10 @@ export class CrmRetryWorker implements OnModuleDestroy {
             const data = axiosErr?.response?.data ?? { message: String(err) };
             await this.crmLogRepo.updateStatus(entry.id, "failed", {
               httpStatus: status,
-              responsePayload: data,
+              responsePayload: this.toRecord(data),
               attempts: (entry.attempts ?? 0) + 1,
               error: String(err),
-            } as any);
+            });
           }
         }
       },
@@ -86,5 +91,12 @@ export class CrmRetryWorker implements OnModuleDestroy {
   async onModuleDestroy() {
     await this.worker?.close().catch(() => undefined);
     await this.redis?.quit().catch(() => undefined);
+  }
+
+  private toRecord(value: unknown): Record<string, unknown> {
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      return value as Record<string, unknown>;
+    }
+    return { value };
   }
 }

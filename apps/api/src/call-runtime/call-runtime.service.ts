@@ -1,4 +1,4 @@
-import { Injectable, Inject, Logger } from "@nestjs/common";
+import { Injectable, Inject, Logger, ServiceUnavailableException } from "@nestjs/common";
 import { DeepgramService } from "../stt/deepgram.service";
 import { DeepgramRealtimeService } from "../stt/deepgram-realtime.service";
 import { LlmService } from "../llm/llm.service";
@@ -51,6 +51,10 @@ export class CallRuntimeService {
       sttResult = await this.stt.transcribeBuffer(audioBuffer, "audio/wav", locale);
     }
     const { text, sttMs } = sttResult;
+    if (!text.trim()) {
+      await this.failCall(callId, "STT returned no transcript");
+      throw new ServiceUnavailableException("Speech provider returned no transcript");
+    }
 
     // Build system prompt based on locale. Production would include richer
     // system instructions, conversation history, guardrails and locale handling.
@@ -65,19 +69,16 @@ export class CallRuntimeService {
 
     const prompt = `${systemPrompt}\nCaller said: ${text}`;
 
-    // Decide LLM provider based on call locale and VAPI percent / IVR mapping
+    // Decide LLM provider based on call locale and rollout percentage.
     const llmStart = Date.now();
     let provider: "anthropic" | "google" | "auto" = "auto";
     try {
-      const vapiPercent = Number(this.config.get("VAPI_PERCENT") ?? 25);
-      // If locale is English, allow Vapi path for configured percent, else use Gemini (google)
+      const anthropicPercent = Number(this.config.get("ENGLISH_ANTHROPIC_PERCENT") ?? 25);
       if (locale.toLowerCase().startsWith("en")) {
         const roll = Math.random() * 100;
-        if (roll < vapiPercent)
-          provider = "anthropic"; // Vapi path (anthropic/claude)
-        else provider = "google"; // Gemini
+        if (roll < anthropicPercent) provider = "anthropic";
+        else provider = "google";
       } else {
-        // Hindi or Gujarati -> Gemini
         provider = "google";
       }
     } catch {
@@ -85,6 +86,10 @@ export class CallRuntimeService {
     }
 
     const { text: rawLlmText, llmMs, model } = await this.llm.generate(prompt, { provider });
+    if (!String(rawLlmText ?? "").trim()) {
+      await this.failCall(callId, "LLM returned no reply");
+      throw new ServiceUnavailableException("LLM provider returned no reply");
+    }
 
     // Try to parse structured JSON output from the LLM; if it matches our
     // schema use the `reply` field, otherwise treat the raw text as the reply.
@@ -109,6 +114,10 @@ export class CallRuntimeService {
 
     const ttsStart = Date.now();
     const { audio, ttsMs } = await this.tts.synthesize(reply);
+    if (audio.length === 0) {
+      await this.failCall(callId, "TTS returned empty audio");
+      throw new ServiceUnavailableException("TTS provider returned empty audio");
+    }
 
     const callerTurn: NewCallTurn = {
       callId,
@@ -138,8 +147,6 @@ export class CallRuntimeService {
       ttsMs: ttsMs ?? Math.max(0, Date.now() - ttsStart),
       totalMs,
       llmModel: model ?? "",
-      promptTokens: null as any,
-      completionTokens: null as any,
       guardrailTriggered,
       guardrailRule,
       fallbackUsed: guardrailTriggered,
@@ -158,6 +165,17 @@ export class CallRuntimeService {
     this.logger.log(
       `Handled turn ${turnIndex} for call ${callId} — stt ${sttMs}ms llm ${llmMs}ms tts ${ttsMs}ms`,
     );
-    return { audio };
+    return { audio, transcript: text, reply };
+  }
+
+  private async failCall(callId: string, reason: string) {
+    try {
+      await this.callRepo.update(callId, { status: "failed", error: reason });
+    } catch (err) {
+      this.logger.warn(
+        `Failed to mark call ${callId} failed`,
+        err instanceof Error ? err.stack : String(err),
+      );
+    }
   }
 }

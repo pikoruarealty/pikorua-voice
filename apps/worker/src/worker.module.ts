@@ -4,7 +4,15 @@ import { resolve } from "path";
 import { validateWorkerEnv } from "./config/env";
 import { DatabaseModule } from "./database/database.module";
 import { DialService } from "./dial/dial.service";
-import { CampaignTargetRepository, CallRepository, LeadScoreRepository, CrmSyncLogRepository, CallEventRepository, CallTurnRepository } from "@pikorua/db";
+import { DialRepairScheduler } from "./dial/dial-repair.scheduler";
+import {
+  CampaignTargetRepository,
+  CallRepository,
+  LeadScoreRepository,
+  CrmSyncLogRepository,
+  CallEventRepository,
+  CallTurnRepository,
+} from "@pikorua/db";
 import { PostCallProcessingService } from "./postcall/postcall.service";
 import { LeadScoreLlmService } from "./postcall/lead-score-llm.service";
 import { PostCallWorker } from "./postcall/postcall.worker";
@@ -53,6 +61,7 @@ import { CrmRetryScheduler } from "./postcall/crm-retry.scheduler";
       inject: ["DATABASE"],
     },
     DialService,
+    DialRepairScheduler,
     LeadScoreLlmService,
     PostCallProcessingService,
     PostCallWorker,

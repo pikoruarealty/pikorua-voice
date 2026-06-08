@@ -1,7 +1,9 @@
 import { Module } from "@nestjs/common";
 import { ConfigModule } from "@nestjs/config";
+import { APP_GUARD } from "@nestjs/core";
 import { resolve } from "path";
 import { AppController } from "./app.controller";
+import { ApiAuthGuard } from "./auth/api-auth.guard";
 import { validateEnv } from "./config/env";
 import { DatabaseModule } from "./database/database.module";
 import { HealthModule } from "./health/health.module";
@@ -26,5 +28,6 @@ import { MediaIngressModule } from "./media-ingress/media-ingress.module";
     MediaIngressModule,
   ],
   controllers: [AppController],
+  providers: [{ provide: APP_GUARD, useClass: ApiAuthGuard }],
 })
 export class AppModule {}

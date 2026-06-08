@@ -189,6 +189,7 @@ CREATE TABLE IF NOT EXISTS crm_sync_log (
   call_id uuid REFERENCES calls(id) ON DELETE CASCADE,
   crm_lead_id varchar(120),
   sync_type crm_sync_type NOT NULL,
+  idempotency_key varchar(160),
   status crm_sync_status NOT NULL DEFAULT 'pending',
   http_status integer,
   attempts smallint NOT NULL DEFAULT 0,
@@ -201,6 +202,7 @@ CREATE TABLE IF NOT EXISTS crm_sync_log (
 );
 CREATE INDEX IF NOT EXISTS crm_sync_log_call_idx ON crm_sync_log(call_id);
 CREATE INDEX IF NOT EXISTS crm_sync_log_status_idx ON crm_sync_log(status);
+CREATE UNIQUE INDEX IF NOT EXISTS crm_sync_log_idempotency_key_uq ON crm_sync_log(idempotency_key);
 DROP TRIGGER IF EXISTS crm_sync_log_updated_at ON crm_sync_log;
 CREATE TRIGGER crm_sync_log_updated_at BEFORE UPDATE ON crm_sync_log FOR EACH ROW EXECUTE FUNCTION pikorua_set_updated_at();
 
@@ -223,6 +225,7 @@ CREATE TABLE IF NOT EXISTS webhook_events (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   provider varchar(40) NOT NULL DEFAULT 'exotel',
   event_type varchar(80),
+  event_key varchar(160),
   provider_call_sid varchar(120),
   call_id uuid REFERENCES calls(id) ON DELETE SET NULL,
   signature_valid boolean NOT NULL DEFAULT false,
@@ -234,5 +237,6 @@ CREATE TABLE IF NOT EXISTS webhook_events (
 );
 CREATE INDEX IF NOT EXISTS webhook_events_sid_idx ON webhook_events(provider_call_sid);
 CREATE INDEX IF NOT EXISTS webhook_events_status_idx ON webhook_events(status);
+CREATE UNIQUE INDEX IF NOT EXISTS webhook_events_event_key_uq ON webhook_events(event_key);
 
 -- Done

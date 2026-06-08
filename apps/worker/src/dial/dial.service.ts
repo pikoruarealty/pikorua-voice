@@ -52,7 +52,7 @@ export class DialService implements OnModuleDestroy {
 
   async enqueue(targetId: string) {
     if (!this.queue) throw new Error("Queue not initialized");
-    await this.queue.add("dial-target", { targetId });
+    await this.queue.add("dial-target", { targetId }, { jobId: `dial:${targetId}` });
   }
 
   private async processJob(data: Record<string, unknown>) {

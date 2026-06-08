@@ -26,6 +26,7 @@ export const envSchema = z
   .object({
     NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
     API_PORT: z.coerce.number().int().positive().default(4100),
+    API_AUTH_TOKEN: optionalNonEmpty,
 
     DATABASE_URL: z.string().url(),
     REDIS_URL: z.string().url(),
@@ -41,7 +42,7 @@ export const envSchema = z
 
     // Voice routing
     GEMINI_LANGUAGE_DEFAULT: z.string().max(16).default("hi-IN"),
-    VAPI_PERCENT: z.coerce.number().min(0).max(100).default(25),
+    ENGLISH_ANTHROPIC_PERCENT: z.coerce.number().min(0).max(100).default(25),
     STT_REALTIME_ENABLED: booleanFlag.default(false),
     STT_STREAMING_ENABLED: booleanFlag.default(false),
 
@@ -70,6 +71,7 @@ export const envSchema = z
     }
 
     const required: Array<keyof typeof env> = [
+      "API_AUTH_TOKEN",
       "EXOTEL_WEBHOOK_SECRET",
       "DEEPGRAM_API_KEY",
       "ELEVENLABS_API_KEY",

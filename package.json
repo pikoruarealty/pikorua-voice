@@ -6,6 +6,7 @@
     "predev": "turbo build --filter=@pikorua/shared --filter=@pikorua/db",
     "dev": "turbo dev",
     "build": "turbo build",
+    "test": "pnpm build && node --test tools/tests/*.test.js",
     "lint": "turbo type-check",
     "type-check": "turbo type-check",
     "format": "prettier --write \"**/*.{ts,json,md,yaml,yml}\" --ignore-path .gitignore",

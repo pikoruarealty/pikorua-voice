@@ -18,6 +18,10 @@ export class WebhookEventRepository {
       .orderBy(desc(webhookEvents.receivedAt));
   }
 
+  async findByEventKey(eventKey: string): Promise<WebhookEvent | undefined> {
+    return this.db.query.webhookEvents.findFirst({ where: eq(webhookEvents.eventKey, eventKey) });
+  }
+
   async create(data: NewWebhookEvent): Promise<WebhookEvent> {
     const [row] = await this.db.insert(webhookEvents).values(data).returning();
     if (!row) throw new Error("Insert returned no rows");

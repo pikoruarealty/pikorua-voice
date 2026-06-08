@@ -45,8 +45,11 @@ export class CampaignService {
 
       let queuedTargets = 0;
       if (created.status === "active" && targets.length > 0) {
-        await this.dialQueue.enqueueTargets(targets.map((target) => target.id));
-        queuedTargets = targets.length;
+        for (const target of targets) {
+          await this.dialQueue.enqueueTarget(target.id);
+          await this.targetRepo.updateDialStatus(target.id, "queued");
+          queuedTargets += 1;
+        }
       }
 
       return { campaign: created, targets, queuedTargets };

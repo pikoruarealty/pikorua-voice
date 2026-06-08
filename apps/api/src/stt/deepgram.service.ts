@@ -5,17 +5,23 @@ import { Deepgram } from "@deepgram/sdk";
 @Injectable()
 export class DeepgramService {
   private readonly logger = new Logger("DeepgramService");
-  private readonly client: any;
+  private readonly client: any | null;
 
   constructor(private readonly config: ConfigService) {
     const key = String(this.config.get("DEEPGRAM_API_KEY") ?? "");
-    this.client = new Deepgram(key);
+    this.client = key ? new Deepgram(key) : null;
+    if (!this.client) {
+      this.logger.warn("DEEPGRAM_API_KEY not set; STT is disabled until configured");
+    }
   }
 
   // Transcribe a pre-recorded audio buffer (low-latency variant). Returns
   // { text, latencyMs }
   async transcribeBuffer(buffer: Buffer, mime = "audio/wav", language = "en-IN") {
     const started = Date.now();
+    if (!this.client) {
+      return { text: "", sttMs: Date.now() - started };
+    }
     try {
       const resp = await this.client.transcription.preRecorded(
         { buffer, mimetype: mime },
@@ -38,6 +44,10 @@ export class DeepgramService {
   // words for interactive voice flows.
   async transcribeLowLatency(buffer: Buffer, mime = "audio/wav", chunkMs = 300, language = "en-IN") {
     const started = Date.now();
+
+    if (!this.client) {
+      return { text: "", sttMs: Date.now() - started };
+    }
 
     try {
       // Approximate bytes for chunkMs at 16kHz, 16-bit mono

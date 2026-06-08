@@ -69,6 +69,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS campaigns_status_idx ON campaigns(status);
+DROP TRIGGER IF EXISTS campaigns_updated_at ON campaigns;
 CREATE TRIGGER campaigns_updated_at BEFORE UPDATE ON campaigns FOR EACH ROW EXECUTE FUNCTION pikorua_set_updated_at();
 
 -- campaign_targets
@@ -91,7 +92,8 @@ CREATE TABLE IF NOT EXISTS campaign_targets (
 CREATE INDEX IF NOT EXISTS campaign_targets_campaign_idx ON campaign_targets(campaign_id);
 CREATE INDEX IF NOT EXISTS campaign_targets_dial_status_idx ON campaign_targets(dial_status);
 CREATE INDEX IF NOT EXISTS campaign_targets_next_attempt_idx ON campaign_targets(next_attempt_at);
-ALTER TABLE campaign_targets ADD CONSTRAINT IF NOT EXISTS campaign_targets_campaign_phone_uq UNIQUE (campaign_id, phone);
+CREATE UNIQUE INDEX IF NOT EXISTS campaign_targets_campaign_phone_uq ON campaign_targets(campaign_id, phone);
+DROP TRIGGER IF EXISTS campaign_targets_updated_at ON campaign_targets;
 CREATE TRIGGER campaign_targets_updated_at BEFORE UPDATE ON campaign_targets FOR EACH ROW EXECUTE FUNCTION pikorua_set_updated_at();
 
 -- calls
@@ -118,10 +120,11 @@ CREATE TABLE IF NOT EXISTS calls (
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now()
 );
-ALTER TABLE calls ADD CONSTRAINT IF NOT EXISTS calls_provider_call_sid_uq UNIQUE (provider_call_sid);
+CREATE UNIQUE INDEX IF NOT EXISTS calls_provider_call_sid_uq ON calls(provider_call_sid);
 CREATE INDEX IF NOT EXISTS calls_campaign_idx ON calls(campaign_id);
 CREATE INDEX IF NOT EXISTS calls_target_idx ON calls(target_id);
 CREATE INDEX IF NOT EXISTS calls_status_idx ON calls(status);
+DROP TRIGGER IF EXISTS calls_updated_at ON calls;
 CREATE TRIGGER calls_updated_at BEFORE UPDATE ON calls FOR EACH ROW EXECUTE FUNCTION pikorua_set_updated_at();
 
 -- call_turns
@@ -145,7 +148,7 @@ CREATE TABLE IF NOT EXISTS call_turns (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS call_turns_call_idx ON call_turns(call_id);
-ALTER TABLE call_turns ADD CONSTRAINT IF NOT EXISTS call_turns_call_turn_uq UNIQUE (call_id, turn_index);
+CREATE UNIQUE INDEX IF NOT EXISTS call_turns_call_turn_uq ON call_turns(call_id, turn_index);
 
 -- lead_scores
 CREATE TABLE IF NOT EXISTS lead_scores (
@@ -165,9 +168,19 @@ CREATE TABLE IF NOT EXISTS lead_scores (
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now()
 );
-ALTER TABLE lead_scores ADD CONSTRAINT IF NOT EXISTS lead_scores_call_uq UNIQUE (call_id);
+CREATE UNIQUE INDEX IF NOT EXISTS lead_scores_call_uq ON lead_scores(call_id);
 CREATE INDEX IF NOT EXISTS lead_scores_label_idx ON lead_scores(label);
-ALTER TABLE lead_scores ADD CONSTRAINT IF NOT EXISTS lead_scores_score_range CHECK (score >= 0 AND score <= 100);
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'lead_scores_score_range'
+  ) THEN
+    ALTER TABLE lead_scores
+      ADD CONSTRAINT lead_scores_score_range CHECK (score >= 0 AND score <= 100);
+  END IF;
+END $$;
+DROP TRIGGER IF EXISTS lead_scores_updated_at ON lead_scores;
 CREATE TRIGGER lead_scores_updated_at BEFORE UPDATE ON lead_scores FOR EACH ROW EXECUTE FUNCTION pikorua_set_updated_at();
 
 -- crm_sync_log
@@ -188,6 +201,7 @@ CREATE TABLE IF NOT EXISTS crm_sync_log (
 );
 CREATE INDEX IF NOT EXISTS crm_sync_log_call_idx ON crm_sync_log(call_id);
 CREATE INDEX IF NOT EXISTS crm_sync_log_status_idx ON crm_sync_log(status);
+DROP TRIGGER IF EXISTS crm_sync_log_updated_at ON crm_sync_log;
 CREATE TRIGGER crm_sync_log_updated_at BEFORE UPDATE ON crm_sync_log FOR EACH ROW EXECUTE FUNCTION pikorua_set_updated_at();
 
 -- call_events

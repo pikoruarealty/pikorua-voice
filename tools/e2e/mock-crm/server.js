@@ -1,14 +1,32 @@
-const express = require('express');
-const bodyParser = require('body-parser');
+const http = require('node:http');
 
-const app = express();
-app.use(bodyParser.json());
+const port = Number(process.env.MOCK_CRM_PORT || 4010);
 
-app.post('/crm/leads', (req, res) => {
-  console.log('Mock CRM received:', req.body);
-  // Simulate success
-  res.json({ ok: true, id: 'crm-' + Date.now() });
+const server = http.createServer((req, res) => {
+  if (req.method !== 'POST' || req.url !== '/leads') {
+    res.statusCode = 404;
+    res.end('not found');
+    return;
+  }
+
+  let raw = '';
+  req.on('data', (chunk) => {
+    raw += chunk;
+  });
+
+  req.on('end', () => {
+    let payload = {};
+    try {
+      payload = raw ? JSON.parse(raw) : {};
+    } catch {
+      payload = { raw };
+    }
+
+    console.log('Mock CRM received:', payload);
+    res.statusCode = 200;
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ ok: true, id: `crm-${Date.now()}` }));
+  });
 });
 
-const port = process.env.MOCK_CRM_PORT || 4010;
-app.listen(port, () => console.log(`Mock CRM listening on ${port}`));
+server.listen(port, () => console.log(`Mock CRM listening on ${port}`));

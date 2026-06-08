@@ -2,12 +2,15 @@ import "reflect-metadata";
 import { Logger } from "@nestjs/common";
 import { NestFactory } from "@nestjs/core";
 import { ConfigService } from "@nestjs/config";
+import { WsAdapter } from "@nestjs/platform-ws";
 import { SERVICE } from "@pikorua/shared";
 import { AppModule } from "./app.module";
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   const logger = new Logger(SERVICE.API);
+
+  app.useWebSocketAdapter(new WsAdapter(app));
 
   const config = app.get(ConfigService);
   const port = Number(config.get("API_PORT") ?? 4100);

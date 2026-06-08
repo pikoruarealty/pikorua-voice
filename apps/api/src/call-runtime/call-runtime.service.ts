@@ -36,10 +36,15 @@ export class CallRuntimeService {
     const useLowLatency = String(this.config.get("STT_STREAMING_ENABLED") ?? "false") === "true";
     let sttResult: { text: string; sttMs?: number };
     if (useRealtime) {
-      sttResult = await this.sttRealtime.transcribeRealtime(audioBuffer, 16000, 5000, locale).catch(async (err) => {
-        this.logger.warn("Realtime STT failed, falling back to low-latency", err instanceof Error ? err.stack : String(err));
-        return this.stt.transcribeLowLatency(audioBuffer, "audio/wav", 300, locale);
-      });
+      sttResult = await this.sttRealtime
+        .transcribeRealtime(audioBuffer, 16000, 5000, locale)
+        .catch(async (err) => {
+          this.logger.warn(
+            "Realtime STT failed, falling back to low-latency",
+            err instanceof Error ? err.stack : String(err),
+          );
+          return this.stt.transcribeLowLatency(audioBuffer, "audio/wav", 300, locale);
+        });
     } else if (useLowLatency) {
       sttResult = await this.stt.transcribeLowLatency(audioBuffer, "audio/wav", 300, locale);
     } else {
@@ -68,7 +73,8 @@ export class CallRuntimeService {
       // If locale is English, allow Vapi path for configured percent, else use Gemini (google)
       if (locale.toLowerCase().startsWith("en")) {
         const roll = Math.random() * 100;
-        if (roll < vapiPercent) provider = "anthropic"; // Vapi path (anthropic/claude)
+        if (roll < vapiPercent)
+          provider = "anthropic"; // Vapi path (anthropic/claude)
         else provider = "google"; // Gemini
       } else {
         // Hindi or Gujarati -> Gemini
@@ -104,17 +110,33 @@ export class CallRuntimeService {
     const ttsStart = Date.now();
     const { audio, ttsMs } = await this.tts.synthesize(reply);
 
-    // Persist call turn with latency and token usage placeholders
-    const newTurn: NewCallTurn = {
+    const callerTurn: NewCallTurn = {
       callId,
-      turnIndex,
+      turnIndex: turnIndex * 2,
+      role: "caller",
+      content: text,
+      locale,
+      sttMs: sttMs ?? Math.max(0, Date.now() - sttStart),
+      totalMs: sttMs ?? Math.max(0, Date.now() - sttStart),
+      guardrailTriggered: false,
+      fallbackUsed: false,
+    } as NewCallTurn;
+
+    const totalMs =
+      (sttMs ?? Math.max(0, llmStart - sttStart)) +
+      (llmMs ?? Math.max(0, ttsStart - llmStart)) +
+      (ttsMs ?? Math.max(0, Date.now() - ttsStart));
+
+    const assistantTurn: NewCallTurn = {
+      callId,
+      turnIndex: turnIndex * 2 + 1,
       role: "assistant",
       content: reply,
       locale,
       sttMs: sttMs ?? Math.max(0, Date.now() - sttStart),
       llmMs: llmMs ?? Math.max(0, Date.now() - llmStart),
       ttsMs: ttsMs ?? Math.max(0, Date.now() - ttsStart),
-      totalMs: (sttMs ?? 0) + (llmMs ?? 0) + (ttsMs ?? 0),
+      totalMs,
       llmModel: model ?? "",
       promptTokens: null as any,
       completionTokens: null as any,
@@ -124,12 +146,18 @@ export class CallRuntimeService {
     } as NewCallTurn;
 
     try {
-      await this.turnRepo.create(newTurn);
+      await this.turnRepo.create(callerTurn);
+      await this.turnRepo.create(assistantTurn);
     } catch (err) {
-      this.logger.warn("Failed to persist call turn", err instanceof Error ? err.stack : String(err));
+      this.logger.warn(
+        "Failed to persist call turn",
+        err instanceof Error ? err.stack : String(err),
+      );
     }
 
-    this.logger.log(`Handled turn ${turnIndex} for call ${callId} — stt ${sttMs}ms llm ${llmMs}ms tts ${ttsMs}ms`);
+    this.logger.log(
+      `Handled turn ${turnIndex} for call ${callId} — stt ${sttMs}ms llm ${llmMs}ms tts ${ttsMs}ms`,
+    );
     return { audio };
   }
 }

@@ -13,24 +13,24 @@ over REST.
 
 | Layer          | Technology                                            |
 | -------------- | ----------------------------------------------------- |
-| Runtime        | Node.js 20, TypeScript 5.7                             |
-| API            | NestJS 10 (`apps/api`)                                 |
+| Runtime        | Node.js 20, TypeScript 5.7                            |
+| API            | NestJS 10 (`apps/api`)                                |
 | Worker         | NestJS standalone context + BullMQ (`apps/worker`)    |
-| Database       | PostgreSQL 16 + Drizzle ORM 0.44 (`packages/db`)       |
-| Queue / Cache  | Redis 7 + BullMQ                                       |
-| Validation     | Zod (`packages/shared`)                                |
-| Telephony      | Exotel                                                 |
-| Speech-to-Text | Deepgram                                               |
-| Text-to-Speech | ElevenLabs                                             |
+| Database       | PostgreSQL 16 + Drizzle ORM 0.44 (`packages/db`)      |
+| Queue / Cache  | Redis 7 + BullMQ                                      |
+| Validation     | Zod (`packages/shared`)                               |
+| Telephony      | Exotel                                                |
+| Speech-to-Text | Deepgram                                              |
+| Text-to-Speech | ElevenLabs                                            |
 | LLM            | Anthropic (primary) · Google Generative AI (fallback) |
-| Monorepo       | pnpm workspaces + Turborepo                            |
+| Monorepo       | pnpm workspaces + Turborepo                           |
 
-## Language & Routing (updated)
+## Language & Routing
 
 - Primary language mix: Hindi primary (~60%), English (~25%), Gujarati (~15%).
 - Voice pipeline split:
-	- English calls route to the Vapi.ai path (Deepgram + Cartesia + Claude) — configured to handle ~25% of total calls.
-	- Hindi + Gujarati calls route to the Gemini Live path (Google Generative AI) — ~75% of total calls.
+  - English calls route to the Vapi.ai path (Deepgram + Cartesia + Claude) — configured to handle ~25% of total calls.
+  - Hindi + Gujarati calls route to the Gemini Live path (Google Generative AI) — ~75% of total calls.
 - IVR mapping (new): Press 1 = English (Vapi path), Press 2 = Hindi (Gemini), Press 3 = Gujarati (Gemini). Default (no press) = Hindi.
 
 ## Call volume assumptions & billing
@@ -44,15 +44,12 @@ over REST.
 - `GEMINI_LANGUAGE_DEFAULT` — default language sent to Gemini when call locale absent (default `hi-IN`).
 - `VAPI_PERCENT` — percentage (0-100) of English calls routed to the Vapi.ai path (default 25).
 
-## Tech stack version notes (requested updates)
+## Production notes
 
-- NestJS: 11.x (was 10.x)
-- TypeScript: 5.8 (was 5.7)
-- Queue library: BullMQ 5.x + @nestjs/bullmq (was Bull 4 + @nestjs/bull)
-- Google AI SDK: @google/genai (unified) (was @google/generative-ai)
-- LLM model strings: update to latest dev assignments (claude-sonnet-4-6, etc.)
-
-These updates are reflected in the PRD and environment defaults; package upgrades may be scheduled as a follow-up to avoid large breaking changes during this phase.
+- Public HTTP routes are mounted under `/api`; for example Exotel posts to `/api/webhooks/exotel`.
+- Exotel outbound calls include `StatusCallback` pointing at `PUBLIC_BASE_URL/api/webhooks/exotel`.
+- In production, provider secrets required for the active voice path are validated at boot.
+- Post-call scoring prefers caller transcript turns and falls back to the full transcript only for legacy data.
 
 ## Layout
 
@@ -106,19 +103,3 @@ pnpm db:generate   # generate Drizzle migration SQL (from Step 3)
 pnpm db:migrate    # apply pending migrations
 pnpm db:studio     # open Drizzle Studio
 ```
-
-## Build sequence
-
-Implementation proceeds strictly in order; each step is verified before the next
-begins.
-
-1. **Scaffold project** ✅ _(current)_
-2. Database layer
-3. Migrations
-4. Health module
-5. Campaign module
-6. Dial worker
-7. Exotel webhook
-8. Call runtime (STT → LLM → TTS)
-9. Post-call processing (scoring, CRM sync, HOT-lead notifications)
-10. End-to-end testing

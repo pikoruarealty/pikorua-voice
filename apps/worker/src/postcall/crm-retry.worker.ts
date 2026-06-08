@@ -35,7 +35,7 @@ export class CrmRetryWorker implements OnModuleDestroy {
     this.worker = new Worker<Record<string, unknown>>(
       "crm-retry",
       async (_job: Job<Record<string, unknown>>) => {
-        const pending = await this.crmLogRepo.findPending(25);
+        const pending = await this.crmLogRepo.findRetryable(25, 5);
         for (const entry of pending) {
           try {
             const crmBase = String(this.config.get("CRM_API_BASE_URL") ?? "");

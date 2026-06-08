@@ -7,7 +7,7 @@ import { SERVICE } from "@pikorua/shared";
 import { AppModule } from "./app.module";
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create(AppModule, { rawBody: true });
   const logger = new Logger(SERVICE.API);
 
   app.useWebSocketAdapter(new WsAdapter(app));

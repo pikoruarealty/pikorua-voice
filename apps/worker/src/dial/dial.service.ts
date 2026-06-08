@@ -67,6 +67,16 @@ export class DialService implements OnModuleDestroy {
       this.logger.warn(`Target not found: ${targetId}`);
       return;
     }
+    if (["do_not_call", "exhausted", "completed"].includes(target.dialStatus)) {
+      this.logger.log(`Skipping target ${target.id}; dialStatus=${target.dialStatus}`);
+      return;
+    }
+
+    const attempts = (target.attempts ?? 0) + 1;
+    await this.targetRepo.updateDialStatus(target.id, "dialing", {
+      attempts,
+      lastAttemptAt: new Date(),
+    });
 
     const newCall: NewCall = {
       campaignId: target.campaignId,
@@ -85,41 +95,49 @@ export class DialService implements OnModuleDestroy {
     const key = this.config.get("EXOTEL_API_KEY");
     const token = this.config.get("EXOTEL_API_TOKEN");
     const subdomain = String(this.config.get("EXOTEL_SUBDOMAIN") ?? "api.exotel.com");
+    const publicBaseUrl = String(this.config.get("PUBLIC_BASE_URL") ?? "").replace(/\/$/, "");
 
     if (sid && key && token) {
       try {
         const url = `https://${subdomain}/v1/Accounts/${String(sid)}/Calls/connect.json`;
-        const resp = await axios.post(
-          url,
-          new URLSearchParams({
-            From: call.fromNumber ?? "",
-            To: call.toNumber ?? "",
-            CallerId: String(this.config.get("EXOTEL_CALLER_ID") ?? ""),
-          }).toString(),
-          {
-            auth: { username: String(key), password: String(token) },
-            headers: { "Content-Type": "application/x-www-form-urlencoded" },
-            timeout: 10000,
-          },
-        );
-        const providerSid: string | undefined =
-          resp.data?.Call?.Sid ?? resp.data?.sid ?? undefined;
+        const params = new URLSearchParams({
+          From: call.fromNumber ?? "",
+          To: call.toNumber ?? "",
+          CallerId: String(this.config.get("EXOTEL_CALLER_ID") ?? ""),
+        });
+        if (publicBaseUrl) {
+          params.set("StatusCallback", `${publicBaseUrl}/api/webhooks/exotel`);
+          params.set("StatusCallbackContentType", "application/json");
+          params.append("StatusCallbackEvents[]", "answered");
+          params.append("StatusCallbackEvents[]", "terminal");
+        }
+
+        const resp = await axios.post(url, params.toString(), {
+          auth: { username: String(key), password: String(token) },
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          timeout: 10000,
+        });
+        const providerSid: string | undefined = resp.data?.Call?.Sid ?? resp.data?.sid ?? undefined;
         await this.callRepo.update(call.id, {
           providerCallSid: providerSid ? String(providerSid) : undefined,
           status: "initiated",
         });
-        this.logger.log(
-          `Placed Exotel call for ${call.id} (providerSid=${providerSid ?? "n/a"})`,
-        );
+        await this.targetRepo.updateDialStatus(target.id, "dialing");
+        this.logger.log(`Placed Exotel call for ${call.id} (providerSid=${providerSid ?? "n/a"})`);
       } catch (err) {
         this.logger.error(
           `Exotel call failed for call ${call.id}`,
           err instanceof Error ? err.stack : String(err),
         );
         await this.callRepo.update(call.id, { status: "failed", error: String(err) });
+        await this.targetRepo.updateDialStatus(
+          target.id,
+          attempts >= (target.maxAttempts ?? 3) ? "exhausted" : "failed",
+        );
       }
     } else {
       this.logger.log("Exotel not configured; leaving call queued for manual testing");
+      await this.targetRepo.updateDialStatus(target.id, "queued");
     }
   }
 

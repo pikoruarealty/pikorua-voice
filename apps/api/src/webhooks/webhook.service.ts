@@ -1,7 +1,12 @@
-import { Injectable, Inject, Logger } from "@nestjs/common";
+import { Injectable, Inject, Logger, UnauthorizedException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import crypto from "crypto";
-import { WebhookEventRepository, CallRepository, CallEventRepository } from "@pikorua/db";
+import {
+  WebhookEventRepository,
+  CallRepository,
+  CallEventRepository,
+  CampaignTargetRepository,
+} from "@pikorua/db";
 import type { WebhookEvent } from "@pikorua/db";
 import { PostCallQueueService } from "../postcall/postcall.queue";
 import { IvrService } from "../ivr/ivr.service";
@@ -16,6 +21,7 @@ export class WebhookService {
     @Inject(WebhookEventRepository) private readonly webhookRepo: WebhookEventRepository,
     @Inject(CallRepository) private readonly callRepo: CallRepository,
     @Inject(CallEventRepository) private readonly eventRepo: CallEventRepository,
+    @Inject(CampaignTargetRepository) private readonly targetRepo: CampaignTargetRepository,
     private readonly postcallQueue: PostCallQueueService,
     private readonly ivr: IvrService,
   ) {}
@@ -23,10 +29,19 @@ export class WebhookService {
   verifySignature(secret: string | undefined, rawBody: string, headerSig?: string | null) {
     if (!secret || !headerSig) return false;
     try {
-      const h = crypto.createHmac("sha256", secret).update(rawBody).digest("hex");
-      return crypto.timingSafeEqual(Buffer.from(h), Buffer.from(headerSig));
+      const expected = crypto.createHmac("sha256", secret).update(rawBody).digest("hex");
+      const provided = headerSig.replace(/^sha256=/i, "").trim();
+      const expectedBuffer = Buffer.from(expected, "hex");
+      const providedBuffer = Buffer.from(provided, "hex");
+      return (
+        expectedBuffer.length === providedBuffer.length &&
+        crypto.timingSafeEqual(expectedBuffer, providedBuffer)
+      );
     } catch (err) {
-      this.logger.warn("Signature verification error", err instanceof Error ? err.stack : String(err));
+      this.logger.warn(
+        "Signature verification error",
+        err instanceof Error ? err.stack : String(err),
+      );
       return false;
     }
   }
@@ -34,6 +49,9 @@ export class WebhookService {
   async handleExotel(rawBody: string, payload: ExotelWebhookDto, headerSig?: string | null) {
     const secret = this.config.get("EXOTEL_WEBHOOK_SECRET");
     const signatureValid = this.verifySignature(secret as string | undefined, rawBody, headerSig);
+    if (secret && !signatureValid) {
+      throw new UnauthorizedException("Invalid Exotel webhook signature");
+    }
 
     const providerCallSid = String(payload.CallSid ?? payload.Sid ?? "");
     const eventType = String(payload.Event ?? payload.CallStatus ?? "unknown");
@@ -43,13 +61,17 @@ export class WebhookService {
       const existing = providerCallSid
         ? await this.webhookRepo.findByProviderCallSid(providerCallSid)
         : [];
-      const already = existing.find((e) => JSON.stringify(e.rawPayload) === rawBody);
+      const payloadJson = JSON.stringify(payload);
+      const already = existing.find((e) => JSON.stringify(e.rawPayload) === payloadJson);
       if (already) {
         this.logger.log(`Duplicate webhook for sid=${providerCallSid}; ignoring`);
         return { status: "ignored" } as const;
       }
     } catch (err) {
-      this.logger.warn("Failed to check existing webhooks", err instanceof Error ? err.stack : String(err));
+      this.logger.warn(
+        "Failed to check existing webhooks",
+        err instanceof Error ? err.stack : String(err),
+      );
     }
 
     // Persist webhook event (Rule 10: inbound webhook received)
@@ -62,9 +84,14 @@ export class WebhookService {
         rawPayload: payload as unknown as Record<string, unknown>,
         signatureValid: !!signatureValid,
       });
-      this.logger.log(`Inbound webhook: id=${eventRow.id} sid=${providerCallSid} event=${eventType}`);
+      this.logger.log(
+        `Inbound webhook: id=${eventRow.id} sid=${providerCallSid} event=${eventType}`,
+      );
     } catch (err) {
-      this.logger.error("Failed to persist webhook event", err instanceof Error ? err.stack : String(err));
+      this.logger.error(
+        "Failed to persist webhook event",
+        err instanceof Error ? err.stack : String(err),
+      );
       throw err;
     }
 
@@ -75,28 +102,46 @@ export class WebhookService {
         if (call) {
           const statusMap: Record<string, string> = {
             ringing: "ringing",
+            answered: "in_progress",
             in_progress: "in_progress",
             initiated: "initiated",
             completed: "completed",
+            "no-answer": "no_answer",
             no_answer: "no_answer",
             busy: "busy",
             failed: "failed",
           };
           const mappedStatus =
-            statusMap[String(payload.CallStatus ?? payload.Event ?? "").toLowerCase()];
+            statusMap[
+              String(
+                payload.CallStatus ?? payload.Status ?? payload.Event ?? payload.EventType ?? "",
+              ).toLowerCase()
+            ];
 
           if (mappedStatus) {
+            const terminal = ["completed", "no_answer", "busy", "failed", "canceled"].includes(
+              mappedStatus,
+            );
+            const duration = Number(payload.ConversationDuration ?? NaN);
             await this.callRepo.updateByProviderCallSid(providerCallSid, {
               status: mappedStatus as any,
+              endedAt: terminal ? new Date() : undefined,
+              answeredAt: mappedStatus === "in_progress" ? new Date() : undefined,
+              recordingUrl: payload.RecordingUrl,
+              durationSeconds: Number.isFinite(duration) ? duration : undefined,
+              hangupCause: payload.HangupCause,
             });
-            await this.eventRepo.create({
-              callId: call.id,
-              campaignId: call.campaignId ?? null,
-              type: "worker_failure",
-              severity: "info",
-              message: `Provider event: ${eventType}`,
-              payload: payload as unknown as Record<string, unknown>,
-            } as any);
+            if (call.targetId && terminal) {
+              const targetStatus =
+                mappedStatus === "completed"
+                  ? "completed"
+                  : mappedStatus === "no_answer"
+                    ? "no_answer"
+                    : mappedStatus === "busy"
+                      ? "busy"
+                      : "failed";
+              await this.targetRepo.updateDialStatus(call.targetId, targetStatus as any);
+            }
             if (mappedStatus === "completed") {
               try {
                 await this.postcallQueue.enqueue(call.id);

@@ -1,5 +1,19 @@
 import { z } from "zod";
 
+const optionalNonEmpty = z.preprocess(
+  (value) => (value === "" ? undefined : value),
+  z.string().optional(),
+);
+
+const booleanFlag = z.preprocess((value) => {
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (["true", "1", "yes", "on"].includes(normalized)) return true;
+    if (["false", "0", "no", "off", ""].includes(normalized)) return false;
+  }
+  return value;
+}, z.boolean());
+
 // ─── Environment schema ──────────────────────────────────────────────────────
 // All external input is untrusted and validated here. Core infrastructure
 // variables are required so the process fails fast on misconfiguration. Provider
@@ -8,41 +22,76 @@ import { z } from "zod";
 // build steps land — they are declared here so configuration stays centralized
 // and strongly typed.
 
-export const envSchema = z.object({
-  NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
-  API_PORT: z.coerce.number().int().positive().default(4100),
+export const envSchema = z
+  .object({
+    NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
+    API_PORT: z.coerce.number().int().positive().default(4100),
 
-  DATABASE_URL: z.string().url(),
-  REDIS_URL: z.string().url(),
+    DATABASE_URL: z.string().url(),
+    REDIS_URL: z.string().url(),
 
-  // Telephony · Exotel
-  EXOTEL_SID: z.string().optional(),
-  EXOTEL_API_KEY: z.string().optional(),
-  EXOTEL_API_TOKEN: z.string().optional(),
-  EXOTEL_SUBDOMAIN: z.string().default("api.exotel.com"),
-  EXOTEL_CALLER_ID: z.string().optional(),
-  EXOTEL_WEBHOOK_SECRET: z.string().optional(),
-  PUBLIC_BASE_URL: z.string().url().default("http://localhost:4100"),
+    // Telephony · Exotel
+    EXOTEL_SID: optionalNonEmpty,
+    EXOTEL_API_KEY: optionalNonEmpty,
+    EXOTEL_API_TOKEN: optionalNonEmpty,
+    EXOTEL_SUBDOMAIN: z.string().default("api.exotel.com"),
+    EXOTEL_CALLER_ID: optionalNonEmpty,
+    EXOTEL_WEBHOOK_SECRET: optionalNonEmpty,
+    PUBLIC_BASE_URL: z.string().url().default("http://localhost:4100"),
 
-  // Speech-to-Text · Deepgram
-  DEEPGRAM_API_KEY: z.string().optional(),
+    // Voice routing
+    GEMINI_LANGUAGE_DEFAULT: z.string().max(16).default("hi-IN"),
+    VAPI_PERCENT: z.coerce.number().min(0).max(100).default(25),
+    STT_REALTIME_ENABLED: booleanFlag.default(false),
+    STT_STREAMING_ENABLED: booleanFlag.default(false),
 
-  // Text-to-Speech · ElevenLabs
-  ELEVENLABS_API_KEY: z.string().optional(),
-  ELEVENLABS_VOICE_ID: z.string().optional(),
+    // Speech-to-Text · Deepgram
+    DEEPGRAM_API_KEY: optionalNonEmpty,
 
-  // LLM · Anthropic (primary)
-  ANTHROPIC_API_KEY: z.string().optional(),
-  ANTHROPIC_MODEL: z.string().default("claude-haiku-4-5-20251001"),
+    // Text-to-Speech · ElevenLabs
+    ELEVENLABS_API_KEY: optionalNonEmpty,
+    ELEVENLABS_VOICE_ID: optionalNonEmpty,
 
-  // LLM · Google Generative AI (fallback)
-  GOOGLE_GENERATIVE_AI_API_KEY: z.string().optional(),
-  GOOGLE_MODEL: z.string().default("gemini-2.0-flash"),
+    // LLM · Anthropic (primary)
+    ANTHROPIC_API_KEY: optionalNonEmpty,
+    ANTHROPIC_MODEL: z.string().default("claude-haiku-4-5-20251001"),
 
-  // CRM integration (REST only)
-  CRM_API_BASE_URL: z.string().url().default("http://localhost:4000"),
-  CRM_API_TOKEN: z.string().optional(),
-});
+    // LLM · Google Generative AI (fallback)
+    GOOGLE_GENERATIVE_AI_API_KEY: optionalNonEmpty,
+    GOOGLE_MODEL: z.string().default("gemini-2.0-flash"),
+
+    // CRM integration (REST only)
+    CRM_API_BASE_URL: z.string().url().default("http://localhost:4000"),
+    CRM_API_TOKEN: optionalNonEmpty,
+  })
+  .superRefine((env, ctx) => {
+    if (env.NODE_ENV !== "production") {
+      return;
+    }
+
+    const required: Array<keyof typeof env> = [
+      "EXOTEL_WEBHOOK_SECRET",
+      "DEEPGRAM_API_KEY",
+      "ELEVENLABS_API_KEY",
+    ];
+    for (const key of required) {
+      if (!env[key]) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [key],
+          message: "Required in production",
+        });
+      }
+    }
+
+    if (!env.ANTHROPIC_API_KEY && !env.GOOGLE_GENERATIVE_AI_API_KEY) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["ANTHROPIC_API_KEY"],
+        message: "At least one LLM provider key is required in production",
+      });
+    }
+  });
 
 export type Env = z.infer<typeof envSchema>;
 

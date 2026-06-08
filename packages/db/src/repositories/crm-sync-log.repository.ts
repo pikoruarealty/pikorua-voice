@@ -1,9 +1,9 @@
-import { eq } from "drizzle-orm";
+import { and, eq, lt, or } from "drizzle-orm";
 import type { Database } from "../client";
 import { crmSyncLog } from "../schema";
 import type { CrmSyncLogEntry, NewCrmSyncLogEntry } from "../schema";
 
-type SyncStatus = typeof crmSyncLog.status.enumValues[number];
+type SyncStatus = (typeof crmSyncLog.status.enumValues)[number];
 
 export class CrmSyncLogRepository {
   constructor(private readonly db: Database) {}
@@ -22,6 +22,17 @@ export class CrmSyncLogRepository {
   async findPending(limit: number): Promise<CrmSyncLogEntry[]> {
     return this.db.query.crmSyncLog.findMany({
       where: eq(crmSyncLog.status, "pending"),
+      limit,
+      orderBy: (t, { asc }) => [asc(t.createdAt)],
+    });
+  }
+
+  async findRetryable(limit: number, maxAttempts: number): Promise<CrmSyncLogEntry[]> {
+    return this.db.query.crmSyncLog.findMany({
+      where: and(
+        or(eq(crmSyncLog.status, "pending"), eq(crmSyncLog.status, "failed")),
+        lt(crmSyncLog.attempts, maxAttempts),
+      ),
       limit,
       orderBy: (t, { asc }) => [asc(t.createdAt)],
     });

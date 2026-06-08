@@ -6,11 +6,16 @@ export const exotelWebhookSchema = z
   .object({
     CallSid: z.string().optional(),
     CallStatus: z.string().optional(),
+    Status: z.string().optional(),
+    EventType: z.string().optional(),
     From: z.string().optional(),
     To: z.string().optional(),
     Digits: z.string().optional(),
     Direction: z.string().optional(),
     Event: z.string().optional(),
+    RecordingUrl: z.string().optional(),
+    HangupCause: z.string().optional(),
+    ConversationDuration: z.union([z.string(), z.number()]).optional(),
     Sid: z.string().optional(),
   })
   .passthrough();

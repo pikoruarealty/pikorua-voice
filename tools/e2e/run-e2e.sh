@@ -21,13 +21,13 @@ INSERT INTO calls (id, campaign_id, target_id, crm_lead_id, provider_call_sid, s
 VALUES ('$CALL_ID', '$CAMPAIGN_ID', '$TARGET_ID', NULL, '$SID', 'in_progress', '+911111111111', '+911234567890', 'hi-IN') ON CONFLICT DO NOTHING;
 -- insert call turns
 INSERT INTO call_turns (call_id, turn_index, role, content, locale) VALUES
-('$CALL_ID', 0, 'assistant', 'Yes, I am interested and would like a demo today.', 'hi-IN'),
-('$CALL_ID', 1, 'assistant', 'Please schedule a demo for tomorrow morning.', 'hi-IN') ON CONFLICT DO NOTHING;
+('$CALL_ID', 0, 'caller', 'Yes, I am interested and would like a demo today.', 'hi-IN'),
+('$CALL_ID', 1, 'caller', 'Please schedule a demo for tomorrow morning.', 'hi-IN') ON CONFLICT DO NOTHING;
 SQL
 
 echo "Inserted test rows. Posting webhook to API to mark call completed..."
 
-curl -s -X POST "$PUBLIC_BASE_URL/webhooks/exotel" \
+curl -s -X POST "$PUBLIC_BASE_URL/api/webhooks/exotel" \
   -H "Content-Type: application/json" \
   -d '{"CallSid":"'"$SID"'","CallStatus":"completed"}'
 

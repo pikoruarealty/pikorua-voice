@@ -33,10 +33,22 @@ export class PostCallProcessingService {
     }
 
     const turns = await this.turnRepo.findByCallId(callId);
-    const transcript = turns.map((t) => t.content).join(" \n");
+    const callerTurns = turns.filter((t) => t.role === "caller");
+    const transcriptSource = callerTurns.length > 0 ? callerTurns : turns;
+    const transcript = transcriptSource.map((t) => t.content).join(" \n");
 
     // Heuristic signals (fallback when the LLM scorer is unavailable)
-    const positive = ["interested", "yes", "buy", "purchase", "schedule", "demo", "call me", "contact me", "lead"];
+    const positive = [
+      "interested",
+      "yes",
+      "buy",
+      "purchase",
+      "schedule",
+      "demo",
+      "call me",
+      "contact me",
+      "lead",
+    ];
     const negative = ["no", "not interested", "stop", "unsubscribe", "no thanks"];
 
     const matchedPos: string[] = [];
@@ -46,10 +58,15 @@ export class PostCallProcessingService {
     for (const p of positive) if (lc.includes(p)) matchedPos.push(p);
     for (const n of negative) if (lc.includes(n)) matchedNeg.push(n);
 
-    const timelineHeuristic = lc.includes("now") || lc.includes("today") || lc.includes("immediately") ? "immediate" : "unknown";
+    const timelineHeuristic =
+      lc.includes("now") || lc.includes("today") || lc.includes("immediately")
+        ? "immediate"
+        : "unknown";
 
     const llmScore = await this.scorer.evaluate(transcript, String(call.locale ?? "en-IN"));
-    const score = llmScore?.score ?? Math.max(0, Math.min(100, Math.round(50 + matchedPos.length * 12 - matchedNeg.length * 20)));
+    const score =
+      llmScore?.score ??
+      Math.max(0, Math.min(100, Math.round(50 + matchedPos.length * 12 - matchedNeg.length * 20)));
     const label = llmScore?.label ?? (score >= 75 ? "hot" : score >= 45 ? "warm" : "cold");
     const rationale = llmScore?.rationale ?? `pos=${matchedPos.length} neg=${matchedNeg.length}`;
     const timeline = llmScore?.timeline ?? timelineHeuristic;
@@ -70,7 +87,10 @@ export class PostCallProcessingService {
         timeline: timeline as any,
       } as any);
     } catch (err) {
-      this.logger.warn("Failed to upsert lead score", err instanceof Error ? err.stack : String(err));
+      this.logger.warn(
+        "Failed to upsert lead score",
+        err instanceof Error ? err.stack : String(err),
+      );
     }
 
     // Emit HOT alert
@@ -82,10 +102,18 @@ export class PostCallProcessingService {
           type: "hot_alert",
           severity: "critical",
           message: "Lead scored HOT",
-          payload: { score, matchedPos: signals.matchedPos, matchedNeg: signals.matchedNeg, source: signals.source },
+          payload: {
+            score,
+            matchedPos: signals.matchedPos,
+            matchedNeg: signals.matchedNeg,
+            source: signals.source,
+          },
         } as any);
       } catch (err) {
-        this.logger.warn("Failed to create hot alert", err instanceof Error ? err.stack : String(err));
+        this.logger.warn(
+          "Failed to create hot alert",
+          err instanceof Error ? err.stack : String(err),
+        );
       }
     }
 
@@ -104,20 +132,42 @@ export class PostCallProcessingService {
     } as any);
 
     if (!crmBase) {
-      await this.crmLogRepo.updateStatus(log.id, "skipped", { responsePayload: { reason: "CRM not configured" } } as any);
+      await this.crmLogRepo.updateStatus(log.id, "skipped", {
+        responsePayload: { reason: "CRM not configured" },
+      } as any);
       return;
     }
 
     try {
       const url = `${crmBase.replace(/\/$/, "")}/leads`;
-      const resp = await axios.post(url, { callId: call.id, transcript, score, label, crmLeadId: call.crmLeadId, source: signals.source }, { headers: crmToken ? { Authorization: `Bearer ${crmToken}` } : undefined, timeout: 5000 });
-      await this.crmLogRepo.updateStatus(log.id, "success", { httpStatus: resp.status, responsePayload: resp.data, attempts: (log.attempts ?? 0) + 1 } as any);
+      const resp = await axios.post(
+        url,
+        {
+          callId: call.id,
+          transcript,
+          score,
+          label,
+          crmLeadId: call.crmLeadId,
+          source: signals.source,
+        },
+        { headers: crmToken ? { Authorization: `Bearer ${crmToken}` } : undefined, timeout: 5000 },
+      );
+      await this.crmLogRepo.updateStatus(log.id, "success", {
+        httpStatus: resp.status,
+        responsePayload: resp.data,
+        attempts: (log.attempts ?? 0) + 1,
+      } as any);
     } catch (err) {
       this.logger.warn("CRM sync failed", err instanceof Error ? err.stack : String(err));
       const axiosErr = err as AxiosError;
       const status = axiosErr?.response?.status ?? null;
       const data = axiosErr?.response?.data ?? { message: String(err) };
-      await this.crmLogRepo.updateStatus(log.id, "failed", { httpStatus: status, responsePayload: data, attempts: (log.attempts ?? 0) + 1, error: String(err) } as any);
+      await this.crmLogRepo.updateStatus(log.id, "failed", {
+        httpStatus: status,
+        responsePayload: data,
+        attempts: (log.attempts ?? 0) + 1,
+        error: String(err),
+      } as any);
     }
   }
 }

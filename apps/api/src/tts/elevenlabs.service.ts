@@ -20,9 +20,9 @@ export class ElevenlabsService {
       const url = `https://api.elevenlabs.io/v1/text-to-speech/${vid}`;
       const resp = await axios.post(
         url,
-        { text },
+        { text, model_id: "eleven_multilingual_v2" },
         {
-          headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+          headers: { "xi-api-key": key, "Content-Type": "application/json" },
           responseType: "arraybuffer",
           timeout: 10000,
         },

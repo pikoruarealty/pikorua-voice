@@ -62,12 +62,13 @@ export class LlmService {
           );
           return { text, llmMs: ms, model: anthropicModel, promptTokens, completionTokens };
         } catch (err) {
+          const message = this.providerFailureMessage("Anthropic", err);
           this.logger.warn(
-            "Anthropic request failed",
+            message,
             err instanceof Error ? err.stack : String(err),
           );
           if (provider === "anthropic") {
-            throw new ServiceUnavailableException("Anthropic request failed");
+            throw new ServiceUnavailableException(message);
           }
         }
       }
@@ -113,18 +114,60 @@ export class LlmService {
           );
           return { text, llmMs: ms, model: googleModel, promptTokens, completionTokens };
         } catch (err) {
+          const message = this.providerFailureMessage("Google Gemini", err);
           this.logger.error(
-            "Google Gemini request failed",
+            message,
             err instanceof Error ? err.stack : String(err),
           );
           if (provider === "google") {
-            throw new ServiceUnavailableException("Google Gemini request failed");
+            throw new ServiceUnavailableException(message);
           }
         }
       }
     }
 
+    // OpenRouter fallback — OpenAI-compatible endpoint
+    const openRouterKey = this.config.get<string>("OPENROUTER_API_KEY");
+    const openRouterModel = String(this.config.get("OPENROUTER_MODEL") ?? "google/gemini-2.0-flash-lite:free");
+    if (openRouterKey) {
+      try {
+        const orMessages: Array<{ role: string; content: string }> = [];
+        if (opts?.systemPrompt) {
+          orMessages.push({ role: "system", content: opts.systemPrompt });
+        }
+        for (const m of messages) {
+          orMessages.push({ role: m.role, content: m.content });
+        }
+        const res = await axios.post(
+          "https://openrouter.ai/api/v1/chat/completions",
+          { model: openRouterModel, max_tokens: maxTokens, messages: orMessages },
+          {
+            headers: {
+              "Authorization": `Bearer ${openRouterKey}`,
+              "Content-Type": "application/json",
+            },
+            timeout: 12000,
+          },
+        );
+        const text: string = res.data?.choices?.[0]?.message?.content ?? "";
+        const ms = Date.now() - start;
+        const promptTokens: number | null = res.data?.usage?.prompt_tokens ?? null;
+        const completionTokens: number | null = res.data?.usage?.completion_tokens ?? null;
+        this.logger.log(`LLM(openrouter/${openRouterModel}) ${ms}ms prompt=${promptTokens ?? "?"} completion=${completionTokens ?? "?"}`);
+        return { text, llmMs: ms, model: openRouterModel, promptTokens, completionTokens };
+      } catch (err) {
+        this.logger.error("OpenRouter request failed", err instanceof Error ? err.stack : String(err));
+      }
+    }
+
     this.logger.error("No LLM provider available or configured");
     throw new ServiceUnavailableException("No LLM provider available or configured");
+  }
+
+  private providerFailureMessage(provider: string, err: unknown): string {
+    const status = axios.isAxiosError(err) ? err.response?.status : undefined;
+    if (status === 429) return `${provider} quota or rate limit exceeded`;
+    if (status === 401 || status === 403) return `${provider} authentication failed`;
+    return `${provider} request failed`;
   }
 }

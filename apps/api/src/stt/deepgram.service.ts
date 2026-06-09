@@ -17,19 +17,34 @@ export class DeepgramService {
 
   // Transcribe a pre-recorded audio buffer (low-latency variant). Returns
   // { text, latencyMs }
+  // Deepgram language codes differ from BCP-47: hi-IN → hi, en-IN → en-IN is fine,
+  // but nova-2 is required for any non-English language.
+  private dgLanguage(locale: string): { language: string; model: string } {
+    const lang = locale.toLowerCase();
+    if (lang.startsWith("hi")) return { language: "hi", model: "nova-2" };
+    if (lang.startsWith("gu")) return { language: "gu", model: "nova-2" };
+    if (lang.startsWith("ta")) return { language: "ta", model: "nova-2" };
+    if (lang.startsWith("te")) return { language: "te", model: "nova-2" };
+    if (lang.startsWith("mr")) return { language: "mr", model: "nova-2" };
+    return { language: locale, model: "nova-2" };
+  }
+
   async transcribeBuffer(buffer: Buffer, mime = "audio/wav", language = "en-IN") {
     const started = Date.now();
     if (!this.client) {
       throw new ServiceUnavailableException("Deepgram API key is not configured");
     }
+    const { language: dgLang, model } = this.dgLanguage(language);
     try {
       const resp = await this.client.transcription.preRecorded(
         { buffer, mimetype: mime },
-        { punctuate: true, language },
+        { punctuate: true, language: dgLang, model },
       );
       const text = resp?.results?.channels?.[0]?.alternatives?.[0]?.transcript ?? "";
       const ms = Date.now() - started;
-      this.logger.log(`STT complete (${ms}ms lang=${language}): ${text.slice(0, 120)}`);
+      this.logger.log(
+        `STT complete (${ms}ms lang=${dgLang} model=${model}): ${text.slice(0, 120)}`,
+      );
       return { text, sttMs: ms };
     } catch (err) {
       this.logger.error("STT failed", err instanceof Error ? err.stack : String(err));

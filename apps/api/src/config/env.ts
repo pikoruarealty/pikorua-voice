@@ -14,6 +14,11 @@ const booleanFlag = z.preprocess((value) => {
   return value;
 }, z.boolean());
 
+const optionalLlmProvider = z.preprocess(
+  (value) => (value === "" ? undefined : value),
+  z.enum(["anthropic", "google", "auto"]).optional(),
+);
+
 // ─── Environment schema ──────────────────────────────────────────────────────
 // All external input is untrusted and validated here. Core infrastructure
 // variables are required so the process fails fast on misconfiguration. In
@@ -41,6 +46,8 @@ export const envSchema = z
     // Voice routing
     GEMINI_LANGUAGE_DEFAULT: z.string().max(16).default("hi-IN"),
     ENGLISH_ANTHROPIC_PERCENT: z.coerce.number().min(0).max(100).default(25),
+    LLM_PROVIDER_OVERRIDE: optionalLlmProvider,
+    GUARDRAIL_SEMANTIC_ENABLED: booleanFlag.default(true),
     STT_REALTIME_ENABLED: booleanFlag.default(false),
     STT_STREAMING_ENABLED: booleanFlag.default(false),
 
@@ -58,6 +65,10 @@ export const envSchema = z
     // LLM · Google Generative AI (fallback)
     GOOGLE_GENERATIVE_AI_API_KEY: optionalNonEmpty,
     GOOGLE_MODEL: z.string().default("gemini-2.0-flash"),
+
+    // LLM · OpenRouter (last-resort fallback)
+    OPENROUTER_API_KEY: optionalNonEmpty,
+    OPENROUTER_MODEL: z.string().default("google/gemini-2.0-flash-lite:free"),
 
     // CRM integration (REST only)
     CRM_API_BASE_URL: z.string().url().default("http://localhost:4000"),

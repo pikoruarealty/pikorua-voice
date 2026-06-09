@@ -4,13 +4,24 @@ import { NestFactory } from "@nestjs/core";
 import { ConfigService } from "@nestjs/config";
 import { WsAdapter } from "@nestjs/platform-ws";
 import { SERVICE } from "@pikorua/shared";
-import type { NextFunction, Request, Response } from "express";
+import { json, urlencoded, type NextFunction, type Request, type Response } from "express";
 import { randomUUID } from "crypto";
 import { AppModule } from "./app.module";
 import { MetricsService } from "./metrics/metrics.service";
 
+type RawBodyRequest = Request & { rawBody?: Buffer };
+
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule, { rawBody: true });
+  // Disable NestJS built-in body parser so voice turns can carry base64 WAV.
+  const app = await NestFactory.create(AppModule, {
+    rawBody: true,
+    bodyParser: false,
+  });
+  const captureRawBody = (req: RawBodyRequest, _res: Response, buf: Buffer) => {
+    req.rawBody = Buffer.from(buf);
+  };
+  app.use(json({ limit: "20mb", verify: captureRawBody }));
+  app.use(urlencoded({ limit: "20mb", extended: true, verify: captureRawBody }));
   const logger = new Logger(SERVICE.API);
 
   app.useWebSocketAdapter(new WsAdapter(app));

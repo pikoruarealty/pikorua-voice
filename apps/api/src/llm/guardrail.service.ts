@@ -87,6 +87,10 @@ export class GuardrailService {
   // Semantic guardrail via LLM — catches paraphrases and indirect violations.
   // Falls back gracefully to the hard check result if the LLM is unavailable.
   async checkSemantic(text: string): Promise<GuardrailResult> {
+    if (this.config.get<boolean>("GUARDRAIL_SEMANTIC_ENABLED") === false) {
+      return { triggered: false, rule: null, replacement: null };
+    }
+
     const prompt = buildGuardrailPrompt(text);
 
     // Always use Haiku for guardrail classification regardless of the conversation model

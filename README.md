@@ -41,6 +41,8 @@ Standalone outbound voice-concierge service for Pikorua Realty. It places campai
 
 - `GEMINI_LANGUAGE_DEFAULT` — default language sent to Gemini when call locale absent (default `hi-IN`).
 - `ENGLISH_ANTHROPIC_PERCENT` — percentage (0-100) of English turns routed to Anthropic before falling back to Google.
+- `LLM_PROVIDER_OVERRIDE` — optional `anthropic`, `google`, or `auto` override for local/provider testing.
+- `GUARDRAIL_SEMANTIC_ENABLED` — set `false` for low-quota local demos; hard keyword guardrails still run.
 
 ## Production notes
 

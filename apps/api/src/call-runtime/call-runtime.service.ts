@@ -155,11 +155,18 @@ export class CallRuntimeService {
     const llmStart = Date.now();
     let provider: "anthropic" | "google" | "auto" = "auto";
     try {
-      const anthropicPercent = Number(this.config.get("ENGLISH_ANTHROPIC_PERCENT") ?? 25);
-      if (locale.toLowerCase().startsWith("en")) {
-        provider = Math.random() * 100 < anthropicPercent ? "anthropic" : "google";
+      const providerOverride = this.config.get<"anthropic" | "google" | "auto" | undefined>(
+        "LLM_PROVIDER_OVERRIDE",
+      );
+      if (providerOverride) {
+        provider = providerOverride;
       } else {
-        provider = "google";
+        const anthropicPercent = Number(this.config.get("ENGLISH_ANTHROPIC_PERCENT") ?? 25);
+        if (locale.toLowerCase().startsWith("en")) {
+          provider = Math.random() * 100 < anthropicPercent ? "anthropic" : "google";
+        } else {
+          provider = "google";
+        }
       }
     } catch {
       provider = "auto";

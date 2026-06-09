@@ -9,8 +9,10 @@ import {
 } from "@pikorua/db";
 import { PostCallQueueService } from "../postcall/postcall.queue";
 import { IvrService } from "../ivr/ivr.service";
+import { CallRuntimeModule } from "../call-runtime/call-runtime.module";
 
 @Module({
+  imports: [CallRuntimeModule],
   controllers: [WebhookController],
   providers: [
     {

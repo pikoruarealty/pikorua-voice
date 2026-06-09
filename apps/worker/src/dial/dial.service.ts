@@ -32,7 +32,7 @@ export class DialService implements OnModuleDestroy {
   private async start() {
     const redisUrl = String(this.config.get("REDIS_URL") ?? "redis://localhost:6380");
 
-    this.queueRedis = new Redis(redisUrl);
+    this.queueRedis = new Redis(redisUrl, { maxRetriesPerRequest: null });
     this.workerRedis = new Redis(redisUrl, { maxRetriesPerRequest: null });
 
     this.queue = new Queue("dial", { connection: this.queueRedis });

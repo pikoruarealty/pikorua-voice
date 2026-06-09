@@ -5,8 +5,12 @@ import { RealtimeGateway } from "../stt/realtime.gateway";
 import { LlmService } from "../llm/llm.service";
 import { ElevenlabsService } from "../tts/elevenlabs.service";
 import { CallRuntimeService } from "./call-runtime.service";
-import { CallTurnRepository } from "@pikorua/db";
-import { CallRepository } from "@pikorua/db";
+import {
+  CallTurnRepository,
+  CallRepository,
+  CampaignRepository,
+  CampaignTargetRepository,
+} from "@pikorua/db";
 import { CallRuntimeController } from "./call-runtime.controller";
 import { GuardrailService } from "../llm/guardrail.service";
 import { IvrService } from "../ivr/ivr.service";
@@ -27,6 +31,16 @@ import { IvrService } from "../ivr/ivr.service";
     {
       provide: CallRepository,
       useFactory: (db: any) => new CallRepository(db),
+      inject: ["DATABASE"],
+    },
+    {
+      provide: CampaignRepository,
+      useFactory: (db: any) => new CampaignRepository(db),
+      inject: ["DATABASE"],
+    },
+    {
+      provide: CampaignTargetRepository,
+      useFactory: (db: any) => new CampaignTargetRepository(db),
       inject: ["DATABASE"],
     },
     IvrService,

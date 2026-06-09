@@ -194,7 +194,11 @@ export const calls = pgTable(
     updatedAt,
   },
   (t) => [
-    uniqueIndex("calls_provider_call_sid_uq").on(t.providerCallSid),
+    // Partial unique index: only enforce uniqueness on non-NULL SIDs so that multiple
+    // pre-dispatch call rows (providerCallSid = NULL) can coexist without a constraint error.
+    uniqueIndex("calls_provider_call_sid_uq")
+      .on(t.providerCallSid)
+      .where(sql`${t.providerCallSid} IS NOT NULL`),
     index("calls_campaign_idx").on(t.campaignId),
     index("calls_target_idx").on(t.targetId),
     index("calls_status_idx").on(t.status),
@@ -288,7 +292,9 @@ export const crmSyncLog = pgTable(
   (t) => [
     index("crm_sync_log_call_idx").on(t.callId),
     index("crm_sync_log_status_idx").on(t.status),
-    uniqueIndex("crm_sync_log_idempotency_key_uq").on(t.idempotencyKey),
+    uniqueIndex("crm_sync_log_idempotency_key_uq")
+      .on(t.idempotencyKey)
+      .where(sql`${t.idempotencyKey} IS NOT NULL`),
   ],
 );
 
@@ -332,7 +338,9 @@ export const webhookEvents = pgTable(
   (t) => [
     index("webhook_events_sid_idx").on(t.providerCallSid),
     index("webhook_events_status_idx").on(t.status),
-    uniqueIndex("webhook_events_event_key_uq").on(t.eventKey),
+    uniqueIndex("webhook_events_event_key_uq")
+      .on(t.eventKey)
+      .where(sql`${t.eventKey} IS NOT NULL`),
   ],
 );
 

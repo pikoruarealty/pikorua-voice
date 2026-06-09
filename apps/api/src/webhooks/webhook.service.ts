@@ -1,4 +1,4 @@
-import { Injectable, Inject, Logger, UnauthorizedException } from "@nestjs/common";
+import { Injectable, Inject, Logger, UnauthorizedException, Optional } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import crypto from "crypto";
 import {
@@ -10,6 +10,7 @@ import {
 import type { Call, CampaignTarget, NewCallEvent, WebhookEvent } from "@pikorua/db";
 import { PostCallQueueService } from "../postcall/postcall.queue";
 import { IvrService } from "../ivr/ivr.service";
+import { CallRuntimeService } from "../call-runtime/call-runtime.service";
 import type { ExotelWebhookDto } from "./exotel.dto";
 
 @Injectable()
@@ -24,6 +25,7 @@ export class WebhookService {
     @Inject(CampaignTargetRepository) private readonly targetRepo: CampaignTargetRepository,
     private readonly postcallQueue: PostCallQueueService,
     private readonly ivr: IvrService,
+    @Optional() private readonly callRuntime: CallRuntimeService | null,
   ) {}
 
   verifySignature(secret: string | undefined, rawBody: string, headerSig?: string | null) {
@@ -58,6 +60,7 @@ export class WebhookService {
     const mappedStatus = this.mapCallStatus(payload);
     const eventKey = this.buildEventKey(providerCallSid, eventType, mappedStatus, payload);
 
+    // Single idempotency check: if we've already seen this exact event key, ignore.
     if (eventKey) {
       try {
         const existing = await this.webhookRepo.findByEventKey(eventKey);
@@ -77,31 +80,16 @@ export class WebhookService {
     if (providerCallSid) {
       try {
         call = await this.callRepo.findByProviderCallSid(providerCallSid);
-        if (mappedStatus === "completed" && call) {
-          const alreadyQueued = await this.webhookRepo.findByEventKey(
-            this.buildEventKey(providerCallSid, eventType, mappedStatus, payload),
-          );
-          if (alreadyQueued) {
-            this.logger.log(`Completed webhook already processed for sid=${providerCallSid}`);
-            return { status: "ignored" } as const;
-          }
+        // If the call is already marked completed in our DB, a second completed webhook is a duplicate.
+        if (mappedStatus === "completed" && call?.status === "completed") {
+          this.logger.log(`Completed webhook already processed for sid=${providerCallSid}`);
+          return { status: "ignored" } as const;
         }
       } catch (err) {
         this.logger.warn(
           "Failed to pre-correlate webhook to call",
           err instanceof Error ? err.stack : String(err),
         );
-      }
-    }
-
-    if (mappedStatus === "completed" && call?.status === "completed") {
-      const existingCompleted = providerCallSid
-        ? await this.webhookRepo.findByEventKey(
-            this.buildEventKey(providerCallSid, eventType, mappedStatus, payload),
-          )
-        : undefined;
-      if (existingCompleted) {
-        return { status: "ignored" } as const;
       }
     }
 
@@ -149,6 +137,10 @@ export class WebhookService {
             });
             if (call.targetId && terminal) {
               await this.targetRepo.updateDialStatus(call.targetId, this.mapTargetStatus(status));
+            }
+            if (terminal) {
+              // Release in-memory conversation history for this call.
+              this.callRuntime?.clearHistory(call.id);
             }
             if (status === "completed") {
               try {

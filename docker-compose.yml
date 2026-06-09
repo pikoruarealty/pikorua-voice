@@ -33,6 +33,37 @@ services:
       timeout: 5s
       retries: 5
 
+  # ── Application services (used for full-stack local dev and staging) ─────────
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    container_name: pikorua_voice_api
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "4100:4100"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    profiles: ["app"]
+
+  worker:
+    build:
+      context: .
+      dockerfile: apps/worker/Dockerfile
+    container_name: pikorua_voice_worker
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    profiles: ["app"]
+
 volumes:
   pikorua_voice_postgres_data:
   pikorua_voice_redis_data:

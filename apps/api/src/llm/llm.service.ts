@@ -2,17 +2,33 @@ import { Injectable, Logger, ServiceUnavailableException } from "@nestjs/common"
 import { ConfigService } from "@nestjs/config";
 import axios from "axios";
 
+export type LlmMessage = { role: "user" | "assistant"; content: string };
+
+export type LlmResult = {
+  text: string;
+  llmMs: number;
+  model: string;
+  promptTokens: number | null;
+  completionTokens: number | null;
+};
+
 @Injectable()
 export class LlmService {
   private readonly logger = new Logger("LlmService");
   constructor(private readonly config: ConfigService) {}
 
   async generate(
-    prompt: string,
-    opts?: { model?: string; provider?: "anthropic" | "google" | "auto" },
-  ) {
+    messages: LlmMessage[],
+    opts?: {
+      model?: string;
+      provider?: "anthropic" | "google" | "auto";
+      systemPrompt?: string;
+      maxTokens?: number;
+    },
+  ): Promise<LlmResult> {
     const start = Date.now();
     const provider = opts?.provider ?? "auto";
+    const maxTokens = opts?.maxTokens ?? 300;
 
     if (provider === "anthropic" || provider === "auto") {
       const anthropicKey = this.config.get<string>("ANTHROPIC_API_KEY");
@@ -21,26 +37,30 @@ export class LlmService {
       );
       if (anthropicKey) {
         try {
-          const res = await axios.post(
-            "https://api.anthropic.com/v1/messages",
-            {
-              model: anthropicModel,
-              max_tokens: 300,
-              messages: [{ role: "user", content: prompt }],
+          const body: Record<string, unknown> = {
+            model: anthropicModel,
+            max_tokens: maxTokens,
+            messages,
+          };
+          if (opts?.systemPrompt) {
+            body.system = opts.systemPrompt;
+          }
+          const res = await axios.post("https://api.anthropic.com/v1/messages", body, {
+            headers: {
+              "x-api-key": anthropicKey,
+              "anthropic-version": "2023-06-01",
+              "content-type": "application/json",
             },
-            {
-              headers: {
-                "x-api-key": anthropicKey,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-              },
-              timeout: 8000,
-            },
-          );
+            timeout: 8000,
+          });
           const text: string = res.data?.content?.[0]?.text ?? res.data?.content?.[0]?.value ?? "";
           const ms = Date.now() - start;
-          this.logger.log(`LLM(anthropic/${anthropicModel}) ${ms}ms`);
-          return { text, llmMs: ms, model: anthropicModel, tokens: null };
+          const promptTokens: number | null = res.data?.usage?.input_tokens ?? null;
+          const completionTokens: number | null = res.data?.usage?.output_tokens ?? null;
+          this.logger.log(
+            `LLM(anthropic/${anthropicModel}) ${ms}ms prompt=${promptTokens ?? "?"} completion=${completionTokens ?? "?"}`,
+          );
+          return { text, llmMs: ms, model: anthropicModel, promptTokens, completionTokens };
         } catch (err) {
           this.logger.warn(
             "Anthropic request failed",
@@ -59,15 +79,37 @@ export class LlmService {
     if (provider === "google" || provider === "auto") {
       if (googleKey) {
         try {
+          // Map messages to Gemini format; prepend system prompt as a user turn if provided
+          const geminiContents: Array<{ role: string; parts: Array<{ text: string }> }> = [];
+          if (opts?.systemPrompt) {
+            // Gemini doesn't have a system role — inject as first user message with model ack
+            geminiContents.push({ role: "user", parts: [{ text: `[System]: ${opts.systemPrompt}` }] });
+            geminiContents.push({ role: "model", parts: [{ text: "Understood." }] });
+          }
+          for (const m of messages) {
+            geminiContents.push({
+              role: m.role === "assistant" ? "model" : "user",
+              parts: [{ text: m.content }],
+            });
+          }
           const res = await axios.post(
             `https://generativelanguage.googleapis.com/v1beta/models/${googleModel}:generateContent`,
-            { contents: [{ role: "user", parts: [{ text: prompt }] }] },
+            {
+              contents: geminiContents,
+              generationConfig: { maxOutputTokens: maxTokens },
+            },
             { params: { key: googleKey }, timeout: 8000 },
           );
           const text: string = res.data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
           const ms = Date.now() - start;
-          this.logger.log(`LLM(google/${googleModel}) ${ms}ms`);
-          return { text, llmMs: ms, model: googleModel, tokens: null };
+          const promptTokens: number | null =
+            res.data?.usageMetadata?.promptTokenCount ?? null;
+          const completionTokens: number | null =
+            res.data?.usageMetadata?.candidatesTokenCount ?? null;
+          this.logger.log(
+            `LLM(google/${googleModel}) ${ms}ms prompt=${promptTokens ?? "?"} completion=${completionTokens ?? "?"}`,
+          );
+          return { text, llmMs: ms, model: googleModel, promptTokens, completionTokens };
         } catch (err) {
           this.logger.error(
             "Google Gemini request failed",

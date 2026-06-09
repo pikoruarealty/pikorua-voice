@@ -22,6 +22,10 @@ export class LeadScoreLlmService {
     ].join("\n\n");
   }
 
+  private stripFences(raw: string): string {
+    return raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/, "").trim();
+  }
+
   private clampResult(result: LeadScoreLlmResult): LeadScoreLlmResult {
     const score = Math.max(0, Math.min(100, Math.round(result.score)));
     const label = score >= 75 ? "hot" : score >= 45 ? "warm" : "cold";
@@ -66,7 +70,7 @@ export class LeadScoreLlmService {
           );
 
           const raw = String(res.data?.content?.[0]?.text ?? res.data?.content?.[0]?.value ?? "");
-          const parsed = LeadScoreLlmSchema.parse(JSON.parse(raw));
+          const parsed = LeadScoreLlmSchema.parse(JSON.parse(this.stripFences(raw)));
           this.logger.log(`LLM scoring(anthropic/${model}) succeeded`);
           return this.clampResult(parsed);
         } catch (err) {
@@ -90,7 +94,7 @@ export class LeadScoreLlmService {
           );
 
           const raw = String(res.data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "");
-          const parsed = LeadScoreLlmSchema.parse(JSON.parse(raw));
+          const parsed = LeadScoreLlmSchema.parse(JSON.parse(this.stripFences(raw)));
           this.logger.log(`LLM scoring(google/${model}) succeeded`);
           return this.clampResult(parsed);
         } catch (err) {

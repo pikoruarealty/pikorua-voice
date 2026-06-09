@@ -43,7 +43,7 @@ test("HTTP controllers do not double-prefix api routes", () => {
 
 test("webhook signatures and event keys are stable", () => {
   const { WebhookService } = require("../../apps/api/dist/webhooks/webhook.service");
-  const service = new WebhookService({ get: () => undefined }, {}, {}, {}, {}, {}, {});
+  const service = new WebhookService({ get: () => undefined }, {}, {}, {}, {}, {}, {}, null);
 
   const rawBody = JSON.stringify({ CallSid: "sid-1", CallStatus: "completed" });
   const signature = crypto.createHmac("sha256", "secret").update(rawBody).digest("hex");
@@ -199,4 +199,95 @@ test("provider staging smoke script is explicit opt-in for live calls", () => {
   assert.match(script, /RUN_LIVE_PROVIDER_SMOKE/);
   assert.match(script, /Deepgram auth ok/);
   assert.match(script, /ElevenLabs auth ok/);
+});
+
+test("rate limiter is wired in AppModule", () => {
+  const src = read("apps/api/src/app.module.ts");
+  assert.match(src, /ThrottlerModule/, "ThrottlerModule must be imported");
+  assert.match(src, /ThrottlerGuard/, "ThrottlerGuard must be registered as APP_GUARD");
+});
+
+test("LlmService accepts message array and system prompt options", () => {
+  const src = read("apps/api/src/llm/llm.service.ts");
+  assert.match(src, /LlmMessage\[\]/, "generate() must accept LlmMessage array");
+  assert.match(src, /systemPrompt/, "systemPrompt option must exist");
+  assert.match(src, /promptTokens/, "promptTokens must be returned");
+  assert.match(src, /completionTokens/, "completionTokens must be returned");
+});
+
+test("guardrails are semantic (LLM-based) with hard-rule fallback", () => {
+  const src = read("apps/api/src/llm/guardrail.service.ts");
+  assert.match(src, /checkSemantic/, "semantic check must exist");
+  assert.match(src, /checkHard/, "hard-rule check must exist");
+  assert.match(src, /async check\(/, "check() must be async");
+  // Hard rules use specific multi-word patterns, not single keywords
+  assert.match(src, /exact price|costs ₹/, "hard rules must use specific phrases, not single words");
+});
+
+test("Dockerfiles exist for both apps", () => {
+  assert.ok(
+    fs.existsSync(path.join(root, "apps/api/Dockerfile")),
+    "apps/api/Dockerfile must exist",
+  );
+  assert.ok(
+    fs.existsSync(path.join(root, "apps/worker/Dockerfile")),
+    "apps/worker/Dockerfile must exist",
+  );
+});
+
+test("GitHub Actions CI workflow exists", () => {
+  assert.ok(
+    fs.existsSync(path.join(root, ".github/workflows/ci.yml")),
+    ".github/workflows/ci.yml must exist",
+  );
+  const ci = read(".github/workflows/ci.yml");
+  assert.match(ci, /unit-tests/, "CI must include unit test job");
+  assert.match(ci, /integration-tests/, "CI must include integration test job");
+  assert.match(ci, /docker-build/, "CI must include docker build check");
+});
+
+test("LeadScoreLlmService strips code fences before JSON.parse", () => {
+  const src = read("apps/worker/src/postcall/lead-score-llm.service.ts");
+  assert.match(src, /stripFences/, "stripFences method must exist");
+  assert.match(src, /stripFences\(raw\)/, "raw LLM response must be fence-stripped before JSON.parse");
+});
+
+test("calls schema uses partial unique index for nullable providerCallSid", () => {
+  const src = read("packages/db/src/schema.ts");
+  // The unique index on providerCallSid must include a WHERE IS NOT NULL filter
+  assert.match(
+    src,
+    /calls_provider_call_sid_uq[\s\S]*?IS NOT NULL/,
+    "calls providerCallSid unique index must be partial (WHERE IS NOT NULL)",
+  );
+});
+
+test("dial window times are interpreted in IST not server local TZ", () => {
+  const src = read("apps/worker/src/dial/dial-window.ts");
+  assert.match(src, /IST_OFFSET_MINUTES/, "IST offset constant must be defined");
+  assert.match(src, /nowInIst/, "IST-aware time helper must exist");
+  assert.match(src, /getUTCHours/, "must use UTC methods, not local TZ getHours");
+  assert.doesNotMatch(src, /\.getHours\(\)/, "must not use getHours() which reads local TZ");
+});
+
+test("BullMQ Queue Redis connection has maxRetriesPerRequest null", () => {
+  const src = read("apps/worker/src/dial/dial.service.ts");
+  // Both connections should have maxRetriesPerRequest: null
+  const matches = [...src.matchAll(/maxRetriesPerRequest: null/g)];
+  assert.ok(matches.length >= 2, "both queueRedis and workerRedis must set maxRetriesPerRequest: null");
+});
+
+test("call-runtime separates spoken reply from history entry to preserve LLM coherence", () => {
+  const src = read("apps/api/src/call-runtime/call-runtime.service.ts");
+  assert.match(src, /spokenReply/, "spokenReply variable must separate TTS text from history");
+  assert.match(src, /content: reply/, "raw LLM reply (not replacement) must be stored in history");
+  assert.match(src, /synthesize\(spokenReply\)/, "TTS must synthesize spokenReply, not raw reply");
+});
+
+test("call-runtime totalMs uses real elapsed durations from captured timestamps", () => {
+  const src = read("apps/api/src/call-runtime/call-runtime.service.ts");
+  assert.match(src, /sttEnd = Date\.now\(\)/, "sttEnd timestamp must be captured after STT completes");
+  assert.match(src, /llmEnd = Date\.now\(\)/, "llmEnd timestamp must be captured after LLM completes");
+  assert.match(src, /sttEnd - sttStart/, "sttElapsed must use sttEnd - sttStart");
+  assert.match(src, /llmEnd - llmStart/, "llmElapsed must use llmEnd - llmStart");
 });

@@ -1,5 +1,15 @@
 import type { Campaign } from "@pikorua/db";
 
+// Campaign dial windows are specified in IST (Asia/Kolkata, UTC+05:30).
+// All servers run in UTC, so we must offset before comparing HH:MM.
+const IST_OFFSET_MINUTES = 5 * 60 + 30;
+
+function nowInIst(now: Date): number {
+  // Convert UTC epoch to IST minutes-of-day.
+  const utcMinutes = now.getUTCHours() * 60 + now.getUTCMinutes();
+  return (utcMinutes + IST_OFFSET_MINUTES) % (24 * 60);
+}
+
 export function nextDialWindowAt(campaign: Campaign, now: Date): Date | null {
   if (!campaign.dialWindowStart || !campaign.dialWindowEnd) {
     return null;
@@ -11,7 +21,7 @@ export function nextDialWindowAt(campaign: Campaign, now: Date): Date | null {
     return null;
   }
 
-  const currentMinutes = now.getHours() * 60 + now.getMinutes();
+  const currentMinutes = nowInIst(now);
   const inWindow =
     startMinutes <= endMinutes
       ? currentMinutes >= startMinutes && currentMinutes <= endMinutes
@@ -20,11 +30,20 @@ export function nextDialWindowAt(campaign: Campaign, now: Date): Date | null {
     return null;
   }
 
-  const next = new Date(now);
-  next.setSeconds(0, 0);
+  // Build the next window-open timestamp in UTC.
+  // Start from midnight IST of the current UTC day, add the appropriate offset.
+  const istMidnightUtcMs =
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) -
+    IST_OFFSET_MINUTES * 60_000;
+
   const targetDayOffset = currentMinutes < startMinutes ? 0 : 1;
-  next.setDate(next.getDate() + targetDayOffset);
-  next.setHours(Math.floor(startMinutes / 60), startMinutes % 60, 0, 0);
+  const nextMs =
+    istMidnightUtcMs +
+    targetDayOffset * 24 * 60 * 60_000 +
+    startMinutes * 60_000;
+
+  const next = new Date(nextMs);
+  next.setUTCSeconds(0, 0);
   return next;
 }
 

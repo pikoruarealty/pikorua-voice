@@ -30,7 +30,7 @@ async function bootstrap() {
     process.exit(1);
   }
 
-  logger.log(`${SERVICE.WORKER} ready — dial queue processors are added in Step 6`);
+  logger.log(`${SERVICE.WORKER} ready — dial, postcall, and CRM-retry workers running`);
 
   const shutdown = async (signal: string) => {
     logger.log(`Received ${signal} — shutting down`);

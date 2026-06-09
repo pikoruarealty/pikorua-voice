@@ -1,7 +1,7 @@
 import { Module } from "@nestjs/common";
 import { CampaignController } from "./campaign.controller";
 import { CampaignService } from "./campaign.service";
-import { CampaignRepository, CampaignTargetRepository } from "@pikorua/db";
+import { CampaignRepository, CampaignTargetRepository, type Database } from "@pikorua/db";
 import { DialQueueService } from "./dial-queue.service";
 
 @Module({
@@ -9,12 +9,12 @@ import { DialQueueService } from "./dial-queue.service";
   providers: [
     {
       provide: CampaignRepository,
-      useFactory: (db: any) => new CampaignRepository(db),
+      useFactory: (db: Database) => new CampaignRepository(db),
       inject: ["DATABASE"],
     },
     {
       provide: CampaignTargetRepository,
-      useFactory: (db: any) => new CampaignTargetRepository(db),
+      useFactory: (db: Database) => new CampaignTargetRepository(db),
       inject: ["DATABASE"],
     },
     DialQueueService,

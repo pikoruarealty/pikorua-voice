@@ -23,7 +23,10 @@ export class LeadScoreLlmService {
   }
 
   private stripFences(raw: string): string {
-    return raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/, "").trim();
+    return raw
+      .replace(/^```(?:json)?\s*/i, "")
+      .replace(/\s*```\s*$/, "")
+      .trim();
   }
 
   private clampResult(result: LeadScoreLlmResult): LeadScoreLlmResult {
@@ -44,13 +47,20 @@ export class LeadScoreLlmService {
       return null;
     }
 
-    const provider = String(this.config.get("LLM_SCORING_PROVIDER") ?? "auto") as "anthropic" | "google" | "auto";
+    const provider = String(this.config.get("LLM_SCORING_PROVIDER") ?? "auto") as
+      | "anthropic"
+      | "google"
+      | "auto";
     const prompt = this.buildPrompt(trimmed, locale);
 
     if (provider === "anthropic" || provider === "auto") {
       const anthropicKey = String(this.config.get("ANTHROPIC_API_KEY") ?? "");
       if (anthropicKey) {
-        const model = String(this.config.get("LLM_SCORING_MODEL") ?? this.config.get("ANTHROPIC_MODEL") ?? "claude-haiku-4-5-20251001");
+        const model = String(
+          this.config.get("LLM_SCORING_MODEL") ??
+            this.config.get("ANTHROPIC_MODEL") ??
+            "claude-haiku-4-5-20251001",
+        );
         try {
           const res = await axios.post(
             "https://api.anthropic.com/v1/messages",
@@ -74,7 +84,10 @@ export class LeadScoreLlmService {
           this.logger.log(`LLM scoring(anthropic/${model}) succeeded`);
           return this.clampResult(parsed);
         } catch (err) {
-          this.logger.warn("Anthropic scoring request failed", err instanceof Error ? err.stack : String(err));
+          this.logger.warn(
+            "Anthropic scoring request failed",
+            err instanceof Error ? err.stack : String(err),
+          );
           if (provider === "anthropic") {
             return null;
           }
@@ -85,7 +98,11 @@ export class LeadScoreLlmService {
     if (provider === "google" || provider === "auto") {
       const googleKey = String(this.config.get("GOOGLE_GENERATIVE_AI_API_KEY") ?? "");
       if (googleKey) {
-        const model = String(this.config.get("LLM_SCORING_MODEL") ?? this.config.get("GOOGLE_MODEL") ?? "gemini-2.0-flash");
+        const model = String(
+          this.config.get("LLM_SCORING_MODEL") ??
+            this.config.get("GOOGLE_MODEL") ??
+            "gemini-2.0-flash",
+        );
         try {
           const res = await axios.post(
             `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
@@ -98,7 +115,10 @@ export class LeadScoreLlmService {
           this.logger.log(`LLM scoring(google/${model}) succeeded`);
           return this.clampResult(parsed);
         } catch (err) {
-          this.logger.warn("Google scoring request failed", err instanceof Error ? err.stack : String(err));
+          this.logger.warn(
+            "Google scoring request failed",
+            err instanceof Error ? err.stack : String(err),
+          );
           if (provider === "google") {
             return null;
           }

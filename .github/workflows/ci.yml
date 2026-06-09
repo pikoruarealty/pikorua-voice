@@ -33,7 +33,7 @@ jobs:
 
       - run: pnpm lint
         name: Lint
-        continue-on-error: true  # lint warnings don't block merges
+        continue-on-error: true # lint warnings don't block merges
 
   build:
     name: Build
@@ -115,6 +115,7 @@ jobs:
       DATABASE_URL: postgresql://postgres:postgres@localhost:5433/pikorua_voice_test
       REDIS_URL: redis://localhost:6380
       API_AUTH_TOKEN: test-token
+      REQUIRE_INTEGRATION_STACK: "true"
 
     steps:
       - uses: actions/checkout@v4
@@ -134,6 +135,22 @@ jobs:
 
       - run: pnpm db:migrate
         name: Run database migrations
+
+      - name: Start API
+        run: |
+          pnpm --filter @pikorua/api start > api.log 2>&1 &
+          echo $! > api.pid
+
+      - name: Wait for API health
+        run: |
+          for i in {1..30}; do
+            if curl -fsS -H "x-api-key: test-token" http://localhost:4100/api/health; then
+              exit 0
+            fi
+            sleep 2
+          done
+          cat api.log
+          exit 1
 
       - run: node --test tools/tests/integration.test.js
         name: Integration tests

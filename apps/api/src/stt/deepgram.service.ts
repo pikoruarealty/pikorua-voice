@@ -5,7 +5,7 @@ import { Deepgram } from "@deepgram/sdk";
 @Injectable()
 export class DeepgramService {
   private readonly logger = new Logger("DeepgramService");
-  private readonly client: any | null;
+  private readonly client: Deepgram | null;
 
   constructor(private readonly config: ConfigService) {
     const key = String(this.config.get("DEEPGRAM_API_KEY") ?? "");

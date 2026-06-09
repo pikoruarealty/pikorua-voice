@@ -25,13 +25,15 @@ const HARD_RULES: Array<{ rule: string; pattern: RegExp; replacement: string }> 
   },
   {
     rule: "legal_advice",
-    pattern: /\b(you should consult a lawyer|legally speaking|from a legal standpoint|your legal right)\b/i,
+    pattern:
+      /\b(you should consult a lawyer|legally speaking|from a legal standpoint|your legal right)\b/i,
     replacement:
       "For legal questions, please consult a qualified legal professional. I can connect you with our consultant instead.",
   },
   {
     rule: "tax_advice",
-    pattern: /\b(you can save tax|tax benefit of|under section 80|claim a deduction|FEMA compliance)\b/i,
+    pattern:
+      /\b(you can save tax|tax benefit of|under section 80|claim a deduction|FEMA compliance)\b/i,
     replacement:
       "Tax matters are best handled by a tax advisor. Our team can introduce you to a qualified professional.",
   },
@@ -56,7 +58,7 @@ function buildGuardrailPrompt(text: string): string {
     "5. fabricated_inventory — claiming limited stock or urgency without data",
     "6. fabricated_project — inventing project details, timelines, or specifications",
     "",
-    "Reply ONLY with valid JSON (no markdown): { \"violated\": boolean, \"rule\": string | null, \"safeSummary\": string | null }",
+    'Reply ONLY with valid JSON (no markdown): { "violated": boolean, "rule": string | null, "safeSummary": string | null }',
     "If violated, set rule to the matching rule name and safeSummary to a safe rephrasing.",
     "If not violated, set violated=false, rule=null, safeSummary=null.",
     "",
@@ -129,9 +131,7 @@ export class GuardrailService {
           { contents: [{ role: "user", parts: [{ text: prompt }] }] },
           { params: { key: googleKey }, timeout: 4000 },
         );
-        const raw = String(
-          res.data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "",
-        ).trim();
+        const raw = String(res.data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "").trim();
         return this.parseSemanticResult(raw, text);
       } catch (err) {
         this.logger.warn(

@@ -13,6 +13,7 @@ const http = require("node:http");
 
 const BASE = "http://localhost:4100/api";
 const TOKEN = process.env.API_AUTH_TOKEN ?? "test-token";
+let apiAvailablePromise;
 
 async function request(method, path, body) {
   const url = new URL(BASE + path);
@@ -46,22 +47,35 @@ async function request(method, path, body) {
   });
 }
 
-// Check if API is running before attempting integration tests
-let apiAvailable = false;
-try {
-  // Quick probe — if this throws immediately we skip
-  await new Promise((resolve, reject) => {
-    const req = http.request(`${BASE}/health`, { method: "GET" }, resolve);
-    req.setTimeout(2000, () => req.destroy());
-    req.on("error", reject);
-    req.end();
-  });
-  apiAvailable = true;
-} catch {
-  console.warn("API not running — skipping integration tests");
+function checkApiAvailable() {
+  if (!apiAvailablePromise) {
+    apiAvailablePromise = new Promise((resolve) => {
+      const req = http.request(`${BASE}/health`, { method: "GET" }, (res) => {
+        res.resume();
+        resolve(true);
+      });
+      req.setTimeout(2000, () => req.destroy());
+      req.on("error", () => resolve(false));
+      req.end();
+    });
+  }
+  return apiAvailablePromise;
 }
 
-test.skip(!apiAvailable, "API health endpoint returns ok", async () => {
+async function requireApi(t) {
+  const apiAvailable = await checkApiAvailable();
+  if (!apiAvailable) {
+    if (process.env.CI === "true" || process.env.REQUIRE_INTEGRATION_STACK === "true") {
+      assert.fail("API not running; integration stack is required");
+    }
+    t.skip("API not running; skipping integration test");
+    return false;
+  }
+  return true;
+}
+
+test("API health endpoint returns ok", async (t) => {
+  if (!(await requireApi(t))) return;
   const res = await request("GET", "/health");
   assert.equal(res.status, 200);
   assert.equal(res.body.status, "ok");
@@ -69,7 +83,8 @@ test.skip(!apiAvailable, "API health endpoint returns ok", async () => {
   assert.ok(res.body.details?.redis);
 });
 
-test.skip(!apiAvailable, "POST /campaigns creates campaign and returns targets", async () => {
+test("POST /campaigns creates campaign and returns targets", async (t) => {
+  if (!(await requireApi(t))) return;
   const payload = {
     name: "Integration Test Campaign",
     status: "draft",
@@ -86,7 +101,8 @@ test.skip(!apiAvailable, "POST /campaigns creates campaign and returns targets",
   assert.equal(res.body.queuedTargets, 0, "draft campaign should not queue targets");
 });
 
-test.skip(!apiAvailable, "POST /campaigns with active status enqueues targets", async () => {
+test("POST /campaigns with active status enqueues targets", async (t) => {
+  if (!(await requireApi(t))) return;
   const payload = {
     name: "Active Integration Campaign",
     status: "active",
@@ -98,12 +114,14 @@ test.skip(!apiAvailable, "POST /campaigns with active status enqueues targets", 
   assert.equal(res.body.queuedTargets, 1, "active campaign must queue its targets");
 });
 
-test.skip(!apiAvailable, "POST /campaigns rejects missing name", async () => {
+test("POST /campaigns rejects missing name", async (t) => {
+  if (!(await requireApi(t))) return;
   const res = await request("POST", "/campaigns", { targets: [] });
   assert.equal(res.status, 400);
 });
 
-test.skip(!apiAvailable, "POST /webhooks/exotel processes completed status and enqueues postcall", async () => {
+test("POST /webhooks/exotel processes completed status and enqueues postcall", async (t) => {
+  if (!(await requireApi(t))) return;
   // First create a call row via campaign creation
   const campaignRes = await request("POST", "/campaigns", {
     name: "Webhook Test Campaign",
@@ -126,14 +144,16 @@ test.skip(!apiAvailable, "POST /webhooks/exotel processes completed status and e
   );
 });
 
-test.skip(!apiAvailable, "GET /metrics returns prometheus format", async () => {
+test("GET /metrics returns prometheus format", async (t) => {
+  if (!(await requireApi(t))) return;
   const res = await request("GET", "/metrics");
   assert.equal(res.status, 200);
   assert.match(String(res.body), /pikorua_process_uptime_seconds/);
 });
 
-test.skip(!apiAvailable, "rate limiter allows 120 requests per minute per IP", async () => {
-  // Fire 10 quick requests — all should succeed (well below 120/min limit)
+test("rate limiter allows 120 requests per minute per IP", async (t) => {
+  if (!(await requireApi(t))) return;
+  // Fire 10 quick requests; all should succeed (well below 120/min limit)
   const results = await Promise.all(
     Array.from({ length: 10 }, () => request("GET", "/health")),
   );

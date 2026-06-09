@@ -83,7 +83,10 @@ export class LlmService {
           const geminiContents: Array<{ role: string; parts: Array<{ text: string }> }> = [];
           if (opts?.systemPrompt) {
             // Gemini doesn't have a system role — inject as first user message with model ack
-            geminiContents.push({ role: "user", parts: [{ text: `[System]: ${opts.systemPrompt}` }] });
+            geminiContents.push({
+              role: "user",
+              parts: [{ text: `[System]: ${opts.systemPrompt}` }],
+            });
             geminiContents.push({ role: "model", parts: [{ text: "Understood." }] });
           }
           for (const m of messages) {
@@ -102,8 +105,7 @@ export class LlmService {
           );
           const text: string = res.data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
           const ms = Date.now() - start;
-          const promptTokens: number | null =
-            res.data?.usageMetadata?.promptTokenCount ?? null;
+          const promptTokens: number | null = res.data?.usageMetadata?.promptTokenCount ?? null;
           const completionTokens: number | null =
             res.data?.usageMetadata?.candidatesTokenCount ?? null;
           this.logger.log(

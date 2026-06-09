@@ -10,6 +10,7 @@ import {
   CallRepository,
   CampaignRepository,
   CampaignTargetRepository,
+  type Database,
 } from "@pikorua/db";
 import { CallRuntimeController } from "./call-runtime.controller";
 import { GuardrailService } from "../llm/guardrail.service";
@@ -25,22 +26,22 @@ import { IvrService } from "../ivr/ivr.service";
     GuardrailService,
     {
       provide: CallTurnRepository,
-      useFactory: (db: any) => new CallTurnRepository(db),
+      useFactory: (db: Database) => new CallTurnRepository(db),
       inject: ["DATABASE"],
     },
     {
       provide: CallRepository,
-      useFactory: (db: any) => new CallRepository(db),
+      useFactory: (db: Database) => new CallRepository(db),
       inject: ["DATABASE"],
     },
     {
       provide: CampaignRepository,
-      useFactory: (db: any) => new CampaignRepository(db),
+      useFactory: (db: Database) => new CampaignRepository(db),
       inject: ["DATABASE"],
     },
     {
       provide: CampaignTargetRepository,
-      useFactory: (db: any) => new CampaignTargetRepository(db),
+      useFactory: (db: Database) => new CampaignTargetRepository(db),
       inject: ["DATABASE"],
     },
     IvrService,

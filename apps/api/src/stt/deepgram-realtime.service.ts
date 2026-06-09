@@ -33,15 +33,33 @@ export class DeepgramRealtimeService {
     let resolved = false;
     let finalText = "";
 
-    return await new Promise<{ text: string; sttMs: number }>((resolve) => {
+    return await new Promise<{ text: string; sttMs: number }>((resolve, reject) => {
+      const finish = (text: string) => {
+        resolved = true;
+        clearTimeout(timer);
+        try {
+          ws.close();
+        } catch {}
+        resolve({ text, sttMs: Date.now() - started });
+      };
+
+      const fail = (message: string) => {
+        resolved = true;
+        clearTimeout(timer);
+        try {
+          ws.close();
+        } catch {}
+        reject(new ServiceUnavailableException(message));
+      };
+
       const timer = setTimeout(() => {
         if (!resolved) {
-          resolved = true;
           this.logger.warn("Realtime STT timeout");
-          try {
-            ws.close();
-          } catch {}
-          resolve({ text: finalText, sttMs: Date.now() - started });
+          if (finalText.trim()) {
+            finish(finalText);
+          } else {
+            fail("Realtime STT timed out without transcript");
+          }
         }
       }, timeoutMs + 2000);
 
@@ -84,13 +102,8 @@ export class DeepgramRealtimeService {
             if (alt) {
               finalText = alt?.transcript ?? finalText;
               if (alt?.is_final || parsed?.is_final) {
-                if (!resolved) {
-                  resolved = true;
-                  clearTimeout(timer);
-                  try {
-                    ws.close();
-                  } catch {}
-                  resolve({ text: finalText, sttMs: Date.now() - started });
+                if (!resolved && finalText.trim()) {
+                  finish(finalText);
                 }
               }
             }
@@ -106,17 +119,21 @@ export class DeepgramRealtimeService {
           err instanceof Error ? err.stack : String(err),
         );
         if (!resolved) {
-          resolved = true;
-          clearTimeout(timer);
-          resolve({ text: finalText, sttMs: Date.now() - started });
+          if (finalText.trim()) {
+            finish(finalText);
+          } else {
+            fail("Realtime STT socket error");
+          }
         }
       });
 
       ws.on("close", () => {
         if (!resolved) {
-          resolved = true;
-          clearTimeout(timer);
-          resolve({ text: finalText, sttMs: Date.now() - started });
+          if (finalText.trim()) {
+            finish(finalText);
+          } else {
+            fail("Realtime STT closed without transcript");
+          }
         }
       });
     });

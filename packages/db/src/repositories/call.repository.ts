@@ -28,18 +28,11 @@ export class CallRepository {
   }
 
   async update(id: string, data: Partial<NewCall>): Promise<Call | undefined> {
-    const [row] = await this.db
-      .update(calls)
-      .set(data)
-      .where(eq(calls.id, id))
-      .returning();
+    const [row] = await this.db.update(calls).set(data).where(eq(calls.id, id)).returning();
     return row;
   }
 
-  async updateByProviderCallSid(
-    sid: string,
-    data: Partial<NewCall>,
-  ): Promise<Call | undefined> {
+  async updateByProviderCallSid(sid: string, data: Partial<NewCall>): Promise<Call | undefined> {
     const [row] = await this.db
       .update(calls)
       .set(data)

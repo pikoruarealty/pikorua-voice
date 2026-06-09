@@ -1,4 +1,3 @@
-
 # End-to-End Test Plan — Pikorua Voice
 
 ## Goal
@@ -16,12 +15,12 @@ node tools/e2e/run-e2e.js
 
 The script requires the following env vars (read from `.env` automatically):
 
-| Variable | Example |
-|---|---|
-| `DATABASE_URL` | `postgresql://postgres:postgres@localhost:5433/pikorua_voice` |
-| `REDIS_URL` | `redis://localhost:6380` |
-| `PUBLIC_BASE_URL` | `http://localhost:4100` |
-| `API_AUTH_TOKEN` | _(any token set in .env)_ |
+| Variable          | Example                                                       |
+| ----------------- | ------------------------------------------------------------- |
+| `DATABASE_URL`    | `postgresql://postgres:postgres@localhost:5433/pikorua_voice` |
+| `REDIS_URL`       | `redis://localhost:6380`                                      |
+| `PUBLIC_BASE_URL` | `http://localhost:4100`                                       |
+| `API_AUTH_TOKEN`  | _(any token set in .env)_                                     |
 
 ---
 
@@ -113,11 +112,11 @@ WHERE call_id = '00000000-0000-0000-0000-000000000003';
 
 ### Expected outcomes
 
-| Table | Expected |
-|---|---|
-| `lead_scores` | 1 row, `label` = `hot` (transcript contains "interested", "demo", "schedule") |
-| `crm_sync_log` | 1 row, `status` = `success` or `skipped` (if CRM not configured) |
-| `call_events` | 1 `hot_alert` row if label = `hot` |
+| Table          | Expected                                                                      |
+| -------------- | ----------------------------------------------------------------------------- |
+| `lead_scores`  | 1 row, `label` = `hot` (transcript contains "interested", "demo", "schedule") |
+| `crm_sync_log` | 1 row, `status` = `success` or `skipped` (if CRM not configured)              |
+| `call_events`  | 1 `hot_alert` row if label = `hot`                                            |
 
 ---
 

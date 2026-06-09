@@ -3,7 +3,7 @@ import type { Database } from "../client";
 import { campaigns } from "../schema";
 import type { Campaign, NewCampaign } from "../schema";
 
-type CampaignStatus = typeof campaigns.status.enumValues[number];
+type CampaignStatus = (typeof campaigns.status.enumValues)[number];
 
 export class CampaignRepository {
   constructor(private readonly db: Database) {}
@@ -26,11 +26,7 @@ export class CampaignRepository {
   }
 
   async update(id: string, data: Partial<NewCampaign>): Promise<Campaign | undefined> {
-    const [row] = await this.db
-      .update(campaigns)
-      .set(data)
-      .where(eq(campaigns.id, id))
-      .returning();
+    const [row] = await this.db.update(campaigns).set(data).where(eq(campaigns.id, id)).returning();
     return row;
   }
 

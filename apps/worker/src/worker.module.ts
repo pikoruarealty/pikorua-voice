@@ -13,6 +13,7 @@ import {
   CrmSyncLogRepository,
   CallEventRepository,
   CallTurnRepository,
+  type Database,
 } from "@pikorua/db";
 import { PostCallProcessingService } from "./postcall/postcall.service";
 import { LeadScoreLlmService } from "./postcall/lead-score-llm.service";
@@ -33,37 +34,37 @@ import { CrmRetryScheduler } from "./postcall/crm-retry.scheduler";
   providers: [
     {
       provide: CampaignRepository,
-      useFactory: (db: any) => new CampaignRepository(db),
+      useFactory: (db: Database) => new CampaignRepository(db),
       inject: ["DATABASE"],
     },
     {
       provide: CampaignTargetRepository,
-      useFactory: (db: any) => new CampaignTargetRepository(db),
+      useFactory: (db: Database) => new CampaignTargetRepository(db),
       inject: ["DATABASE"],
     },
     {
       provide: CallRepository,
-      useFactory: (db: any) => new CallRepository(db),
+      useFactory: (db: Database) => new CallRepository(db),
       inject: ["DATABASE"],
     },
     {
       provide: LeadScoreRepository,
-      useFactory: (db: any) => new LeadScoreRepository(db),
+      useFactory: (db: Database) => new LeadScoreRepository(db),
       inject: ["DATABASE"],
     },
     {
       provide: CrmSyncLogRepository,
-      useFactory: (db: any) => new CrmSyncLogRepository(db),
+      useFactory: (db: Database) => new CrmSyncLogRepository(db),
       inject: ["DATABASE"],
     },
     {
       provide: CallEventRepository,
-      useFactory: (db: any) => new CallEventRepository(db),
+      useFactory: (db: Database) => new CallEventRepository(db),
       inject: ["DATABASE"],
     },
     {
       provide: CallTurnRepository,
-      useFactory: (db: any) => new CallTurnRepository(db),
+      useFactory: (db: Database) => new CallTurnRepository(db),
       inject: ["DATABASE"],
     },
     DialService,

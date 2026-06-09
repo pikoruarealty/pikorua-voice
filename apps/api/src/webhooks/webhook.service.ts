@@ -213,7 +213,11 @@ export class WebhookService {
   }
 
   private payloadHash(payload: ExotelWebhookDto): string {
-    return crypto.createHash("sha256").update(this.canonicalJson(payload)).digest("hex").slice(0, 32);
+    return crypto
+      .createHash("sha256")
+      .update(this.canonicalJson(payload))
+      .digest("hex")
+      .slice(0, 32);
   }
 
   private canonicalJson(value: unknown): string {

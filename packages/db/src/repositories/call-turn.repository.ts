@@ -26,10 +26,7 @@ export class CallTurnRepository {
   }
 
   async countByCallId(callId: string): Promise<number> {
-    const rows = await this.db
-      .select()
-      .from(callTurns)
-      .where(eq(callTurns.callId, callId));
+    const rows = await this.db.select().from(callTurns).where(eq(callTurns.callId, callId));
     return rows.length;
   }
 }

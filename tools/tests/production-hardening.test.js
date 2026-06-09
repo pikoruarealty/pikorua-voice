@@ -291,3 +291,22 @@ test("call-runtime totalMs uses real elapsed durations from captured timestamps"
   assert.match(src, /sttEnd - sttStart/, "sttElapsed must use sttEnd - sttStart");
   assert.match(src, /llmEnd - llmStart/, "llmElapsed must use llmEnd - llmStart");
 });
+
+test("realtime STT failures reject instead of returning empty transcripts", () => {
+  const src = read("apps/api/src/stt/deepgram-realtime.service.ts");
+  assert.match(
+    src,
+    /reject\(new ServiceUnavailableException/,
+    "realtime STT provider failures must reject explicitly",
+  );
+  assert.doesNotMatch(
+    src,
+    /resolve\(\{\s*text:\s*finalText/,
+    "realtime STT must not resolve an empty finalText as success",
+  );
+  assert.match(
+    src,
+    /without transcript|socket error/,
+    "failure messages should explain missing transcript/provider failure",
+  );
+});

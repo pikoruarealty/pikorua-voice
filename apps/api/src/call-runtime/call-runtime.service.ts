@@ -22,7 +22,7 @@ type CallState = {
   lastActivityAt: number;
 };
 
-// Evict call state after 2 hours of inactivity. This covers any missed terminal
+// Evict call state after 2 hours of inactivity. This covers a missed terminal
 // webhook while keeping memory bounded on a busy server.
 const STALE_MS = 2 * 60 * 60 * 1000;
 
@@ -165,12 +165,17 @@ export class CallRuntimeService {
       provider = "auto";
     }
 
-    const { text: rawLlmText, llmMs, model, promptTokens, completionTokens } =
-      await this.llm.generate(state.history, {
-        provider,
-        systemPrompt: state.systemPrompt,
-        maxTokens: 300,
-      });
+    const {
+      text: rawLlmText,
+      llmMs,
+      model,
+      promptTokens,
+      completionTokens,
+    } = await this.llm.generate(state.history, {
+      provider,
+      systemPrompt: state.systemPrompt,
+      maxTokens: 300,
+    });
     const llmEnd = Date.now();
 
     if (!String(rawLlmText ?? "").trim()) {
@@ -194,11 +199,9 @@ export class CallRuntimeService {
     let guardrailRule: string | null = null;
     // `spokenReply` is what goes to TTS and is returned to the caller.
     // `reply` (the original LLM output) is kept in history so the model sees its
-    // own outputs across turns — not sanitized placeholders — preserving coherence.
+    // own outputs across turns, not sanitized stand-ins, preserving coherence.
     const spokenReply =
-      guard.triggered && guard.replacement && guard.replacement.trim()
-        ? guard.replacement
-        : reply;
+      guard.triggered && guard.replacement && guard.replacement.trim() ? guard.replacement : reply;
     if (guard.triggered) {
       guardrailTriggered = true;
       guardrailRule = guard.rule;

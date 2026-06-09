@@ -37,10 +37,7 @@ export function nextDialWindowAt(campaign: Campaign, now: Date): Date | null {
     IST_OFFSET_MINUTES * 60_000;
 
   const targetDayOffset = currentMinutes < startMinutes ? 0 : 1;
-  const nextMs =
-    istMidnightUtcMs +
-    targetDayOffset * 24 * 60 * 60_000 +
-    startMinutes * 60_000;
+  const nextMs = istMidnightUtcMs + targetDayOffset * 24 * 60 * 60_000 + startMinutes * 60_000;
 
   const next = new Date(nextMs);
   next.setUTCSeconds(0, 0);

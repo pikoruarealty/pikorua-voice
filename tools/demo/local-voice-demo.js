@@ -68,6 +68,8 @@ ON CONFLICT DO NOTHING;
     callId,
     language: locale,
     apiBaseUrl: `http://localhost:${apiPort}/api`,
+    wsUrl: `ws://localhost:${apiPort}/demo-voice`,
+    token: process.env.API_AUTH_TOKEN || "",
   };
 }
 
@@ -119,8 +121,10 @@ async function processTurn(body) {
 
   const apiPayload = text ? JSON.parse(text) : {};
   const turns = readTurns(callId, turnIndex);
-  const transcript = turns.find((turn) => turn.role === "caller")?.content || "";
-  const reply = turns.find((turn) => turn.role === "assistant")?.content || "";
+  // Fragment-hold turns aren't persisted to the DB — fall back to the API payload.
+  const transcript =
+    turns.find((turn) => turn.role === "caller")?.content || apiPayload.transcript || "";
+  const reply = turns.find((turn) => turn.role === "assistant")?.content || apiPayload.reply || "";
 
   console.log("");
   console.log(`call=${callId} turn=${turnIndex}`);
@@ -132,6 +136,8 @@ async function processTurn(body) {
     transcript,
     reply,
     audioBase64: apiPayload.audioBase64,
+    endCall: apiPayload.endCall === true,
+    waitForMore: apiPayload.waitForMore === true,
   };
 }
 
@@ -320,7 +326,7 @@ const html = `<!doctype html>
   <main>
     <aside>
       <h1>Pikorua Local Voice Demo</h1>
-      <p>Record one turn from your microphone, send it through Deepgram, Google/Anthropic, and ElevenLabs, then play the assistant response. The terminal prints each transcript and reply.</p>
+      <p>Live streaming demo: your microphone streams continuously to the server, Deepgram detects when you finish speaking (thinking pauses won't cut you off), and you can interrupt the assistant mid-reply just by talking.</p>
       <div class="meta">
         <div><span>Call ID</span><code id="callId">creating...</code></div>
         <div><span>Language</span><code id="language">...</code></div>
@@ -363,27 +369,23 @@ const html = `<!doctype html>
       wave: document.getElementById("wave"),
     };
 
-    // VAD config — tune these if your mic is noisy or too sensitive
-    const VAD_SILENCE_THRESHOLD = 0.03;   // RMS below this = silence (raise if triggering on noise)
-    const VAD_SILENCE_MS = 1400;          // ms of silence before auto-send
-    const VAD_MIN_SPEECH_MS = 600;        // ignore clips shorter than this
-
+    // Streaming mode: the mic stays open for the whole conversation and audio
+    // is streamed to the server, where Deepgram decides utterance boundaries.
+    // No client-side VAD — thinking pauses won't cut you off, and you can
+    // interrupt the assistant mid-reply (barge-in).
     let session = null;
-    let turnIndex = 0;
     let conversationActive = false;
+    let ws = null;
+    let assistantSpeaking = false;
 
-    // per-turn state
+    // mic state
     let audioContext = null;
     let stream = null;
     let source = null;
     let processor = null;
     let silentGain = null;
-    let chunks = [];
     let lastSamples = new Float32Array(0);
-    let speechStarted = false;
-    let speechStartTime = 0;
-    let silenceStart = null;
-    let vadActive = false;
+    let vadActive = false; // drives the waveform animation
 
     function setStatus(text, kind) {
       els.status.textContent = text;
@@ -395,7 +397,6 @@ const html = `<!doctype html>
       const res = await fetch("/api/session");
       if (!res.ok) throw new Error(await res.text());
       session = await res.json();
-      turnIndex = 0;
       els.callId.textContent = session.callId;
       els.language.textContent = session.language;
       els.endpoint.textContent = session.apiBaseUrl;
@@ -411,12 +412,19 @@ const html = `<!doctype html>
       conversationActive = true;
       els.start.disabled = true;
       els.stop.disabled = false;
-      await listenForTurn();
+      await openMic();
+      connectSocket();
     }
 
     async function endConversation() {
       conversationActive = false;
       vadActive = false;
+      assistantSpeaking = false;
+      if (ws) {
+        try { ws.send(JSON.stringify({ type: "stop" })); } catch {}
+        try { ws.close(); } catch {}
+        ws = null;
+      }
       teardownMic();
       els.start.disabled = false;
       els.stop.disabled = true;
@@ -424,15 +432,10 @@ const html = `<!doctype html>
       drawIdle();
     }
 
-    async function listenForTurn() {
-      if (!conversationActive) return;
-
-      chunks = [];
-      speechStarted = false;
-      speechStartTime = 0;
-      silenceStart = null;
-      vadActive = true;
-
+    // Open the mic once for the whole conversation and stream 16 kHz PCM16
+    // to the server continuously. Utterance boundaries are decided server-side
+    // by Deepgram's endpointing, not by client silence thresholds.
+    async function openMic() {
       audioContext = new AudioContext();
       stream = await navigator.mediaDevices.getUserMedia({
         audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
@@ -443,85 +446,105 @@ const html = `<!doctype html>
       silentGain.gain.value = 0;
 
       processor.onaudioprocess = (event) => {
-        if (!vadActive) return;
         const input = event.inputBuffer.getChannelData(0);
         const copy = new Float32Array(input.length);
         copy.set(input);
         lastSamples = copy;
-
-        // compute RMS
-        let sum = 0;
-        for (let i = 0; i < input.length; i++) sum += input[i] * input[i];
-        const rms = Math.sqrt(sum / input.length);
-
-        const now = performance.now();
-
-        if (rms > VAD_SILENCE_THRESHOLD) {
-          // sound detected
-          if (!speechStarted) {
-            speechStarted = true;
-            speechStartTime = now;
-            setStatus("Listening — speak now");
-          }
-          silenceStart = null;
-          chunks.push(copy);
-        } else {
-          // silence
-          if (speechStarted) {
-            chunks.push(copy); // keep trailing silence for natural audio
-            if (silenceStart === null) silenceStart = now;
-            const silenceDuration = now - silenceStart;
-            const speechDuration = silenceStart - speechStartTime;
-            if (silenceDuration >= VAD_SILENCE_MS && speechDuration >= VAD_MIN_SPEECH_MS) {
-              // enough speech + enough silence = auto send
-              vadActive = false;
-              triggerSend();
-            }
-          }
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          const ds = downsampleTo16k(input, audioContext.sampleRate);
+          ws.send(floatTo16BitPCM(ds).buffer);
         }
       };
 
       source.connect(processor);
       processor.connect(silentGain);
       silentGain.connect(audioContext.destination);
-
-      setStatus("Listening — waiting for you to speak");
+      vadActive = true;
       drawRecording();
     }
 
-    async function triggerSend() {
-      setStatus("Processing your speech");
+    function connectSocket() {
+      const url = session.wsUrl + (session.token ? "?token=" + encodeURIComponent(session.token) : "");
+      ws = new WebSocket(url);
+      ws.binaryType = "arraybuffer";
+      ws.onopen = () => {
+        ws.send(JSON.stringify({
+          type: "start",
+          callId: session.callId,
+          language: session.language,
+          sampleRate: 16000,
+        }));
+        setStatus("Listening — speak naturally, short pauses are fine");
+      };
+      ws.onmessage = (event) => {
+        let msg;
+        try { msg = JSON.parse(event.data); } catch { return; }
+        handleServerMessage(msg).catch((err) => setStatus(err.message, "error"));
+      };
+      ws.onerror = () => setStatus("Connection error", "error");
+      ws.onclose = () => {
+        if (conversationActive) {
+          conversationActive = false;
+          vadActive = false;
+          teardownMic();
+          els.start.disabled = false;
+          els.stop.disabled = true;
+          setStatus("Connection closed");
+          drawIdle();
+        }
+      };
+    }
 
-      const nativeSampleRate = audioContext.sampleRate;
-      const targetSampleRate = 16000;
-
-      // Merge all chunks into one float array
-      const totalSamples = chunks.reduce((s, c) => s + c.length, 0);
-      const merged = new Float32Array(totalSamples);
-      let offset = 0;
-      for (const c of chunks) { merged.set(c, offset); offset += c.length; }
-
-      // Downsample to 16kHz using OfflineAudioContext to keep payload small
-      let downsampled = merged;
-      if (nativeSampleRate !== targetSampleRate) {
-        const offlineCtx = new OfflineAudioContext(
-          1,
-          Math.ceil(merged.length * targetSampleRate / nativeSampleRate),
-          targetSampleRate,
-        );
-        const buf = offlineCtx.createBuffer(1, merged.length, nativeSampleRate);
-        buf.copyToChannel(merged, 0);
-        const src = offlineCtx.createBufferSource();
-        src.buffer = buf;
-        src.connect(offlineCtx.destination);
-        src.start();
-        const rendered = await offlineCtx.startRendering();
-        downsampled = rendered.getChannelData(0);
+    async function handleServerMessage(msg) {
+      if (msg.type === "partial") {
+        els.transcript.textContent = msg.transcript + " …";
+        // Barge-in: the caller is talking over the assistant — stop playback
+        if (assistantSpeaking) {
+          els.audio.pause();
+          assistantSpeaking = false;
+          setStatus("Listening");
+        }
+        return;
       }
-
-      const wav = encodeWav([downsampled], targetSampleRate);
-      teardownMic();
-      await sendTurn(wav);
+      if (msg.type === "holding") {
+        els.transcript.textContent = (msg.transcript || "") + " …";
+        setStatus("Listening — please continue");
+        return;
+      }
+      if (msg.type === "reply") {
+        els.transcript.textContent = msg.transcript || "(no transcript)";
+        els.reply.textContent = msg.reply || "(no reply)";
+        const audioBytes = base64ToArrayBuffer(msg.audioBase64 || "");
+        if (audioBytes.byteLength > 0) {
+          const audioBlob = new Blob([audioBytes], { type: "audio/mpeg" });
+          els.audio.src = URL.createObjectURL(audioBlob);
+          assistantSpeaking = true;
+          setStatus("Assistant speaking — you can interrupt");
+          try {
+            await new Promise((resolve, reject) => {
+              els.audio.onended = resolve;
+              els.audio.onerror = reject;
+              els.audio.play().catch(reject);
+            });
+          } catch {
+            setStatus("Tap play to hear the reply", "warn");
+            await new Promise((resolve) => {
+              els.audio.onended = resolve;
+            });
+          }
+          assistantSpeaking = false;
+        }
+        if (msg.endCall) {
+          await endConversation();
+          setStatus("Call complete — lead details collected");
+          return;
+        }
+        if (conversationActive) setStatus("Listening");
+        return;
+      }
+      if (msg.type === "error") {
+        setStatus(msg.message || "Server error", "error");
+      }
     }
 
     function teardownMic() {
@@ -532,119 +555,29 @@ const html = `<!doctype html>
       if (audioContext) { audioContext.close().catch(() => {}); audioContext = null; }
     }
 
-    async function sendTurn(wavBuffer) {
-      try {
-        setStatus("Thinking");
-        const res = await fetch("/api/turn", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            callId: session.callId,
-            turnIndex,
-            audioBase64: arrayBufferToBase64(wavBuffer),
-          }),
-        });
-        const payload = await res.json();
-        if (!res.ok) {
-          throw new Error(payload.error || "Voice runtime failed");
-        }
-
-        turnIndex = Number(payload.turnIndex || turnIndex) + 1;
-        els.transcript.textContent = payload.transcript || "(no transcript)";
-        els.reply.textContent = payload.reply || "(no reply)";
-
-        const audioBytes = base64ToArrayBuffer(payload.audioBase64);
-        const audioBlob = new Blob([audioBytes], { type: "audio/mpeg" });
-        const audioUrl = URL.createObjectURL(audioBlob);
-        els.audio.src = audioUrl;
-
-        setStatus("Assistant speaking");
-        drawIdle();
-
-        try {
-          await new Promise((resolve, reject) => {
-            els.audio.onended = resolve;
-            els.audio.onerror = reject;
-            els.audio.play().catch(reject);
-          });
-        } catch {
-          setStatus("Tap play to hear reply, then conversation resumes", "warn");
-          await new Promise((resolve) => {
-            els.audio.onended = resolve;
-          });
-        }
-
-        // end_call action from LLM — details collected, close conversation
-        if (payload.endCall) {
-          conversationActive = false;
-          els.start.disabled = false;
-          els.stop.disabled = true;
-          setStatus("Call complete — lead details collected");
-          return;
-        }
-
-        // after reply finishes, auto-listen again
-        if (conversationActive) {
-          await listenForTurn();
-        }
-      } catch (err) {
-        setStatus(err.message, "error");
-        // on error, still try to keep conversation going after a moment
-        if (conversationActive) {
-          setTimeout(() => listenForTurn().catch(() => {}), 2000);
-        }
-        throw err;
-      }
-    }
-
-    function encodeWav(buffers, sampleRate) {
-      const sampleCount = buffers.reduce((sum, buffer) => sum + buffer.length, 0);
-      const data = new Float32Array(sampleCount);
-      let offset = 0;
-      for (const buffer of buffers) {
-        data.set(buffer, offset);
-        offset += buffer.length;
-      }
-
-      const out = new ArrayBuffer(44 + data.length * 2);
-      const view = new DataView(out);
-      writeString(view, 0, "RIFF");
-      view.setUint32(4, 36 + data.length * 2, true);
-      writeString(view, 8, "WAVE");
-      writeString(view, 12, "fmt ");
-      view.setUint32(16, 16, true);
-      view.setUint16(20, 1, true);
-      view.setUint16(22, 1, true);
-      view.setUint32(24, sampleRate, true);
-      view.setUint32(28, sampleRate * 2, true);
-      view.setUint16(32, 2, true);
-      view.setUint16(34, 16, true);
-      writeString(view, 36, "data");
-      view.setUint32(40, data.length * 2, true);
-
-      let pos = 44;
-      for (let i = 0; i < data.length; i += 1) {
-        const sample = Math.max(-1, Math.min(1, data[i]));
-        view.setInt16(pos, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
-        pos += 2;
+    // Linear-interpolation resample to 16 kHz for the streaming socket
+    function downsampleTo16k(input, fromRate) {
+      if (fromRate === 16000) return input;
+      const ratio = fromRate / 16000;
+      const outLen = Math.floor(input.length / ratio);
+      const out = new Float32Array(outLen);
+      for (let i = 0; i < outLen; i += 1) {
+        const pos = i * ratio;
+        const i0 = Math.floor(pos);
+        const i1 = Math.min(i0 + 1, input.length - 1);
+        const frac = pos - i0;
+        out[i] = input[i0] * (1 - frac) + input[i1] * frac;
       }
       return out;
     }
 
-    function writeString(view, offset, value) {
-      for (let i = 0; i < value.length; i += 1) {
-        view.setUint8(offset + i, value.charCodeAt(i));
+    function floatTo16BitPCM(float32) {
+      const out = new Int16Array(float32.length);
+      for (let i = 0; i < float32.length; i += 1) {
+        const s = Math.max(-1, Math.min(1, float32[i]));
+        out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
       }
-    }
-
-    function arrayBufferToBase64(buffer) {
-      const bytes = new Uint8Array(buffer);
-      let binary = "";
-      const size = 0x8000;
-      for (let i = 0; i < bytes.length; i += size) {
-        binary += String.fromCharCode.apply(null, bytes.subarray(i, i + size));
-      }
-      return btoa(binary);
+      return out;
     }
 
     function base64ToArrayBuffer(base64) {

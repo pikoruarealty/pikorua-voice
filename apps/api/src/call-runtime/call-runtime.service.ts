@@ -20,17 +20,47 @@ type CallState = {
   history: LlmMessage[];
   systemPrompt: string;
   lastActivityAt: number;
+  // Caller speech held back because it looked like a mid-thought pause.
+  // Merged with the next segment before the LLM sees it.
+  pendingFragment: string | null;
 };
 
-// Filler phrases played while the LLM is thinking (>1.2 s).
-// Keeps the call from feeling dead-silent during processing.
-const HINGLISH_FILLERS = ["Acha...", "Hmm...", "Haan, ek second...", "Ji, dekhta hoon..."];
-const ENGLISH_FILLERS = ["Okay...", "Right, one moment...", "Sure, let me check..."];
-let fillerIdx = 0;
-function nextFiller(isHinglish: boolean): string {
-  const list = isHinglish ? HINGLISH_FILLERS : ENGLISH_FILLERS;
-  return list[fillerIdx++ % list.length];
+// Trailing words that signal the caller paused mid-thought rather than finishing.
+// Covers common Hindi/English conjunctions, fillers, and dangling possessives.
+const CONTINUATION_CUES = new Set([
+  "aur", "and", "to", "toh", "but", "lekin", "par", "ki", "because", "kyunki", "kyuki",
+  "matlab", "like", "so", "ya", "or", "plus", "um", "uh", "umm", "hmm", "ek",
+  "mera", "meri", "apna", "apni", "uska", "uski",
+]);
+
+function looksIncomplete(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  // Trailing comma or dash — sentence clearly cut off
+  if (/[,\-–—]$/.test(trimmed)) return true;
+  const words = trimmed.toLowerCase().replace(/[.?!।]+$/, "").trim().split(/\s+/);
+  const last = words[words.length - 1] ?? "";
+  return CONTINUATION_CUES.has(last);
 }
+
+// Phonetic respellings for Indian words ElevenLabs mispronounces when reading
+// romanized Hinglish. Applied only to the text sent to TTS — the transcript
+// and DB records keep the standard spelling.
+const TTS_PRONUNCIATIONS: Array<[RegExp, string]> = [
+  [/\bcrores\b/gi, "karod"],
+  [/\bcrore\b/gi, "karod"],
+  [/\blakhs\b/gi, "laakh"],
+  [/\blakh\b/gi, "laakh"],
+];
+
+function phoneticizeForTts(text: string): string {
+  let out = text;
+  for (const [pattern, replacement] of TTS_PRONUNCIATIONS) {
+    out = out.replace(pattern, replacement);
+  }
+  return out;
+}
+
 
 // Evict call state after 2 hours of inactivity. This covers a missed terminal
 // webhook while keeping memory bounded on a busy server.
@@ -91,21 +121,28 @@ export class CallRuntimeService {
     const notesBlock = campaignNotes ? `\nCampaign briefing: ${campaignNotes}` : "";
 
     if (locale.toLowerCase().startsWith("hi") || locale.toLowerCase().startsWith("gu")) {
-      return `You are Priya, calling ${leadName} from Pikorua real estate about ${campaignName}.${notesBlock}
+      return `You are Priya — a woman — calling ${leadName} from Pikorua real estate about ${campaignName}.${notesBlock}
 
 GOAL: Chat naturally, find out their interest, collect: name (if unknown), rough budget, preferred area, best time to call back. Once you have all four, end the call warmly.
 
-LANGUAGE RULES — this is critical:
-- Speak ONLY in casual Hinglish like a 25-year-old Mumbai professional on the phone
-- Mix Hindi and English naturally: "Haan", "acha", "theek hai", "koi baat nahi", "dekho", "basically", "actually", "property", "budget", "area", "time"
-- FORBIDDEN words (too formal/Sanskrit — never use): "sampatti", "niwesh", "uttam", "kripya", "aapka swagat", "shubh", "priy", "vyakti", "uchit", "suvidha"
-- Keep it SHORT — max 1-2 sentences. ONE question per turn only.
+GENDER — CRITICAL: You are female. Always use feminine Hindi verb forms.
+- CORRECT (female): "bol rahi hoon", "bata sakti hoon", "karwa deti hoon", "dungi", "aaungi", "chahti hoon"
+- WRONG (male — never use): "bol raha hoon", "bata sakta hoon", "karwa deta hoon", "dunga", "aaunga", "chahta hoon"
 
-EXAMPLES of good replies:
+LANGUAGE RULES:
+- Casual Hinglish only — like a 25-year-old Mumbai woman on the phone
+- Mix Hindi + English naturally: "Haan", "acha", "theek hai", "koi baat nahi", "basically", "property", "budget", "area", "time"
+- NEVER use: "sampatti", "niwesh", "uttam", "kripya", "aapka swagat", "priy", "vyakti", "suvidha"
+- Use ONLY real, common Hindi words. NEVER invent or mash up words — if you are not 100% sure a Hindi word is real and common, use the English word instead.
+- No American exclamations like "Wow" — say "Arre wah", "Bahut badhiya", or "Acha!"
+- SHORT replies — max 1-2 sentences. ONE question per turn only.
+- If the caller's sentence seems cut off or incomplete, do NOT guess what they meant — just say something short like "Haan ji, boliye?" or "Haan, aage boliye" and let them finish.
+
+EXAMPLES of correct replies:
 - {"reply": "Haan ji, main Priya bol rahi hoon Pikorua se — aapko property mein interest hai kya?", "action": null}
 - {"reply": "Acha, to roughly budget kitna hai aapka — 50 lakh ke upar ya neeche?", "action": null}
-- {"reply": "Got it! Aur kaunsa area dekh rahe ho — Pune side ya Mumbai?", "action": null}
-- {"reply": "Theek hai, main consultant se aapko call karwa deta hoon kal 11 baje — sahi rahega?", "action": null}
+- {"reply": "Got it! Aur kaunsa area dekh rahi ho — Pune side ya Mumbai?", "action": null}
+- {"reply": "Theek hai, main consultant se aapko call karwa deti hoon kal 11 baje — sahi rahega?", "action": null}
 - {"reply": "Acha no problem, time diya aapne uske liye thanks — take care!", "action": "end_call"}
 
 OUTPUT FORMAT: Reply ONLY with raw JSON on a single line. No markdown, no code fences, no extra text.
@@ -117,7 +154,8 @@ Set action to "end_call" only when: (1) you have name + budget + area + callback
 
 GOAL: Have a warm natural conversation. Collect: their name (if unknown), budget range, preferred area, best callback time. Once you have all four, end the call.
 
-STYLE: Casual, friendly, like a helpful colleague — not a scripted agent. 1-2 sentences max. One question per turn.
+STYLE: Speak natural Indian English — the way an educated Indian professional talks on a phone call. Use everyday Indian phrasing: "I'll arrange a call back", "no issues", "you can share your budget, no problem". NEVER use British idioms or tone: no "brilliant", "cheers", "lovely", "fancy", "quid", "whilst", "shall I", "fortnight". Warm and friendly, like a helpful colleague — not a scripted agent. 1-2 sentences max. One question per turn.
+If the caller's sentence seems cut off or incomplete, do NOT guess — say something brief like "Sure, please go on" and let them finish.
 RULES: Never quote specific prices or guarantee returns. If not interested, wrap up warmly.
 
 OUTPUT FORMAT: Reply ONLY with raw JSON. No markdown, no code fences.
@@ -163,19 +201,70 @@ Set action to "end_call" only when details are collected OR person is not intere
         ? "Sorry, aapki awaaz thodi clear nahi aayi — ek baar phir bol sakte hain?"
         : "Sorry, I didn't quite catch that — could you say that again?";
       const { audio } = await this.tts.synthesize(reprompt);
-      return { audio, transcript: "", reply: reprompt };
+      return { audio, transcript: "", reply: reprompt, endCall: false, waitForMore: false };
     }
 
+    return this.processUtterance(callId, turnIndex, text, {
+      locale,
+      sttMs: sttMs ?? Math.max(0, sttEnd - sttStart),
+    });
+  }
+
+  // Core turn pipeline shared by the HTTP path (handleTurn) and the streaming
+  // WebSocket path (DemoVoiceGateway) — and later the Exotel media path.
+  // Takes the caller's finished utterance text; returns audio + reply.
+  async processUtterance(
+    callId: string,
+    turnIndex: number,
+    utteranceText: string,
+    opts: { locale?: string; sttMs?: number } = {},
+  ) {
     // Retrieve or initialise per-call state.
-    // System prompt is built once and cached; subsequent turns reuse it (no extra DB reads).
+    // System prompt is built once and cached; subsequent turns reuse it.
+    let locale = opts.locale;
     let state = this.calls.get(callId);
     if (!state) {
+      const call = await this.callRepo.findById(callId);
+      locale =
+        locale ?? String(call?.locale ?? this.config.get("GEMINI_LANGUAGE_DEFAULT") ?? "hi-IN");
       const systemPrompt = await this.buildSystemPrompt(locale, call?.campaignId, call?.targetId);
-      state = { history: [], systemPrompt, lastActivityAt: Date.now() };
+      state = { history: [], systemPrompt, lastActivityAt: Date.now(), pendingFragment: null };
       this.calls.set(callId, state);
     }
+    locale = locale ?? String(this.config.get("GEMINI_LANGUAGE_DEFAULT") ?? "hi-IN");
     state.lastActivityAt = Date.now();
-    state.history.push({ role: "user", content: text });
+
+    // Merge a fragment held from the previous segment (caller paused mid-thought).
+    let utterance = utteranceText;
+    const mergedFromFragment = state.pendingFragment !== null;
+    if (state.pendingFragment) {
+      utterance = `${state.pendingFragment} ${utteranceText}`.trim();
+      state.pendingFragment = null;
+    }
+
+    // If this segment looks cut off mid-thought, hold it and let the caller
+    // finish. Only hold once per turn — a merged utterance always proceeds,
+    // so a caller can't get stuck in an endless wait loop.
+    if (!mergedFromFragment && looksIncomplete(utterance)) {
+      state.pendingFragment = utterance;
+      this.logger.log(`Holding mid-thought fragment call=${callId}: "${utterance.slice(0, 80)}"`);
+      return {
+        audio: Buffer.alloc(0),
+        transcript: utterance,
+        reply: "",
+        endCall: false,
+        waitForMore: true,
+      };
+    }
+
+    // Append to history; merge into the previous entry if it was also a user
+    // message (LLM providers reject consecutive same-role messages).
+    const lastMsg = state.history[state.history.length - 1];
+    if (lastMsg && lastMsg.role === "user") {
+      lastMsg.content = `${lastMsg.content} ${utterance}`;
+    } else {
+      state.history.push({ role: "user", content: utterance });
+    }
 
     // Decide LLM provider based on call locale and rollout percentage.
     const llmStart = Date.now();
@@ -198,34 +287,13 @@ Set action to "end_call" only when details are collected OR person is not intere
       provider = "auto";
     }
 
-    // Kick off LLM and a filler TTS in parallel.
-    // If LLM takes >1.2 s, the filler audio is prepended to the real reply
-    // so the caller hears something instead of dead silence.
-    const FILLER_THRESHOLD_MS = 1200;
-    const fillerText = nextFiller(isHinglish);
-    const llmPromise = this.llm.generate(state.history, {
+    const llmResolved = await this.llm.generate(state.history, {
       provider,
       systemPrompt: state.systemPrompt,
-      maxTokens: 100,
+      // Enough headroom for the JSON wrapper + a 2-sentence reply; a cap hit
+      // mid-JSON breaks parsing and leaks syntax into the spoken reply.
+      maxTokens: 160,
     });
-    const fillerPromise = this.tts.synthesize(fillerText).catch(() => null);
-
-    // Race: if LLM resolves within threshold, discard filler. Otherwise use it.
-    let fillerAudio: Buffer | null = null;
-    const llmResult = await Promise.race([
-      llmPromise.then((r) => ({ done: true as const, result: r })),
-      new Promise<{ done: false }>((res) => setTimeout(() => res({ done: false }), FILLER_THRESHOLD_MS)),
-    ]);
-
-    let llmResolved: Awaited<ReturnType<typeof this.llm.generate>>;
-    if (llmResult.done) {
-      llmResolved = llmResult.result;
-    } else {
-      // LLM is still thinking — grab the filler audio and wait for LLM
-      const f = await fillerPromise;
-      if (f && f.audio.length > 0) fillerAudio = f.audio;
-      llmResolved = await llmPromise;
-    }
 
     const { text: rawLlmText, llmMs, model, promptTokens, completionTokens } = llmResolved;
     const llmEnd = Date.now();
@@ -238,19 +306,30 @@ Set action to "end_call" only when details are collected OR person is not intere
     // Parse structured JSON output; strip markdown fences Gemini sometimes adds.
     let reply = String(rawLlmText ?? "");
     let shouldEndCall = false;
+    const stripped = reply
+      .trim()
+      .replace(/^```(?:json)?\s*/i, "")
+      .replace(/\s*```\s*$/, "")
+      .trim();
+    // Pull out the first {...} block in case the model added surrounding prose
+    const jsonMatch = stripped.match(/\{[\s\S]*\}/);
+    const candidate = jsonMatch ? jsonMatch[0] : stripped;
     try {
-      const stripped = reply
-        .trim()
-        .replace(/^```(?:json)?\s*/i, "")
-        .replace(/\s*```\s*$/, "")
-        .trim();
-      const parsed = JSON.parse(stripped);
+      const parsed = JSON.parse(candidate);
       const validated = LlmResponseSchema.parse(parsed);
       reply = validated.reply;
       if (validated.action === "end_call") shouldEndCall = true;
     } catch {
-      // Not JSON — use raw text but strip any accidental JSON wrapper chars
-      reply = reply.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/, "").trim();
+      // Strict parse failed (truncated or malformed JSON). Salvage the reply
+      // field with a regex so JSON syntax is never spoken aloud to the caller.
+      const replyMatch = candidate.match(/"reply"\s*:\s*"((?:[^"\\]|\\.)*)/);
+      if (replyMatch) {
+        reply = replyMatch[1].replace(/\\"/g, '"').replace(/\\n/g, " ").trim();
+        shouldEndCall = /"action"\s*:\s*"end_call"/.test(candidate);
+        this.logger.warn(`LLM JSON malformed — salvaged reply for call=${callId}`);
+      } else {
+        reply = stripped;
+      }
     }
 
     // Guardrail check (hard rules + semantic LLM check).
@@ -270,23 +349,25 @@ Set action to "end_call" only when details are collected OR person is not intere
     // Append the LLM's actual output to history (not the guardrail replacement).
     state.history.push({ role: "assistant", content: reply });
 
+    const isHinglishLocale =
+      locale.toLowerCase().startsWith("hi") || locale.toLowerCase().startsWith("gu");
     const ttsStart = Date.now();
-    const { audio: replyAudio, ttsMs } = await this.tts.synthesize(spokenReply);
-    if (replyAudio.length === 0) {
+    const { audio, ttsMs } = await this.tts.synthesize(
+      isHinglishLocale ? phoneticizeForTts(spokenReply) : spokenReply,
+    );
+    if (audio.length === 0) {
       await this.failCall(callId, "TTS returned empty audio");
       throw new ServiceUnavailableException("TTS provider returned empty audio");
     }
-    // Prepend filler audio if we used it (simple buffer concat — both are MP3)
-    const audio = fillerAudio ? Buffer.concat([fillerAudio, replyAudio]) : replyAudio;
 
-    const sttElapsed = sttMs ?? Math.max(0, sttEnd - sttStart);
+    const sttElapsed = opts.sttMs ?? 0;
     const llmElapsed = llmMs ?? Math.max(0, llmEnd - llmStart);
 
     const callerTurn: NewCallTurn = {
       callId,
       turnIndex: turnIndex * 2,
       role: "caller",
-      content: text,
+      content: utterance,
       locale,
       sttMs: sttElapsed,
       totalMs: sttElapsed,
@@ -338,9 +419,9 @@ Set action to "end_call" only when details are collected OR person is not intere
     }
 
     this.logger.log(
-      `Turn ${turnIndex} call=${callId} stt=${sttMs}ms llm=${llmMs}ms tts=${ttsMs}ms tokens=${promptTokens}+${completionTokens} filler=${fillerAudio ? "yes" : "no"} endCall=${shouldEndCall}`,
+      `Turn ${turnIndex} call=${callId} stt=${sttElapsed}ms llm=${llmMs}ms tts=${ttsMs}ms tokens=${promptTokens}+${completionTokens} endCall=${shouldEndCall}`,
     );
-    return { audio, transcript: text, reply: spokenReply, endCall: shouldEndCall };
+    return { audio, transcript: utterance, reply: spokenReply, endCall: shouldEndCall, waitForMore: false };
   }
 
   // Called by webhook handler when a call reaches a terminal state.

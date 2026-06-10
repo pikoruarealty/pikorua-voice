@@ -26,6 +26,7 @@ export class CallRuntimeController {
       transcript: result.transcript,
       reply: result.reply,
       endCall: result.endCall ?? false,
+      waitForMore: result.waitForMore ?? false,
     };
   }
 }

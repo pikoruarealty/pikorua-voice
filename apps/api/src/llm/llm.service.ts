@@ -40,6 +40,8 @@ export class LlmService {
           const body: Record<string, unknown> = {
             model: anthropicModel,
             max_tokens: maxTokens,
+            // Lower temperature keeps Hinglish output on real, common words
+            temperature: 0.6,
             messages,
           };
           if (opts?.systemPrompt) {
@@ -100,7 +102,8 @@ export class LlmService {
             `https://generativelanguage.googleapis.com/v1beta/models/${googleModel}:generateContent`,
             {
               contents: geminiContents,
-              generationConfig: { maxOutputTokens: maxTokens },
+              // Lower temperature keeps Hinglish output on real, common words
+              generationConfig: { maxOutputTokens: maxTokens, temperature: 0.6 },
             },
             { params: { key: googleKey }, timeout: 8000 },
           );

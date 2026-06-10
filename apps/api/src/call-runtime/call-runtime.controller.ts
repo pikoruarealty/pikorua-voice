@@ -25,6 +25,7 @@ export class CallRuntimeController {
       audioBase64: result.audio.toString("base64"),
       transcript: result.transcript,
       reply: result.reply,
+      endCall: result.endCall ?? false,
     };
   }
 }

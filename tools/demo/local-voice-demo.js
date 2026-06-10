@@ -574,6 +574,15 @@ const html = `<!doctype html>
           });
         }
 
+        // end_call action from LLM — details collected, close conversation
+        if (payload.endCall) {
+          conversationActive = false;
+          els.start.disabled = false;
+          els.stop.disabled = true;
+          setStatus("Call complete — lead details collected");
+          return;
+        }
+
         // after reply finishes, auto-listen again
         if (conversationActive) {
           await listenForTurn();

@@ -22,6 +22,16 @@ type CallState = {
   lastActivityAt: number;
 };
 
+// Filler phrases played while the LLM is thinking (>1.2 s).
+// Keeps the call from feeling dead-silent during processing.
+const HINGLISH_FILLERS = ["Acha...", "Hmm...", "Haan, ek second...", "Ji, dekhta hoon..."];
+const ENGLISH_FILLERS = ["Okay...", "Right, one moment...", "Sure, let me check..."];
+let fillerIdx = 0;
+function nextFiller(isHinglish: boolean): string {
+  const list = isHinglish ? HINGLISH_FILLERS : ENGLISH_FILLERS;
+  return list[fillerIdx++ % list.length];
+}
+
 // Evict call state after 2 hours of inactivity. This covers a missed terminal
 // webhook while keeping memory bounded on a busy server.
 const STALE_MS = 2 * 60 * 60 * 1000;
@@ -81,21 +91,38 @@ export class CallRuntimeService {
     const notesBlock = campaignNotes ? `\nCampaign briefing: ${campaignNotes}` : "";
 
     if (locale.toLowerCase().startsWith("hi") || locale.toLowerCase().startsWith("gu")) {
-      return [
-        `You are Priya, a friendly outbound concierge at Pikorua — a premium real estate company.`,
-        `You are talking with ${leadName} about ${campaignName}.${notesBlock}`,
-        `LANGUAGE: Always speak in casual everyday Hinglish — the way young urban Indians actually talk on the phone, mixing simple Hindi and common English words. Examples: "Haan bilkul, koi baat nahi", "Acha to basically baat yeh hai", "dekhiye yeh property kaafi acchi hai", "aapko kab convenient rahega?". Use simple, daily-use words. NEVER use heavy, literary or Sanskritized Hindi (avoid words like "sampatti", "vyakti", "uchit", "kripya") — just say property, person, theek hai, please. Keep English words that everyone uses naturally (call, time, property, area, budget).`,
-        `STYLE: Sound like a warm, friendly human on a real phone call — not a scripted bot. Use natural fillers occasionally ("hmm", "acha", "haan ji"). Short replies only — 1 to 2 sentences max. Ask only one question at a time. Use contractions and a relaxed tone.`,
-        `RULES: Never quote prices or guarantee returns. If not interested, wrap up warmly.`,
-      ].join(" ");
+      return `You are Priya, calling ${leadName} from Pikorua real estate about ${campaignName}.${notesBlock}
+
+GOAL: Chat naturally, find out their interest, collect: name (if unknown), rough budget, preferred area, best time to call back. Once you have all four, end the call warmly.
+
+LANGUAGE RULES — this is critical:
+- Speak ONLY in casual Hinglish like a 25-year-old Mumbai professional on the phone
+- Mix Hindi and English naturally: "Haan", "acha", "theek hai", "koi baat nahi", "dekho", "basically", "actually", "property", "budget", "area", "time"
+- FORBIDDEN words (too formal/Sanskrit — never use): "sampatti", "niwesh", "uttam", "kripya", "aapka swagat", "shubh", "priy", "vyakti", "uchit", "suvidha"
+- Keep it SHORT — max 1-2 sentences. ONE question per turn only.
+
+EXAMPLES of good replies:
+- {"reply": "Haan ji, main Priya bol rahi hoon Pikorua se — aapko property mein interest hai kya?", "action": null}
+- {"reply": "Acha, to roughly budget kitna hai aapka — 50 lakh ke upar ya neeche?", "action": null}
+- {"reply": "Got it! Aur kaunsa area dekh rahe ho — Pune side ya Mumbai?", "action": null}
+- {"reply": "Theek hai, main consultant se aapko call karwa deta hoon kal 11 baje — sahi rahega?", "action": null}
+- {"reply": "Acha no problem, time diya aapne uske liye thanks — take care!", "action": "end_call"}
+
+OUTPUT FORMAT: Reply ONLY with raw JSON on a single line. No markdown, no code fences, no extra text.
+Format: {"reply": "what Priya says", "action": null} OR {"reply": "...", "action": "end_call"}
+Set action to "end_call" only when: (1) you have name + budget + area + callback time, OR (2) person is clearly not interested and you wrapped up.`;
     }
 
-    return [
-      `You are Priya, a friendly outbound concierge at Pikorua — a premium real estate company.`,
-      `You are talking with ${leadName} about ${campaignName}.${notesBlock}`,
-      `STYLE: Be warm, casual, and natural — like a helpful friend, not a call centre agent. Short replies, 1-2 sentences max. Ask only one question per turn.`,
-      `RULES: Never quote prices or guarantee returns. If not interested, wrap up warmly.`,
-    ].join(" ");
+    return `You are Priya, calling ${leadName} from Pikorua real estate about ${campaignName}.${notesBlock}
+
+GOAL: Have a warm natural conversation. Collect: their name (if unknown), budget range, preferred area, best callback time. Once you have all four, end the call.
+
+STYLE: Casual, friendly, like a helpful colleague — not a scripted agent. 1-2 sentences max. One question per turn.
+RULES: Never quote specific prices or guarantee returns. If not interested, wrap up warmly.
+
+OUTPUT FORMAT: Reply ONLY with raw JSON. No markdown, no code fences.
+Format: {"reply": "what you say", "action": null} OR {"reply": "...", "action": "end_call"}
+Set action to "end_call" only when details are collected OR person is not interested and you've wrapped up.`;
   }
 
   // Process one audio turn: accepts callId and audio buffer containing caller speech.
@@ -171,17 +198,36 @@ export class CallRuntimeService {
       provider = "auto";
     }
 
-    const {
-      text: rawLlmText,
-      llmMs,
-      model,
-      promptTokens,
-      completionTokens,
-    } = await this.llm.generate(state.history, {
+    // Kick off LLM and a filler TTS in parallel.
+    // If LLM takes >1.2 s, the filler audio is prepended to the real reply
+    // so the caller hears something instead of dead silence.
+    const FILLER_THRESHOLD_MS = 1200;
+    const fillerText = nextFiller(isHinglish);
+    const llmPromise = this.llm.generate(state.history, {
       provider,
       systemPrompt: state.systemPrompt,
-      maxTokens: 80,
+      maxTokens: 100,
     });
+    const fillerPromise = this.tts.synthesize(fillerText).catch(() => null);
+
+    // Race: if LLM resolves within threshold, discard filler. Otherwise use it.
+    let fillerAudio: Buffer | null = null;
+    const llmResult = await Promise.race([
+      llmPromise.then((r) => ({ done: true as const, result: r })),
+      new Promise<{ done: false }>((res) => setTimeout(() => res({ done: false }), FILLER_THRESHOLD_MS)),
+    ]);
+
+    let llmResolved: Awaited<ReturnType<typeof this.llm.generate>>;
+    if (llmResult.done) {
+      llmResolved = llmResult.result;
+    } else {
+      // LLM is still thinking — grab the filler audio and wait for LLM
+      const f = await fillerPromise;
+      if (f && f.audio.length > 0) fillerAudio = f.audio;
+      llmResolved = await llmPromise;
+    }
+
+    const { text: rawLlmText, llmMs, model, promptTokens, completionTokens } = llmResolved;
     const llmEnd = Date.now();
 
     if (!String(rawLlmText ?? "").trim()) {
@@ -189,14 +235,22 @@ export class CallRuntimeService {
       throw new ServiceUnavailableException("LLM provider returned no reply");
     }
 
-    // Try to parse structured JSON output; fall back to raw text.
+    // Parse structured JSON output; strip markdown fences Gemini sometimes adds.
     let reply = String(rawLlmText ?? "");
+    let shouldEndCall = false;
     try {
-      const parsed = JSON.parse(reply);
+      const stripped = reply
+        .trim()
+        .replace(/^```(?:json)?\s*/i, "")
+        .replace(/\s*```\s*$/, "")
+        .trim();
+      const parsed = JSON.parse(stripped);
       const validated = LlmResponseSchema.parse(parsed);
       reply = validated.reply;
+      if (validated.action === "end_call") shouldEndCall = true;
     } catch {
-      // Not JSON or schema mismatch — continue with raw text
+      // Not JSON — use raw text but strip any accidental JSON wrapper chars
+      reply = reply.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/, "").trim();
     }
 
     // Guardrail check (hard rules + semantic LLM check).
@@ -217,11 +271,13 @@ export class CallRuntimeService {
     state.history.push({ role: "assistant", content: reply });
 
     const ttsStart = Date.now();
-    const { audio, ttsMs } = await this.tts.synthesize(spokenReply);
-    if (audio.length === 0) {
+    const { audio: replyAudio, ttsMs } = await this.tts.synthesize(spokenReply);
+    if (replyAudio.length === 0) {
       await this.failCall(callId, "TTS returned empty audio");
       throw new ServiceUnavailableException("TTS provider returned empty audio");
     }
+    // Prepend filler audio if we used it (simple buffer concat — both are MP3)
+    const audio = fillerAudio ? Buffer.concat([fillerAudio, replyAudio]) : replyAudio;
 
     const sttElapsed = sttMs ?? Math.max(0, sttEnd - sttStart);
     const llmElapsed = llmMs ?? Math.max(0, llmEnd - llmStart);
@@ -271,10 +327,20 @@ export class CallRuntimeService {
       );
     }
 
+    if (shouldEndCall) {
+      this.logger.log(`Call ${callId} ending — lead details collected`);
+      this.calls.delete(callId);
+      try {
+        await this.callRepo.update(callId, { status: "completed" });
+      } catch (err) {
+        this.logger.warn("Failed to mark call completed", String(err));
+      }
+    }
+
     this.logger.log(
-      `Turn ${turnIndex} call=${callId} stt=${sttMs}ms llm=${llmMs}ms tts=${ttsMs}ms tokens=${promptTokens}+${completionTokens}`,
+      `Turn ${turnIndex} call=${callId} stt=${sttMs}ms llm=${llmMs}ms tts=${ttsMs}ms tokens=${promptTokens}+${completionTokens} filler=${fillerAudio ? "yes" : "no"} endCall=${shouldEndCall}`,
     );
-    return { audio, transcript: text, reply: spokenReply };
+    return { audio, transcript: text, reply: spokenReply, endCall: shouldEndCall };
   }
 
   // Called by webhook handler when a call reaches a terminal state.

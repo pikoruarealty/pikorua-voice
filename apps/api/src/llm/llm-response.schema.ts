@@ -5,7 +5,8 @@ import { z } from "zod";
 // robustly validate LLM responses before TTS.
 export const LlmResponseSchema = z.object({
   reply: z.string().min(1),
-  action: z.string().optional(),
+  // LLM returns null when no action — accept null, undefined, or a string
+  action: z.string().nullable().optional(),
 });
 
 export type LlmResponse = z.infer<typeof LlmResponseSchema>;

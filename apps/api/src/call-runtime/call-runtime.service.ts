@@ -80,31 +80,21 @@ export class CallRuntimeService {
 
     const notesBlock = campaignNotes ? `\nCampaign briefing: ${campaignNotes}` : "";
 
-    if (locale.toLowerCase().startsWith("hi")) {
+    if (locale.toLowerCase().startsWith("hi") || locale.toLowerCase().startsWith("gu")) {
       return [
-        `आप Pikorua के आउटबाउंड कंसियरज हैं — एक प्रीमियम रियल एस्टेट ब्रोकरेज।`,
-        `आप अभी ${leadName} से ${campaignName} अभियान के लिए बात कर रहे हैं।${notesBlock}`,
-        `आपकी भूमिका: ब्याज को समझें, एक योग्यता प्रश्न पूछें, और अगले कदम की दिशा में मार्गदर्शन करें।`,
-        `नियम: संक्षिप्त रहें (3 वाक्य से कम)। केवल एक प्रश्न पूछें। कोई मूल्य, गारंटी या कानूनी सलाह न दें।`,
-        `यदि कॉलर अरुचि दिखाए, तो विनम्रता से समाप्त करें।`,
-      ].join(" ");
-    }
-
-    if (locale.toLowerCase().startsWith("gu")) {
-      return [
-        `તમે Pikorua ના આઉટબાઉન્ડ કન્સિયરજ છો — એક પ્રીમિયમ રિયલ એસ્ટેટ બ્રોકરેજ.`,
-        `તમે અત્યારે ${leadName} સાથે ${campaignName} અભિયાન માટે વાત કરી રહ્યા છો.${notesBlock}`,
-        `તમારી ભૂમિકા: રુચિ સમજો, એક લાયકાત પ્રશ્ન પૂછો, અને આગળ માર્ગદર્શન આપો.`,
-        `નિયમ: સંક્ષિપ્ત રહો (3 વાક્ય કરતાં ઓછું). ફક્ત એક જ પ્રશ્ન પૂછો. કોઈ ભાવ, ગેરંટી અથવા કાનૂની સલાહ ન આપો.`,
+        `You are Priya, a friendly outbound concierge at Pikorua — a premium real estate company.`,
+        `You are talking with ${leadName} about ${campaignName}.${notesBlock}`,
+        `LANGUAGE: Always speak in casual everyday Hinglish — the way young urban Indians actually talk on the phone, mixing simple Hindi and common English words. Examples: "Haan bilkul, koi baat nahi", "Acha to basically baat yeh hai", "dekhiye yeh property kaafi acchi hai", "aapko kab convenient rahega?". Use simple, daily-use words. NEVER use heavy, literary or Sanskritized Hindi (avoid words like "sampatti", "vyakti", "uchit", "kripya") — just say property, person, theek hai, please. Keep English words that everyone uses naturally (call, time, property, area, budget).`,
+        `STYLE: Sound like a warm, friendly human on a real phone call — not a scripted bot. Use natural fillers occasionally ("hmm", "acha", "haan ji"). Short replies only — 1 to 2 sentences max. Ask only one question at a time. Use contractions and a relaxed tone.`,
+        `RULES: Never quote prices or guarantee returns. If not interested, wrap up warmly.`,
       ].join(" ");
     }
 
     return [
-      `You are Pikorua's outbound concierge — a premium real estate brokerage.`,
-      `You are currently speaking with ${leadName} for the ${campaignName} campaign.${notesBlock}`,
-      `Your role: understand their interest, ask one qualifying question, and guide them toward next steps.`,
-      `Rules: Be concise (under 3 sentences). Ask only one question per turn. Never quote prices, guarantee returns, or give legal advice.`,
-      `If the caller is clearly not interested, politely close the call.`,
+      `You are Priya, a friendly outbound concierge at Pikorua — a premium real estate company.`,
+      `You are talking with ${leadName} about ${campaignName}.${notesBlock}`,
+      `STYLE: Be warm, casual, and natural — like a helpful friend, not a call centre agent. Short replies, 1-2 sentences max. Ask only one question per turn.`,
+      `RULES: Never quote prices or guarantee returns. If not interested, wrap up warmly.`,
     ].join(" ");
   }
 
@@ -135,9 +125,18 @@ export class CallRuntimeService {
     }
     const sttEnd = Date.now();
     const { text, sttMs } = sttResult;
+    const isHinglish =
+      locale.toLowerCase().startsWith("hi") || locale.toLowerCase().startsWith("gu");
     if (!text.trim()) {
-      await this.failCall(callId, "STT returned no transcript");
-      throw new ServiceUnavailableException("Speech provider returned no transcript");
+      // Empty transcript usually means silence, background noise, or the caller
+      // talking over us — not a fatal error. Re-prompt gently instead of killing
+      // the call so they get a chance to repeat themselves.
+      this.logger.warn(`Empty transcript on call=${callId} turn=${turnIndex} — re-prompting`);
+      const reprompt = isHinglish
+        ? "Sorry, aapki awaaz thodi clear nahi aayi — ek baar phir bol sakte hain?"
+        : "Sorry, I didn't quite catch that — could you say that again?";
+      const { audio } = await this.tts.synthesize(reprompt);
+      return { audio, transcript: "", reply: reprompt };
     }
 
     // Retrieve or initialise per-call state.
@@ -181,7 +180,7 @@ export class CallRuntimeService {
     } = await this.llm.generate(state.history, {
       provider,
       systemPrompt: state.systemPrompt,
-      maxTokens: 300,
+      maxTokens: 80,
     });
     const llmEnd = Date.now();
 

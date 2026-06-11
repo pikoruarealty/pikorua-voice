@@ -21,7 +21,7 @@ export class LlmService {
     messages: LlmMessage[],
     opts?: {
       model?: string;
-      provider?: "anthropic" | "google" | "auto";
+      provider?: "anthropic" | "google" | "auto" | "openrouter";
       systemPrompt?: string;
       maxTokens?: number;
     },
@@ -29,6 +29,14 @@ export class LlmService {
     const start = Date.now();
     const provider = opts?.provider ?? "auto";
     const maxTokens = opts?.maxTokens ?? 300;
+
+    // OpenRouter as PRIMARY (e.g. Claude Haiku via OpenRouter for fast voice
+    // turns). On failure, falls through to the Gemini block below.
+    if (provider === "openrouter") {
+      const result = await this.tryOpenRouter(messages, opts, start, maxTokens);
+      if (result) return result;
+      this.logger.warn("OpenRouter primary failed — falling back to Gemini");
+    }
 
     if (provider === "anthropic" || provider === "auto") {
       const anthropicKey = this.config.get<string>("ANTHROPIC_API_KEY");
@@ -79,92 +87,123 @@ export class LlmService {
     // Google Gemini fallback
     const googleKey = this.config.get<string>("GOOGLE_GENERATIVE_AI_API_KEY");
     const googleModel = String(this.config.get("GOOGLE_MODEL") ?? "gemini-2.0-flash");
-    if (provider === "google" || provider === "auto") {
+    if (provider === "google" || provider === "auto" || provider === "openrouter") {
       if (googleKey) {
-        try {
-          // Map messages to Gemini format; prepend system prompt as a user turn if provided
-          const geminiContents: Array<{ role: string; parts: Array<{ text: string }> }> = [];
-          if (opts?.systemPrompt) {
-            // Gemini doesn't have a system role — inject as first user message with model ack
-            geminiContents.push({
-              role: "user",
-              parts: [{ text: `[System]: ${opts.systemPrompt}` }],
-            });
-            geminiContents.push({ role: "model", parts: [{ text: "Understood." }] });
-          }
-          for (const m of messages) {
-            geminiContents.push({
-              role: m.role === "assistant" ? "model" : "user",
-              parts: [{ text: m.content }],
-            });
-          }
-          const res = await axios.post(
-            `https://generativelanguage.googleapis.com/v1beta/models/${googleModel}:generateContent`,
-            {
-              contents: geminiContents,
-              // Lower temperature keeps Hinglish output on real, common words
-              generationConfig: { maxOutputTokens: maxTokens, temperature: 0.6 },
-            },
-            { params: { key: googleKey }, timeout: 8000 },
-          );
-          const text: string = res.data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
-          const ms = Date.now() - start;
-          const promptTokens: number | null = res.data?.usageMetadata?.promptTokenCount ?? null;
-          const completionTokens: number | null =
-            res.data?.usageMetadata?.candidatesTokenCount ?? null;
-          this.logger.log(
-            `LLM(google/${googleModel}) ${ms}ms prompt=${promptTokens ?? "?"} completion=${completionTokens ?? "?"}`,
-          );
-          return { text, llmMs: ms, model: googleModel, promptTokens, completionTokens };
-        } catch (err) {
-          const message = this.providerFailureMessage("Google Gemini", err);
-          this.logger.error(
-            message,
-            err instanceof Error ? err.stack : String(err),
-          );
-          if (provider === "google") {
-            throw new ServiceUnavailableException(message);
+        // Map messages to Gemini format; prepend system prompt as a user turn if provided
+        const geminiContents: Array<{ role: string; parts: Array<{ text: string }> }> = [];
+        if (opts?.systemPrompt) {
+          // Gemini doesn't have a system role — inject as first user message with model ack
+          geminiContents.push({
+            role: "user",
+            parts: [{ text: `[System]: ${opts.systemPrompt}` }],
+          });
+          geminiContents.push({ role: "model", parts: [{ text: "Understood." }] });
+        }
+        for (const m of messages) {
+          geminiContents.push({
+            role: m.role === "assistant" ? "model" : "user",
+            parts: [{ text: m.content }],
+          });
+        }
+        // One retry with a short backoff — free-tier 429s are often transient
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            const res = await axios.post(
+              `https://generativelanguage.googleapis.com/v1beta/models/${googleModel}:generateContent`,
+              {
+                contents: geminiContents,
+                // Lower temperature keeps Hinglish output on real, common words
+                generationConfig: { maxOutputTokens: maxTokens, temperature: 0.6 },
+              },
+              { params: { key: googleKey }, timeout: 8000 },
+            );
+            const text: string = res.data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+            const ms = Date.now() - start;
+            const promptTokens: number | null = res.data?.usageMetadata?.promptTokenCount ?? null;
+            const completionTokens: number | null =
+              res.data?.usageMetadata?.candidatesTokenCount ?? null;
+            this.logger.log(
+              `LLM(google/${googleModel}) ${ms}ms prompt=${promptTokens ?? "?"} completion=${completionTokens ?? "?"}`,
+            );
+            return { text, llmMs: ms, model: googleModel, promptTokens, completionTokens };
+          } catch (err) {
+            const message = this.providerFailureMessage("Google Gemini", err);
+            this.logger.error(message, err instanceof Error ? err.stack : String(err));
+            if (attempt === 0) {
+              await new Promise((r) => setTimeout(r, 600));
+              continue;
+            }
+            if (provider === "google") {
+              throw new ServiceUnavailableException(message);
+            }
           }
         }
       }
     }
 
-    // OpenRouter fallback — OpenAI-compatible endpoint
-    const openRouterKey = this.config.get<string>("OPENROUTER_API_KEY");
-    const openRouterModel = String(this.config.get("OPENROUTER_MODEL") ?? "google/gemini-2.0-flash-lite:free");
-    if (openRouterKey) {
-      try {
-        const orMessages: Array<{ role: string; content: string }> = [];
-        if (opts?.systemPrompt) {
-          orMessages.push({ role: "system", content: opts.systemPrompt });
-        }
-        for (const m of messages) {
-          orMessages.push({ role: m.role, content: m.content });
-        }
-        const res = await axios.post(
-          "https://openrouter.ai/api/v1/chat/completions",
-          { model: openRouterModel, max_tokens: maxTokens, messages: orMessages },
-          {
-            headers: {
-              "Authorization": `Bearer ${openRouterKey}`,
-              "Content-Type": "application/json",
-            },
-            timeout: 12000,
-          },
-        );
-        const text: string = res.data?.choices?.[0]?.message?.content ?? "";
-        const ms = Date.now() - start;
-        const promptTokens: number | null = res.data?.usage?.prompt_tokens ?? null;
-        const completionTokens: number | null = res.data?.usage?.completion_tokens ?? null;
-        this.logger.log(`LLM(openrouter/${openRouterModel}) ${ms}ms prompt=${promptTokens ?? "?"} completion=${completionTokens ?? "?"}`);
-        return { text, llmMs: ms, model: openRouterModel, promptTokens, completionTokens };
-      } catch (err) {
-        this.logger.error("OpenRouter request failed", err instanceof Error ? err.stack : String(err));
-      }
+    // OpenRouter as last-resort fallback (skip if it was already tried as primary)
+    if (provider !== "openrouter") {
+      const result = await this.tryOpenRouter(messages, opts, start, maxTokens);
+      if (result) return result;
     }
 
     this.logger.error("No LLM provider available or configured");
     throw new ServiceUnavailableException("No LLM provider available or configured");
+  }
+
+  // OpenAI-compatible call via OpenRouter. Returns null on failure so callers
+  // can fall through to the next provider.
+  private async tryOpenRouter(
+    messages: LlmMessage[],
+    opts: { systemPrompt?: string } | undefined,
+    start: number,
+    maxTokens: number,
+  ): Promise<LlmResult | null> {
+    const openRouterKey = this.config.get<string>("OPENROUTER_API_KEY");
+    if (!openRouterKey) return null;
+    const openRouterModel = String(
+      this.config.get("OPENROUTER_MODEL") ?? "anthropic/claude-haiku-4.5",
+    );
+    try {
+      const orMessages: Array<{ role: string; content: string }> = [];
+      if (opts?.systemPrompt) {
+        orMessages.push({ role: "system", content: opts.systemPrompt });
+      }
+      for (const m of messages) {
+        orMessages.push({ role: m.role, content: m.content });
+      }
+      const res = await axios.post(
+        "https://openrouter.ai/api/v1/chat/completions",
+        {
+          model: openRouterModel,
+          max_tokens: maxTokens,
+          messages: orMessages,
+          // Route to the lowest-latency upstream for this model
+          provider: { sort: "latency" },
+        },
+        {
+          headers: {
+            "Authorization": `Bearer ${openRouterKey}`,
+            "Content-Type": "application/json",
+          },
+          timeout: 12000,
+        },
+      );
+      const text: string = res.data?.choices?.[0]?.message?.content ?? "";
+      const ms = Date.now() - start;
+      const promptTokens: number | null = res.data?.usage?.prompt_tokens ?? null;
+      const completionTokens: number | null = res.data?.usage?.completion_tokens ?? null;
+      this.logger.log(
+        `LLM(openrouter/${openRouterModel}) ${ms}ms prompt=${promptTokens ?? "?"} completion=${completionTokens ?? "?"}`,
+      );
+      return { text, llmMs: ms, model: openRouterModel, promptTokens, completionTokens };
+    } catch (err) {
+      this.logger.error(
+        "OpenRouter request failed",
+        err instanceof Error ? err.stack : String(err),
+      );
+      return null;
+    }
   }
 
   private providerFailureMessage(provider: string, err: unknown): string {

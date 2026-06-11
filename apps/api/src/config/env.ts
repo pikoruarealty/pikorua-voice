@@ -16,7 +16,7 @@ const booleanFlag = z.preprocess((value) => {
 
 const optionalLlmProvider = z.preprocess(
   (value) => (value === "" ? undefined : value),
-  z.enum(["anthropic", "google", "auto"]).optional(),
+  z.enum(["anthropic", "google", "auto", "openrouter"]).optional(),
 );
 
 // ─── Environment schema ──────────────────────────────────────────────────────

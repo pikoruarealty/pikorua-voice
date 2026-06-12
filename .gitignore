@@ -10,14 +10,22 @@ build/
 # Turborepo
 .turbo/
 
-# Environment
+# Environment — keep .env.example tracked
 .env
-.env.local
+.env.*
+!.env.example
 *.local
 
-# Logs
+# Logs & test artifacts
 *.log
 npm-debug.log*
+coverage/
+test-baseline.txt
+*.tmp
+
+# Caches
+.cache/
+.eslintcache
 
 # OS / editor
 .DS_Store

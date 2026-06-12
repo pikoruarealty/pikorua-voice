@@ -51,6 +51,18 @@ export const envSchema = z
     STT_REALTIME_ENABLED: booleanFlag.default(false),
     STT_STREAMING_ENABLED: booleanFlag.default(false),
 
+    // Voice-turn latency & robustness tuning
+    LLM_TIMEOUT_MS: z.coerce.number().int().positive().default(3000),
+    OPENROUTER_TIMEOUT_MS: z.coerce.number().int().positive().default(4000),
+    TTS_TIMEOUT_MS: z.coerce.number().int().positive().default(8000),
+    TURN_TIMEOUT_MS: z.coerce.number().int().positive().default(12000),
+    // Hard cap on call length (0 disables). Default 15 minutes.
+    CALL_MAX_DURATION_MS: z.coerce.number().int().nonnegative().default(900000),
+    // Sliding-window history cap so long calls can't blow the context budget.
+    LLM_HISTORY_MAX_MESSAGES: z.coerce.number().int().nonnegative().default(20),
+    // Cached filler clip plays if no reply audio arrived this soon (0 disables).
+    FILLER_DELAY_MS: z.coerce.number().int().nonnegative().default(900),
+
     // Speech-to-Text · Deepgram
     DEEPGRAM_API_KEY: optionalNonEmpty,
 

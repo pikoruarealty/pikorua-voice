@@ -138,6 +138,12 @@ export class WebhookService {
             if (call.targetId && terminal) {
               await this.targetRepo.updateDialStatus(call.targetId, this.mapTargetStatus(status));
             }
+            if (status === "in_progress") {
+              // Pre-build call state (campaign fetch + prompt) and warm filler
+              // clips while the phone is still being answered, so the first
+              // voice turn doesn't pay that latency.
+              void this.callRuntime?.warmCall(call.id, call.locale ?? undefined);
+            }
             if (terminal) {
               // Release in-memory conversation history for this call.
               this.callRuntime?.clearHistory(call.id);

@@ -1,9 +1,15 @@
-import { Injectable, Inject, Logger, ServiceUnavailableException } from "@nestjs/common";
+import {
+  Injectable,
+  Inject,
+  Logger,
+  OnApplicationShutdown,
+  ServiceUnavailableException,
+} from "@nestjs/common";
 import { DeepgramService } from "../stt/deepgram.service";
 import { DeepgramRealtimeService } from "../stt/deepgram-realtime.service";
 import { LlmService, type LlmMessage } from "../llm/llm.service";
 import { ElevenlabsService } from "../tts/elevenlabs.service";
-import { GuardrailService } from "../llm/guardrail.service";
+import { GuardrailService, type GuardrailResult } from "../llm/guardrail.service";
 import { LlmResponseSchema } from "../llm/llm-response.schema";
 import {
   CallTurnRepository,
@@ -13,12 +19,18 @@ import {
 } from "@pikorua/db";
 import type { NewCallTurn } from "@pikorua/db";
 import { ConfigService } from "@nestjs/config";
+import { MetricsService } from "../metrics/metrics.service";
 
 // Per-call state: conversation history + resolved context for prompt building.
 // Stamped with lastActivityAt so stale entries can be evicted.
 type CallState = {
   history: LlmMessage[];
   systemPrompt: string;
+  locale: string;
+  // LLM provider is pinned at call start so the voice/persona doesn't drift
+  // mid-conversation from per-turn provider roulette.
+  provider: "anthropic" | "google" | "auto" | "openrouter";
+  startedAt: number;
   lastActivityAt: number;
   // Caller speech held back because it looked like a mid-thought pause.
   // Merged with the next segment before the LLM sees it.
@@ -43,35 +55,49 @@ function looksIncomplete(text: string): boolean {
   return CONTINUATION_CUES.has(last);
 }
 
-// Phonetic respellings for Indian words ElevenLabs mispronounces when reading
-// romanized Hinglish. Applied only to the text sent to TTS — the transcript
-// and DB records keep the standard spelling.
-const TTS_PRONUNCIATIONS: Array<[RegExp, string]> = [
-  [/\bcrores\b/gi, "karod"],
-  [/\bcrore\b/gi, "karod"],
-  [/\blakhs\b/gi, "laakh"],
-  [/\blakh\b/gi, "laakh"],
-];
+// End-of-call sentinel. The LLM appends this token to its final reply instead
+// of wrapping every reply in a JSON envelope — plain text can be streamed
+// sentence-by-sentence into TTS, a JSON wrapper cannot.
+const END_CALL_TOKEN = "<end_call/>";
+const END_CALL_PATTERN = /<\s*end_call\s*\/?\s*>/gi;
 
-function phoneticizeForTts(text: string): string {
-  let out = text;
-  for (const [pattern, replacement] of TTS_PRONUNCIATIONS) {
-    out = out.replace(pattern, replacement);
-  }
-  return out;
-}
-
+// Sentence boundary for streaming dispatch: ., !, ?, or Devanagari danda,
+// optionally followed by a closing quote/bracket.
+const SENTENCE_BOUNDARY = /([.!?।]+["')\]]?)(\s+|$)/;
 
 // Evict call state after 2 hours of inactivity. This covers a missed terminal
 // webhook while keeping memory bounded on a busy server.
 const STALE_MS = 2 * 60 * 60 * 1000;
 
+export type TurnStreamSink = {
+  // Aborting this signal cancels the turn (barge-in / client disconnect).
+  signal: AbortSignal;
+  // Incremental reply text, one sentence at a time.
+  onReplyDelta?: (text: string) => void;
+  // Audio as it arrives from TTS. `last` marks the end of one sentence's audio.
+  onAudioChunk: (chunk: Buffer, info: { sentenceIndex: number; last: boolean }) => void;
+  // Transport must drop any queued/playing audio (guardrail replacement).
+  onCancel?: () => void;
+};
+
+export type TurnResult = {
+  audio: Buffer;
+  transcript: string;
+  reply: string;
+  endCall: boolean;
+  waitForMore: boolean;
+};
+
 @Injectable()
-export class CallRuntimeService {
+export class CallRuntimeService implements OnApplicationShutdown {
   private readonly logger = new Logger("CallRuntimeService");
 
   // Per-call state: conversation history + cached system prompt.
   private readonly calls = new Map<string, CallState>();
+
+  // In-flight turns, drained on shutdown so SIGTERM doesn't cut a caller off
+  // mid-reply.
+  private activeTurns = 0;
 
   constructor(
     private readonly stt: DeepgramService,
@@ -84,11 +110,106 @@ export class CallRuntimeService {
     @Inject(CampaignRepository) private readonly campaignRepo: CampaignRepository,
     @Inject(CampaignTargetRepository) private readonly targetRepo: CampaignTargetRepository,
     private readonly config: ConfigService,
+    private readonly metrics: MetricsService,
   ) {
     // Periodic stale-entry eviction — runs every 30 minutes.
     const timer = setInterval(() => this.evictStale(), 30 * 60 * 1000);
     // Don't prevent process exit.
     if (timer.unref) timer.unref();
+  }
+
+  async onApplicationShutdown() {
+    const deadline = Date.now() + 5000;
+    while (this.activeTurns > 0 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    if (this.activeTurns > 0) {
+      this.logger.warn(`Shutting down with ${this.activeTurns} turn(s) still in flight`);
+    }
+  }
+
+  private isHinglishLocale(locale: string): boolean {
+    const l = locale.toLowerCase();
+    return l.startsWith("hi") || l.startsWith("gu");
+  }
+
+  // Language code for TTS normalization: English calls get English number
+  // words; Hindi/Gujarati (and everything else) use the configured default.
+  private ttsLanguageCode(locale: string): string | undefined {
+    return locale.toLowerCase().startsWith("en") ? "en" : undefined;
+  }
+
+  // Short clips played instantly on utterance-end to mask turn latency.
+  fillerTexts(locale: string): string[] {
+    return this.isHinglishLocale(locale)
+      ? ["Hmm, एक second...", "जी, बिल्कुल..."]
+      : ["Hmm, one second...", "Sure, just a moment..."];
+  }
+
+  apologyText(locale: string): string {
+    return this.isHinglishLocale(locale)
+      ? "Sorry, आवाज़ थोड़ी कट गई थी — क्या आप दोबारा बोल सकते हैं?"
+      : "Sorry, I missed that — could you say it once more?";
+  }
+
+  // Pre-build call state and warm the filler/apology clip cache so the first
+  // turn doesn't pay for campaign/target fetch + prompt build + clip synthesis.
+  async warmCall(callId: string, locale?: string) {
+    try {
+      const state = await this.getOrCreateState(callId, locale);
+      this.tts.prewarmClips(
+        [...this.fillerTexts(state.locale), this.apologyText(state.locale)],
+        { languageCode: this.ttsLanguageCode(state.locale) },
+      );
+    } catch (err) {
+      this.logger.warn(`Failed to warm call=${callId}`, String(err));
+    }
+  }
+
+  // LLM provider for this call, decided ONCE at call start.
+  private pickProvider(locale: string): CallState["provider"] {
+    let provider: CallState["provider"] = "auto";
+    try {
+      const providerOverride = this.config.get<
+        "anthropic" | "google" | "auto" | "openrouter" | undefined
+      >("LLM_PROVIDER_OVERRIDE");
+      if (providerOverride) {
+        provider = providerOverride;
+      } else {
+        const anthropicPercent = Number(this.config.get("ENGLISH_ANTHROPIC_PERCENT") ?? 25);
+        if (locale.toLowerCase().startsWith("en")) {
+          provider = Math.random() * 100 < anthropicPercent ? "anthropic" : "google";
+        } else {
+          provider = "google";
+        }
+      }
+    } catch {
+      provider = "auto";
+    }
+    return provider;
+  }
+
+  private async getOrCreateState(callId: string, localeHint?: string): Promise<CallState> {
+    let state = this.calls.get(callId);
+    if (!state) {
+      const call = await this.callRepo.findById(callId);
+      const locale = String(
+        localeHint ?? call?.locale ?? this.config.get("GEMINI_LANGUAGE_DEFAULT") ?? "hi-IN",
+      );
+      const systemPrompt = await this.buildSystemPrompt(locale, call?.campaignId, call?.targetId);
+      state = {
+        history: [],
+        systemPrompt,
+        locale,
+        provider: this.pickProvider(locale),
+        startedAt: Date.now(),
+        lastActivityAt: Date.now(),
+        pendingFragment: null,
+      };
+      this.calls.set(callId, state);
+    }
+    state.lastActivityAt = Date.now();
+    return state;
   }
 
   // Build a detailed system prompt grounded in lead and campaign context.
@@ -135,22 +256,21 @@ SCRIPT — VERY IMPORTANT: Write ALL Hindi words in Devanagari script (हाँ
 
 CALL FLOW — move through these stages in order, naturally, ONE question per turn:
 1. OPENING: Introduce yourself — Maya from PIKORA. You're calling to invite them for a site visit / sample apartment viewing of the luxury project in Ahmedabad. Their enquiry came from Facebook/Instagram — "aapne shayad hamare ads social media ya WhatsApp pe dekhe honge". Then ask: "aap 4BHK dekh rahe hain ya 5BHK?"
-2. BUDGET: "आप approximately किस budget में comfortable हैं?" If they say budget is no constraint: acknowledge, then explain — "project में multiple sizes हैं, इसलिए पूछ रही थी ताकि मैं आपको सही option explain कर सकूं" — and offer ranges: "roughly 3 करोड़, 5, 7, 10, 15, 20, या 25 करोड़ plus?"
-3. PROJECT (1-2 facts per turn, never all at once): Gated community of luxury apartments — इस्कॉन-अंबली रोड पर. 4BHK approx 5,700 square feet, 5BHK approx 7,600 square feet. Lifestyle amenities: swimming pool, clubhouse, gym, library, yoga-meditation, movie theatre, kids' play area. "और एक beautiful sample apartment भी ready है, जिससे आपको luxury का exact idea मिल जाएगा।"
-4. INVITE: "Jo clients interest dikhate hain, hum unhe personally sample apartment dikhate hain — layout, pricing, saari details site pe hi share hoti hain. Bas 30 minute lagte hain." Offer time choices: "Aaj 2 baje ya 3 baje convenient rahega, family ke saath?"
-5. CONFIRM: Lock the day/time. Tell them: "Aapko appointment confirmation aur Google Maps location WhatsApp pe mil jayegi few minutes mein."
-6. KNOW THEM (after booking, casually, ONE at a time): "Sir, just to know you well — aap kya business ya profession mein hain?" → then "office/clinic kahan hai?" → then "Ahmedabad mein kahan rehte hain aap?"
-7. CLOSE: Re-confirm the time, "hamare project expert aapko WhatsApp pe details bhej denge". Warm sign-off: "See you at [time]! Mera naam Maya hai PIKORA se — koi bhi question ho to feel free to call me. Thank you!" → then end_call.
+2. BUDGET: "आप किस budget में comfortable हैं?" Once they give ANY answer (a number, a range, or "no constraint") — acknowledge in one word and go DIRECTLY to step 3. Do NOT explain why you asked. Do NOT say "इसलिए पूछ रही थी". Do NOT say "multiple sizes हैं". Do NOT say "roughly".
+3. PROJECT + INVITE (do BOTH in the same reply — never split into two turns): Share 1-2 project facts then immediately ask for the site visit in the same reply. Facts: Gated luxury community — इस्कॉन-अंबली रोड पर. 4BHK approx 5,700 square feet, 5BHK approx 7,600 square feet. Lifestyle amenities: swimming pool, clubhouse, gym, library, yoga-meditation, movie theatre, kids' play area. "और एक beautiful sample apartment भी ready है।" Then in the same reply: "बस 30 minute लगेंगे — आज 2 बजे या 3 बजे family के साथ आ सकते हैं?"
+4. CONFIRM: Lock the day/time. Tell them: "Aapko appointment confirmation aur Google Maps location WhatsApp pe mil jayegi few minutes mein."
+5. KNOW THEM (after booking, casually, ONE at a time): "Sir, just to know you well — aap kya business ya profession mein hain?" → then "office/clinic kahan hai?" → then "Ahmedabad mein kahan rehte hain aap?"
+6. CLOSE: Re-confirm the time, "hamare project expert aapko WhatsApp pe details bhej denge". Warm sign-off: "See you at [time]! Thank you, bye!" → then end the call with ${END_CALL_TOKEN}.
 
-If they're NOT interested at any stage: no pressure, close warmly, end_call.
+If they're NOT interested at any stage: no pressure, close warmly, end the call with ${END_CALL_TOKEN}.
 
 HOW YOU TALK:
 - Match the customer's language. Hindi → natural Hinglish. English → natural Indian English. Never switch abruptly, never force Hinglish.
-- Short spoken sentences — this is a phone call, not writing. One question per turn. Never a paragraph, never a brochure.
+- Short spoken sentences — this is a phone call, not writing. Every reply MUST end with a question — never leave the client with a statement and no prompt. Never a paragraph, never a brochure.
 - TONE: Start every reply calmly, in a low-to-mid tone — like a relaxed professional, never high-energy or excited at the start. NEVER use an exclamation mark in the first sentence of a reply; use a period. At most one "!" per reply, and only mid-reply or at the end.
 - Acknowledge every answer FIRST, rotating naturally: "Okay perfect.", "Got it.", "Sure.", "Wonderful.", "बिल्कुल।", "कोई issue नहीं है।", "No worries." — never repeat the same one twice in a row.
 - React to what they say: "Oh, you are a doctor. Fantastic." / "Bodakdev! Nice!" — then continue naturally.
-- Natural Hinglish like: "Sir, बस एक rough idea चाहिए था।", "आप family के साथ visit कर सकते हैं।", "Site visit के बाद better clarity मिल जाएगी।", "मैं details WhatsApp पर share करवा देती हूँ।"
+- Natural Hinglish like: "आप family के साथ visit कर सकते हैं।", "Site visit के बाद better clarity मिल जाएगी।", "मैं details WhatsApp पर share करवा देती हूँ।"
 - Use ONLY real, common Hindi words. NEVER invent or mash up words — if you are not 100% sure a Hindi word is real and common, use the English word instead.
 - No American exclamations like "Wow" — say "अरे वाह", "बहुत बढ़िया", or "अच्छा!"
 - If their sentence seems cut off or incomplete, do NOT guess — say "हाँ जी, बोलिए?" and let them finish.
@@ -158,23 +278,21 @@ HOW YOU TALK:
 WORDS:
 - Use: luxury apartments, spacious homes, premium community, lifestyle amenities, sample apartment, site visit, project walkthrough.
 - NEVER corporate/brochure phrases: "curated", "residence configuration", "investment opportunity", "investment range", "high-net-worth", "bespoke", "premium inventory", "club-class", "I would like to inform you", "as part of our process", "kindly note", "valued customer", "prospective buyer".
-- NEVER heavy Hindi: "sampatti", "niwesh", "kripya", "uttam", "suvidha", "vyakti".
+- NEVER heavy/formal Hindi words — if a simpler English or common Hindi word exists, use it. NEVER: "sampatti", "niwesh", "kripya", "uttam", "suvidha", "vyakti", "vibhinn", "aakar", "pariksar", "nivedan", "prakar", "vistaar", "updeshit", "margdarshan", "suvidhajanak", "avastha", "sunishchit". Say "sizes" not "आकार", "different" not "विभिन्न", "options" not "विकल्प", "details" not "विवरण", "visit" not "भ्रमण".
 
 RULES: Never quote apartment prices — pricing is shared at the site visit only: "pricing aur layout ki saari details site pe team share kar degi". Asking THEIR budget is fine. Never guarantee returns. Never pressure.
 
 EXAMPLES of correct replies (note the calm openings and Devanagari + English mixed script):
-- {"reply": "Hello Sir, मैं Maya बोल रही हूँ PIKORA से। आपकी enquiry हमें Facebook पे मिली थी, तो मैं आपको हमारे luxury project के site visit के लिए invite करना चाहती थी। वैसे आप 4BHK देख रहे हैं या 5BHK?", "action": null}
-- {"reply": "Okay perfect, 5BHK. और approximately किस budget में आप comfortable हैं?", "action": null}
-- {"reply": "बिल्कुल Sir, मैं समझ सकती हूँ। Project में multiple sizes हैं इसलिए पूछ रही थी — roughly 5 करोड़, 10 करोड़, या उससे ऊपर?", "action": null}
-- {"reply": "तो एक काम करते हैं — आप family के साथ sample apartment देख लीजिए, बस 30 minute लगेंगे। आज 2 बजे या 3 बजे convenient रहेगा?", "action": null}
-- {"reply": "No worries, 4 बजे confirm कर देती हूँ। आपको confirmation और Google Maps location WhatsApp पे मिल जाएगी। वैसे Sir, just to know you well — आप क्या business या profession में हैं?", "action": null}
-- {"reply": "Oh, doctor. Fantastic! और आपका clinic कहाँ है currently?", "action": null}
-- {"reply": "Great, तो see you today 4 बजे, Sir. मेरा नाम Maya है PIKORA से — कोई भी question हो तो feel free to call me. Thank you, bye!", "action": "end_call"}
-- {"reply": "कोई issue नहीं है Sir, मैं समझ सकती हूँ। आपका time लेने के लिए thanks — take care!", "action": "end_call"}
+- Hello Sir, मैं Maya बोल रही हूँ PIKORA से। आपकी enquiry हमें Facebook पे मिली थी, तो मैं आपको हमारे luxury project के site visit के लिए invite करना चाहती थी। वैसे आप 4BHK देख रहे हैं या 5BHK?
+- Perfect, 5BHK. और आप किस budget में comfortable हैं?
+- बिल्कुल. तो हमारा project इस्कॉन-अंबली रोड पर है — gated luxury community. 4BHK approx 5,700 square feet, 5BHK approx 7,600 square feet. Swimming pool, clubhouse, gym — full lifestyle amenities हैं। एक beautiful sample apartment भी ready है। बस 30 minute लगेंगे — आज 2 बजे या 3 बजे family के साथ आ सकते हैं?
+- No worries, 4 बजे confirm कर देती हूँ। आपको confirmation और Google Maps location WhatsApp पे मिल जाएगी। वैसे Sir, just to know you well — आप क्या business या profession में हैं?
+- Oh, doctor. Fantastic! और आपका clinic कहाँ है currently?
+- Great, तो see you today 4 बजे, Sir. Thank you, bye!${END_CALL_TOKEN}
+- कोई issue नहीं है Sir, मैं समझ सकती हूँ। आपका time लेने के लिए thanks — take care!${END_CALL_TOKEN}
 
-OUTPUT FORMAT: Reply ONLY with raw JSON on a single line. No markdown, no code fences, no extra text.
-Format: {"reply": "what Maya says", "action": null} OR {"reply": "...", "action": "end_call"}
-Set action to "end_call" ONLY when: (1) the appointment is confirmed AND you've asked the know-them questions AND given the final sign-off, OR (2) they're clearly not interested and you've closed warmly.`;
+OUTPUT FORMAT: Reply with ONLY the exact words Maya speaks — plain text. No JSON, no markdown, no quotes around the reply, no stage directions, no explanations.
+ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your reply ONLY when: (1) the appointment is confirmed AND you've asked the know-them questions AND given the final sign-off, OR (2) they're clearly not interested and you've closed warmly. Otherwise NEVER output ${END_CALL_TOKEN}.`;
     }
 
     return `You are Maya — a warm, confident female relationship manager at PIKORA Realty, a premium luxury real estate company. You are on a phone call with ${leadName} about ${campaignName}.${notesBlock}
@@ -183,14 +301,15 @@ WHO YOU ARE: A real person from Ahmedabad — NOT an AI assistant, NOT a call-ce
 
 CALL FLOW — move through these stages in order, naturally, ONE question per turn:
 1. OPENING: Introduce yourself — Maya from PIKORA. You're calling to invite them for a site visit and sample apartment viewing of the luxury project in Ahmedabad. Their enquiry came through Facebook/Instagram — "you might have seen our ads on social media or WhatsApp". Then ask: "are you looking at a 4BHK or a 5BHK?"
-2. BUDGET: "And what approximate budget are you comfortable with?" If they say budget is no constraint: acknowledge, then explain — "we have multiple sizes in the project, so I just wanted to guide you towards the most suitable option" — and offer ranges: "roughly 3 crore, 5, 7, 10, 15, 20, or 25 crore plus?"
-3. PROJECT (1-2 facts per turn, never all at once): Gated community of luxury apartments on ISKCON-Ambli Road. 4BHK approx 5,700 sq ft, 5BHK approx 7,600 sq ft. Lifestyle amenities: swimming pool, clubhouse, gym, library, yoga and meditation, movie theatre, kids' play area. "And we've created a beautiful sample apartment so you get a real feel of the luxury."
-4. INVITE: "Any client showing interest, we personally invite them to see the sample apartment — layout, pricing, all the details are shared at the site itself. It just takes 30 minutes." Offer time choices: "What works for you and your family — today 2 PM or 3 PM?"
-5. CONFIRM: Lock the day/time. Tell them: "You'll receive the appointment confirmation and Google Maps location on WhatsApp in a few minutes."
-6. KNOW THEM (after booking, casually, ONE at a time): "Just to know you well, Sir — what business or profession are you into?" → then "and where is your office or clinic?" → then "and which area of Ahmedabad do you stay in?"
-7. CLOSE: Re-confirm the time, "our project expert will share the details on WhatsApp shortly". Warm sign-off: "See you at [time]! My name is Maya from PIKORA — if you have any questions before the visit, feel free to call me. Thank you!" → then end_call.
+2. BUDGET: "And what approximate budget are you comfortable with?" Once they give ANY answer (including "no constraint" or a range) — skip any justification, go directly to PROJECT details (step 3). Do NOT explain why you asked for the budget.
+3. PROJECT + INVITE (combined — do BOTH in the same turn): Share 1-2 project facts, then immediately in the same reply ask for the site visit. Do NOT split these into separate turns.
+   Project facts: Gated community of luxury apartments on ISKCON-Ambli Road. 4BHK approx 5,700 sq ft, 5BHK approx 7,600 sq ft. Lifestyle amenities: swimming pool, clubhouse, gym, library, yoga and meditation, movie theatre, kids' play area. We've created a beautiful sample apartment so you get a real feel of the luxury.
+   Site visit ask (must be in the same reply): "It just takes 30 minutes — you can come with your family. Would today 2 PM or 3 PM work for you?"
+4. CONFIRM: Lock the day/time. Tell them: "You'll receive the appointment confirmation and Google Maps location on WhatsApp in a few minutes."
+5. KNOW THEM (after booking, casually, ONE at a time): "Just to know you well, Sir — what business or profession are you into?" → then "and where is your office or clinic?" → then "and which area of Ahmedabad do you stay in?"
+6. CLOSE: Re-confirm the time, "our project expert will share the details on WhatsApp shortly". Warm sign-off: "See you at [time]! Thank you!" → then end the call with ${END_CALL_TOKEN}.
 
-If they're NOT interested at any stage: no pressure, close warmly, end_call.
+If they're NOT interested at any stage: no pressure, close warmly, end the call with ${END_CALL_TOKEN}.
 
 HOW YOU TALK:
 - Natural Indian English — an educated Indian professional on a call. NEVER British idioms: no "brilliant", "cheers", "lovely", "fancy", "quid", "whilst", "shall I", "fortnight".
@@ -206,9 +325,96 @@ WORDS:
 
 RULES: Never quote apartment prices — pricing is shared at the site visit only: "the team will share pricing and layout details at the site". Asking THEIR budget is fine. Never guarantee returns. Never pressure.
 
-OUTPUT FORMAT: Reply ONLY with raw JSON. No markdown, no code fences.
-Format: {"reply": "what Maya says", "action": null} OR {"reply": "...", "action": "end_call"}
-Set action to "end_call" ONLY when: (1) the appointment is confirmed AND you've asked the know-them questions AND given the final sign-off, OR (2) they're clearly not interested and you've closed warmly.`;
+OUTPUT FORMAT: Reply with ONLY the exact words Maya speaks — plain text. No JSON, no markdown, no quotes around the reply, no stage directions, no explanations.
+ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your reply ONLY when: (1) the appointment is confirmed AND you've asked the know-them questions AND given the final sign-off, OR (2) they're clearly not interested and you've closed warmly. Otherwise NEVER output ${END_CALL_TOKEN}.`;
+  }
+
+  // Parse the LLM's reply. Primary format is plain text with an optional
+  // trailing end-call sentinel. The legacy JSON envelope ({"reply", "action"})
+  // is still tolerated so a model that regresses to old habits never leaks
+  // JSON syntax into the spoken reply.
+  private parseLlmReply(raw: string, callId: string): { reply: string; endCall: boolean } {
+    const stripped = String(raw ?? "")
+      .trim()
+      .replace(/^```(?:json)?\s*/i, "")
+      .replace(/\s*```\s*$/, "")
+      .trim();
+
+    if (stripped.startsWith("{")) {
+      const jsonMatch = stripped.match(/\{[\s\S]*\}/);
+      const candidate = jsonMatch ? jsonMatch[0] : stripped;
+      try {
+        const parsed = JSON.parse(candidate);
+        const validated = LlmResponseSchema.parse(parsed);
+        return { reply: validated.reply, endCall: validated.action === "end_call" };
+      } catch {
+        // Strict parse failed (truncated or malformed JSON). Salvage the reply
+        // field with a regex so JSON syntax is never spoken aloud to the caller.
+        const replyMatch = candidate.match(/"reply"\s*:\s*"((?:[^"\\]|\\.)*)/);
+        if (replyMatch) {
+          this.logger.warn(`LLM JSON malformed — salvaged reply for call=${callId}`);
+          return {
+            reply: replyMatch[1].replace(/\\"/g, '"').replace(/\\n/g, " ").trim(),
+            endCall: /"action"\s*:\s*"end_call"/.test(candidate),
+          };
+        }
+      }
+    }
+
+    const endCall = END_CALL_PATTERN.test(stripped);
+    END_CALL_PATTERN.lastIndex = 0;
+    return { reply: stripped.replace(END_CALL_PATTERN, "").trim(), endCall };
+  }
+
+  // Token-budget guard: keep the most recent turns. The system prompt carries
+  // the persona and call flow, so dropping old turns degrades gracefully
+  // instead of blowing the provider's context limit on a long call.
+  private trimHistory(state: CallState) {
+    const max = Number(this.config.get("LLM_HISTORY_MAX_MESSAGES") ?? 20);
+    if (max <= 0 || state.history.length <= max) return;
+    let start = state.history.length - max;
+    // History must start with a user message (providers reject leading assistant).
+    while (start < state.history.length && state.history[start].role !== "user") start += 1;
+    state.history = state.history.slice(start);
+  }
+
+  private maxCallDurationMs(): number {
+    return Number(this.config.get("CALL_MAX_DURATION_MS") ?? 15 * 60 * 1000);
+  }
+
+  private turnTimeoutMs(): number {
+    return Number(this.config.get("TURN_TIMEOUT_MS") ?? 12_000);
+  }
+
+  private wrapUpText(locale: string): string {
+    return this.isHinglishLocale(locale)
+      ? "Sir, हमें अभी call wrap up करनी होगी — हमारी team आपको WhatsApp पे details भेज देगी। Thank you, bye!"
+      : "Sir, we'll have to wrap up the call now — our team will send you the details on WhatsApp. Thank you, bye!";
+  }
+
+  // TTS with outage fallback: a transient ElevenLabs failure must not drop a
+  // live lead. After the provider-level retry fails, play the cached apology
+  // clip and keep the call alive; only fail the call if no clip exists either.
+  private async synthesizeWithFallback(
+    spokenReply: string,
+    locale: string,
+    callId: string,
+  ): Promise<{ audio: Buffer; ttsMs: number; spokenText: string }> {
+    try {
+      const { audio, ttsMs } = await this.tts.synthesize(spokenReply);
+      return { audio, ttsMs, spokenText: spokenReply };
+    } catch (err) {
+      const apology = this.apologyText(locale);
+      const clip = await this.tts.getClip(apology, {
+        languageCode: this.ttsLanguageCode(locale),
+      });
+      if (clip && clip.length > 0) {
+        this.logger.warn(`TTS down — using cached apology clip for call=${callId}`);
+        return { audio: clip, ttsMs: 0, spokenText: apology };
+      }
+      await this.failCall(callId, "TTS failed with no fallback clip");
+      throw err instanceof Error ? err : new ServiceUnavailableException("TTS failed");
+    }
   }
 
   // Process one audio turn: accepts callId and audio buffer containing caller speech.
@@ -238,17 +444,15 @@ Set action to "end_call" ONLY when: (1) the appointment is confirmed AND you've 
     }
     const sttEnd = Date.now();
     const { text, sttMs } = sttResult;
-    const isHinglish =
-      locale.toLowerCase().startsWith("hi") || locale.toLowerCase().startsWith("gu");
     if (!text.trim()) {
       // Empty transcript usually means silence, background noise, or the caller
       // talking over us — not a fatal error. Re-prompt gently instead of killing
       // the call so they get a chance to repeat themselves.
       this.logger.warn(`Empty transcript on call=${callId} turn=${turnIndex} — re-prompting`);
-      const reprompt = isHinglish
+      const reprompt = this.isHinglishLocale(locale)
         ? "Sorry, आपकी आवाज़ थोड़ी clear नहीं आई — एक बार फिर बोल सकते हैं?"
         : "Sorry, I didn't quite catch that — could you say that again?";
-      const { audio } = await this.tts.synthesize(reprompt);
+      const { audio } = await this.synthesizeWithFallback(reprompt, locale, callId);
       return { audio, transcript: "", reply: reprompt, endCall: false, waitForMore: false };
     }
 
@@ -258,29 +462,13 @@ Set action to "end_call" ONLY when: (1) the appointment is confirmed AND you've 
     });
   }
 
-  // Core turn pipeline shared by the HTTP path (handleTurn) and the streaming
-  // WebSocket path (DemoVoiceGateway) — and later the Exotel media path.
-  // Takes the caller's finished utterance text; returns audio + reply.
-  async processUtterance(
+  // Shared front half of a turn: state init, fragment merge, mid-thought hold.
+  private async prepareUtterance(
     callId: string,
-    turnIndex: number,
     utteranceText: string,
-    opts: { locale?: string; sttMs?: number } = {},
-  ) {
-    // Retrieve or initialise per-call state.
-    // System prompt is built once and cached; subsequent turns reuse it.
-    let locale = opts.locale;
-    let state = this.calls.get(callId);
-    if (!state) {
-      const call = await this.callRepo.findById(callId);
-      locale =
-        locale ?? String(call?.locale ?? this.config.get("GEMINI_LANGUAGE_DEFAULT") ?? "hi-IN");
-      const systemPrompt = await this.buildSystemPrompt(locale, call?.campaignId, call?.targetId);
-      state = { history: [], systemPrompt, lastActivityAt: Date.now(), pendingFragment: null };
-      this.calls.set(callId, state);
-    }
-    locale = locale ?? String(this.config.get("GEMINI_LANGUAGE_DEFAULT") ?? "hi-IN");
-    state.lastActivityAt = Date.now();
+    localeHint?: string,
+  ): Promise<{ state: CallState; utterance: string; hold: boolean }> {
+    const state = await this.getOrCreateState(callId, localeHint);
 
     // Merge a fragment held from the previous segment (caller paused mid-thought).
     let utterance = utteranceText;
@@ -296,15 +484,13 @@ Set action to "end_call" ONLY when: (1) the appointment is confirmed AND you've 
     if (!mergedFromFragment && looksIncomplete(utterance)) {
       state.pendingFragment = utterance;
       this.logger.log(`Holding mid-thought fragment call=${callId}: "${utterance.slice(0, 80)}"`);
-      return {
-        audio: Buffer.alloc(0),
-        transcript: utterance,
-        reply: "",
-        endCall: false,
-        waitForMore: true,
-      };
+      return { state, utterance, hold: true };
     }
 
+    return { state, utterance, hold: false };
+  }
+
+  private appendUserMessage(state: CallState, utterance: string) {
     // Append to history; merge into the previous entry if it was also a user
     // message (LLM providers reject consecutive same-role messages).
     const lastMsg = state.history[state.history.length - 1];
@@ -313,181 +499,593 @@ Set action to "end_call" ONLY when: (1) the appointment is confirmed AND you've 
     } else {
       state.history.push({ role: "user", content: utterance });
     }
+    this.trimHistory(state);
+  }
 
-    // Decide LLM provider based on call locale and rollout percentage.
-    const llmStart = Date.now();
-    let provider: "anthropic" | "google" | "auto" | "openrouter" = "auto";
+  // Off the hot path: the caller hears audio without waiting on Postgres.
+  private persistTurns(callerTurn: NewCallTurn, assistantTurn: NewCallTurn) {
+    void Promise.all([this.turnRepo.create(callerTurn), this.turnRepo.create(assistantTurn)]).catch(
+      (err) => {
+        this.logger.warn(
+          "Failed to persist call turn",
+          err instanceof Error ? err.stack : String(err),
+        );
+      },
+    );
+  }
+
+  private async completeCall(callId: string) {
+    this.logger.log(`Call ${callId} ending — lead details collected`);
+    this.calls.delete(callId);
     try {
-      const providerOverride = this.config.get<
-        "anthropic" | "google" | "auto" | "openrouter" | undefined
-      >("LLM_PROVIDER_OVERRIDE");
-      if (providerOverride) {
-        provider = providerOverride;
+      await this.callRepo.update(callId, { status: "completed" });
+    } catch (err) {
+      this.logger.warn("Failed to mark call completed", String(err));
+    }
+  }
+
+  // Core turn pipeline shared by the HTTP path (handleTurn) and non-streaming
+  // WebSocket clients. Takes the caller's finished utterance text; returns the
+  // full reply audio in one buffer.
+  async processUtterance(
+    callId: string,
+    turnIndex: number,
+    utteranceText: string,
+    opts: { locale?: string; sttMs?: number } = {},
+  ): Promise<TurnResult> {
+    const prep = await this.prepareUtterance(callId, utteranceText, opts.locale);
+    if (prep.hold) {
+      return {
+        audio: Buffer.alloc(0),
+        transcript: prep.utterance,
+        reply: "",
+        endCall: false,
+        waitForMore: true,
+      };
+    }
+    const { state, utterance } = prep;
+    const locale = state.locale;
+
+    // Hard cap on call length: a stuck or rambling call must not run forever.
+    const maxMs = this.maxCallDurationMs();
+    if (maxMs > 0 && Date.now() - state.startedAt > maxMs) {
+      this.logger.warn(`Call ${callId} exceeded max duration — wrapping up`);
+      const wrapUp = this.wrapUpText(locale);
+      const { audio } = await this.synthesizeWithFallback(wrapUp, locale, callId);
+      await this.completeCall(callId);
+      return { audio, transcript: utterance, reply: wrapUp, endCall: true, waitForMore: false };
+    }
+
+    this.activeTurns += 1;
+    // Per-turn watchdog: abort in-flight provider calls if the whole turn
+    // overruns, so the caller gets a fast re-prompt instead of dead air.
+    const turnController = new AbortController();
+    const watchdog = setTimeout(() => turnController.abort(), this.turnTimeoutMs());
+
+    try {
+      this.appendUserMessage(state, utterance);
+
+      const llmStart = Date.now();
+      const provider = state.provider;
+
+      let llmResolved: Awaited<ReturnType<typeof this.llm.generate>>;
+      try {
+        llmResolved = await this.llm.generate(state.history, {
+          provider,
+          systemPrompt: state.systemPrompt,
+          // Enough headroom for a 2-sentence reply plus the end-call sentinel.
+          maxTokens: 400,
+          signal: turnController.signal,
+        });
+      } catch (err) {
+        // Every provider failed — keep the call alive with a polite re-prompt
+        // instead of surfacing a 503 mid-conversation. The caller repeats, and
+        // the consecutive-user-message merge folds it into history cleanly.
+        this.logger.error(
+          `All LLM providers failed call=${callId}`,
+          err instanceof Error ? err.stack : String(err),
+        );
+        this.metrics.increment("pikorua_turns_total", { result: "llm_error" });
+        const excuse = this.apologyText(locale);
+        const { audio } = await this.synthesizeWithFallback(excuse, locale, callId);
+        return { audio, transcript: utterance, reply: excuse, endCall: false, waitForMore: false };
+      }
+
+      const { text: rawLlmText, llmMs, model, promptTokens, completionTokens } = llmResolved;
+      const llmEnd = Date.now();
+
+      if (!String(rawLlmText ?? "").trim()) {
+        await this.failCall(callId, "LLM returned no reply");
+        throw new ServiceUnavailableException("LLM provider returned no reply");
+      }
+
+      const parsed = this.parseLlmReply(rawLlmText, callId);
+      const reply = parsed.reply;
+      let shouldEndCall = parsed.endCall;
+
+      // Guardrails: hard rules are synchronous regex and run first. The
+      // semantic LLM check used to be a sequential extra round-trip (4-8s/turn
+      // when enabled) — it now runs CONCURRENTLY with TTS; on a (rare) trigger
+      // the replacement is synthesized and the first synthesis is discarded.
+      const hard = this.guardrail.checkHard(reply);
+      let guardrailTriggered = hard.triggered;
+      let guardrailRule = hard.rule;
+      // `spokenReply` is what goes to TTS and is returned to the caller.
+      // `reply` (the original LLM output) is kept in history so the model sees
+      // its own outputs across turns, not sanitized stand-ins.
+      let spokenReply = hard.triggered && hard.replacement?.trim() ? hard.replacement : reply;
+
+      // Append the LLM's actual output to history (not the guardrail replacement).
+      state.history.push({ role: "assistant", content: reply });
+
+      const ttsStart = Date.now();
+      let audio: Buffer;
+      let ttsMs: number;
+      if (hard.triggered) {
+        const tts = await this.synthesizeWithFallback(spokenReply, locale, callId);
+        audio = tts.audio;
+        ttsMs = tts.ttsMs;
+        spokenReply = tts.spokenText;
       } else {
-        const anthropicPercent = Number(this.config.get("ENGLISH_ANTHROPIC_PERCENT") ?? 25);
-        if (locale.toLowerCase().startsWith("en")) {
-          provider = Math.random() * 100 < anthropicPercent ? "anthropic" : "google";
+        const [tts, semantic] = await Promise.all([
+          this.synthesizeWithFallback(spokenReply, locale, callId),
+          this.guardrail.checkSemantic(reply).catch((): GuardrailResult => {
+            return { triggered: false, rule: null, replacement: null };
+          }),
+        ]);
+        if (semantic.triggered) {
+          guardrailTriggered = true;
+          guardrailRule = semantic.rule;
+          spokenReply =
+            semantic.replacement?.trim() ||
+            "I'm not able to provide that information. Our consultant will be happy to help.";
+          const replacementTts = await this.synthesizeWithFallback(spokenReply, locale, callId);
+          audio = replacementTts.audio;
+          ttsMs = replacementTts.ttsMs;
+          spokenReply = replacementTts.spokenText;
         } else {
-          provider = "google";
+          audio = tts.audio;
+          ttsMs = tts.ttsMs;
+          spokenReply = tts.spokenText;
         }
       }
-    } catch {
-      provider = "auto";
-    }
+      if (audio.length === 0) {
+        await this.failCall(callId, "TTS returned empty audio");
+        throw new ServiceUnavailableException("TTS provider returned empty audio");
+      }
 
-    let llmResolved: Awaited<ReturnType<typeof this.llm.generate>>;
-    try {
-      llmResolved = await this.llm.generate(state.history, {
-        provider,
-        systemPrompt: state.systemPrompt,
-        // Enough headroom for the JSON wrapper + a 2-sentence reply; a cap hit
-        // mid-JSON breaks parsing and leaks syntax into the spoken reply.
-        maxTokens: 160,
+      const sttElapsed = opts.sttMs ?? 0;
+      const llmElapsed = llmMs ?? Math.max(0, llmEnd - llmStart);
+      const ttsEnd = Date.now();
+      const ttsElapsed = ttsMs ?? Math.max(0, ttsEnd - ttsStart);
+      const totalMs = sttElapsed + llmElapsed + ttsElapsed;
+
+      const callerTurn: NewCallTurn = {
+        callId,
+        turnIndex: turnIndex * 2,
+        role: "caller",
+        content: utterance,
+        locale,
+        sttMs: sttElapsed,
+        totalMs: sttElapsed,
+        guardrailTriggered: false,
+        fallbackUsed: false,
+      } as NewCallTurn;
+
+      const assistantTurn: NewCallTurn = {
+        callId,
+        turnIndex: turnIndex * 2 + 1,
+        role: "assistant",
+        // Store the spoken text in the DB record (audit trail of what the caller heard).
+        content: spokenReply,
+        locale,
+        sttMs: sttElapsed,
+        llmMs: llmElapsed,
+        ttsMs: ttsElapsed,
+        totalMs,
+        llmModel: model ?? "",
+        promptTokens: promptTokens ?? null,
+        completionTokens: completionTokens ?? null,
+        guardrailTriggered,
+        guardrailRule,
+        fallbackUsed: guardrailTriggered,
+      } as NewCallTurn;
+
+      this.persistTurns(callerTurn, assistantTurn);
+      this.recordTurnMetrics({
+        sttMs: sttElapsed,
+        llmMs: llmElapsed,
+        ttsMs: ttsElapsed,
+        totalMs,
+        ttfaMs: null,
+        result: guardrailTriggered ? "guardrail" : "ok",
       });
-    } catch (err) {
-      // Every provider failed — keep the call alive with a polite re-prompt
-      // instead of surfacing a 503 mid-conversation. The caller repeats, and
-      // the consecutive-user-message merge folds it into history cleanly.
-      this.logger.error(
-        `All LLM providers failed call=${callId}`,
-        err instanceof Error ? err.stack : String(err),
-      );
-      const isHinglish =
-        locale.toLowerCase().startsWith("hi") || locale.toLowerCase().startsWith("gu");
-      const excuse = isHinglish
-        ? "Sorry, आवाज़ थोड़ी कट गई थी — क्या आप दोबारा बोल सकते हैं?"
-        : "Sorry, I missed that — could you say it once more?";
-      const { audio } = await this.tts.synthesize(excuse);
-      return { audio, transcript: utterance, reply: excuse, endCall: false, waitForMore: false };
-    }
 
-    const { text: rawLlmText, llmMs, model, promptTokens, completionTokens } = llmResolved;
-    const llmEnd = Date.now();
-
-    if (!String(rawLlmText ?? "").trim()) {
-      await this.failCall(callId, "LLM returned no reply");
-      throw new ServiceUnavailableException("LLM provider returned no reply");
-    }
-
-    // Parse structured JSON output; strip markdown fences Gemini sometimes adds.
-    let reply = String(rawLlmText ?? "");
-    let shouldEndCall = false;
-    const stripped = reply
-      .trim()
-      .replace(/^```(?:json)?\s*/i, "")
-      .replace(/\s*```\s*$/, "")
-      .trim();
-    // Pull out the first {...} block in case the model added surrounding prose
-    const jsonMatch = stripped.match(/\{[\s\S]*\}/);
-    const candidate = jsonMatch ? jsonMatch[0] : stripped;
-    try {
-      const parsed = JSON.parse(candidate);
-      const validated = LlmResponseSchema.parse(parsed);
-      reply = validated.reply;
-      if (validated.action === "end_call") shouldEndCall = true;
-    } catch {
-      // Strict parse failed (truncated or malformed JSON). Salvage the reply
-      // field with a regex so JSON syntax is never spoken aloud to the caller.
-      const replyMatch = candidate.match(/"reply"\s*:\s*"((?:[^"\\]|\\.)*)/);
-      if (replyMatch) {
-        reply = replyMatch[1].replace(/\\"/g, '"').replace(/\\n/g, " ").trim();
-        shouldEndCall = /"action"\s*:\s*"end_call"/.test(candidate);
-        this.logger.warn(`LLM JSON malformed — salvaged reply for call=${callId}`);
-      } else {
-        reply = stripped;
+      if (shouldEndCall) {
+        await this.completeCall(callId);
       }
-    }
 
-    // Guardrail check (hard rules + semantic LLM check).
-    const guard = await this.guardrail.check(reply);
-    let guardrailTriggered = false;
-    let guardrailRule: string | null = null;
-    // `spokenReply` is what goes to TTS and is returned to the caller.
-    // `reply` (the original LLM output) is kept in history so the model sees its
-    // own outputs across turns, not sanitized stand-ins, preserving coherence.
-    const spokenReply =
-      guard.triggered && guard.replacement && guard.replacement.trim() ? guard.replacement : reply;
-    if (guard.triggered) {
-      guardrailTriggered = true;
-      guardrailRule = guard.rule;
-    }
-
-    // Append the LLM's actual output to history (not the guardrail replacement).
-    state.history.push({ role: "assistant", content: reply });
-
-    const isHinglishLocale =
-      locale.toLowerCase().startsWith("hi") || locale.toLowerCase().startsWith("gu");
-    const ttsStart = Date.now();
-    const { audio, ttsMs } = await this.tts.synthesize(
-      isHinglishLocale ? phoneticizeForTts(spokenReply) : spokenReply,
-    );
-    if (audio.length === 0) {
-      await this.failCall(callId, "TTS returned empty audio");
-      throw new ServiceUnavailableException("TTS provider returned empty audio");
-    }
-
-    const sttElapsed = opts.sttMs ?? 0;
-    const llmElapsed = llmMs ?? Math.max(0, llmEnd - llmStart);
-
-    const callerTurn: NewCallTurn = {
-      callId,
-      turnIndex: turnIndex * 2,
-      role: "caller",
-      content: utterance,
-      locale,
-      sttMs: sttElapsed,
-      totalMs: sttElapsed,
-      guardrailTriggered: false,
-      fallbackUsed: false,
-    } as NewCallTurn;
-
-    const ttsEnd = Date.now();
-    const ttsElapsed = ttsMs ?? Math.max(0, ttsEnd - ttsStart);
-    const totalMs = sttElapsed + llmElapsed + ttsElapsed;
-
-    const assistantTurn: NewCallTurn = {
-      callId,
-      turnIndex: turnIndex * 2 + 1,
-      role: "assistant",
-      // Store the spoken text in the DB record (audit trail of what the caller heard).
-      content: spokenReply,
-      locale,
-      sttMs: sttElapsed,
-      llmMs: llmElapsed,
-      ttsMs: ttsElapsed,
-      totalMs,
-      llmModel: model ?? "",
-      promptTokens: promptTokens ?? null,
-      completionTokens: completionTokens ?? null,
-      guardrailTriggered,
-      guardrailRule,
-      fallbackUsed: guardrailTriggered,
-    } as NewCallTurn;
-
-    try {
-      await this.turnRepo.create(callerTurn);
-      await this.turnRepo.create(assistantTurn);
-    } catch (err) {
-      this.logger.warn(
-        "Failed to persist call turn",
-        err instanceof Error ? err.stack : String(err),
+      this.logger.log(
+        `Turn ${turnIndex} call=${callId} stt=${sttElapsed}ms llm=${llmMs}ms tts=${ttsMs}ms tokens=${promptTokens}+${completionTokens} endCall=${shouldEndCall}`,
       );
+      return {
+        audio,
+        transcript: utterance,
+        reply: spokenReply,
+        endCall: shouldEndCall,
+        waitForMore: false,
+      };
+    } finally {
+      clearTimeout(watchdog);
+      this.activeTurns -= 1;
     }
+  }
 
-    if (shouldEndCall) {
-      this.logger.log(`Call ${callId} ending — lead details collected`);
-      this.calls.delete(callId);
+  // Streaming turn pipeline for live transports (demo WS, telephony media):
+  // LLM deltas are sentence-split and dispatched to streaming TTS while the
+  // rest of the reply is still generating, so the caller hears the first
+  // sentence in well under a second instead of waiting for the full pipeline.
+  async processUtteranceStream(
+    callId: string,
+    turnIndex: number,
+    utteranceText: string,
+    opts: { locale?: string; sttMs?: number; outputFormat?: string },
+    sink: TurnStreamSink,
+  ): Promise<{
+    transcript: string;
+    reply: string;
+    endCall: boolean;
+    waitForMore: boolean;
+    canceled: boolean;
+  }> {
+    const prep = await this.prepareUtterance(callId, utteranceText, opts.locale);
+    if (prep.hold) {
+      return {
+        transcript: prep.utterance,
+        reply: "",
+        endCall: false,
+        waitForMore: true,
+        canceled: false,
+      };
+    }
+    const { state, utterance } = prep;
+    const locale = state.locale;
+    const languageCode = this.ttsLanguageCode(locale);
+    const turnStart = Date.now();
+
+    const streamSentence = async (
+      text: string,
+      sentenceIndex: number,
+      signal: AbortSignal,
+      onFirstByte?: () => void,
+    ) => {
+      let first = true;
+      const res = await this.tts.synthesizeStream(text, {
+        languageCode,
+        outputFormat: opts.outputFormat,
+        signal,
+        onChunk: (chunk) => {
+          if (first) {
+            first = false;
+            onFirstByte?.();
+          }
+          sink.onAudioChunk(chunk, { sentenceIndex, last: false });
+        },
+      });
+      sink.onAudioChunk(Buffer.alloc(0), { sentenceIndex, last: true });
+      return res;
+    };
+
+    // Hard cap on call length.
+    const maxMs = this.maxCallDurationMs();
+    if (maxMs > 0 && Date.now() - state.startedAt > maxMs) {
+      this.logger.warn(`Call ${callId} exceeded max duration — wrapping up`);
+      const wrapUp = this.wrapUpText(locale);
       try {
-        await this.callRepo.update(callId, { status: "completed" });
-      } catch (err) {
-        this.logger.warn("Failed to mark call completed", String(err));
+        await streamSentence(wrapUp, 0, sink.signal);
+      } catch {
+        // wrap-up audio is best-effort
       }
+      await this.completeCall(callId);
+      return { transcript: utterance, reply: wrapUp, endCall: true, waitForMore: false, canceled: false };
     }
 
-    this.logger.log(
-      `Turn ${turnIndex} call=${callId} stt=${sttElapsed}ms llm=${llmMs}ms tts=${ttsMs}ms tokens=${promptTokens}+${completionTokens} endCall=${shouldEndCall}`,
-    );
-    return { audio, transcript: utterance, reply: spokenReply, endCall: shouldEndCall, waitForMore: false };
+    this.activeTurns += 1;
+    const turnController = new AbortController();
+    const abortTurn = () => turnController.abort();
+    sink.signal.addEventListener("abort", abortTurn);
+    const watchdog = setTimeout(abortTurn, this.turnTimeoutMs());
+
+    let ttfaMs: number | null = null;
+    let sentenceIndex = 0;
+    let dispatchedText = "";
+    let ttsMsTotal = 0;
+    let ttsQueue: Promise<void> = Promise.resolve();
+    let hardTrigger: GuardrailResult | null = null;
+    // If the model regresses to the legacy JSON envelope, buffer the whole
+    // response instead of speaking JSON syntax aloud.
+    let jsonMode: boolean | null = null;
+    let pendingText = "";
+    let endCallDetected = false;
+
+    const dispatchSentence = (sentence: string) => {
+      const text = sentence.trim();
+      if (!text || hardTrigger || turnController.signal.aborted) return;
+      const hard = this.guardrail.checkHard(text);
+      if (hard.triggered) {
+        hardTrigger = hard;
+        return;
+      }
+      const idx = sentenceIndex;
+      sentenceIndex += 1;
+      dispatchedText = dispatchedText ? `${dispatchedText} ${text}` : text;
+      sink.onReplyDelta?.(text);
+      ttsQueue = ttsQueue
+        .then(async () => {
+          if (turnController.signal.aborted) return;
+          const res = await streamSentence(text, idx, turnController.signal, () => {
+            if (ttfaMs === null) ttfaMs = Date.now() - turnStart;
+          });
+          ttsMsTotal += res.ttsMs;
+        })
+        .catch((err) => {
+          if (!turnController.signal.aborted) {
+            this.logger.warn(
+              `TTS stream failed mid-turn call=${callId}`,
+              err instanceof Error ? err.message : String(err),
+            );
+          }
+        });
+    };
+
+    const feedDelta = (delta: string) => {
+      pendingText += delta;
+      if (jsonMode === null) {
+        const head = pendingText.trimStart();
+        if (!head) return;
+        jsonMode = head.startsWith("{") || head.startsWith("`");
+      }
+      if (jsonMode) return; // buffer everything; parse at end
+
+      // Strip a complete end-call sentinel anywhere in the buffer.
+      if (END_CALL_PATTERN.test(pendingText)) {
+        endCallDetected = true;
+        END_CALL_PATTERN.lastIndex = 0;
+        pendingText = pendingText.replace(END_CALL_PATTERN, "");
+      }
+      END_CALL_PATTERN.lastIndex = 0;
+
+      // Dispatch complete sentences, but hold back a tail that could be the
+      // start of a split sentinel token ("<end_ca...").
+      let match: RegExpExecArray | null;
+      while ((match = SENTENCE_BOUNDARY.exec(pendingText))) {
+        const end = match.index + match[1].length;
+        const tail = pendingText.slice(end);
+        if (/<[^>]*$/.test(pendingText.slice(0, end))) break;
+        dispatchSentence(pendingText.slice(0, end));
+        pendingText = tail.replace(/^\s+/, "");
+      }
+    };
+
+    try {
+      this.appendUserMessage(state, utterance);
+
+      const llmStart = Date.now();
+      let llmResolved: Awaited<ReturnType<typeof this.llm.generate>>;
+      try {
+        llmResolved = await this.llm.generateStream(
+          state.history,
+          {
+            provider: state.provider,
+            systemPrompt: state.systemPrompt,
+            maxTokens: 400,
+            signal: turnController.signal,
+          },
+          feedDelta,
+        );
+      } catch (err) {
+        if (sink.signal.aborted) {
+          return this.finishCanceledTurn(state, dispatchedText, utterance);
+        }
+        this.logger.error(
+          `All LLM providers failed (stream) call=${callId}`,
+          err instanceof Error ? err.stack : String(err),
+        );
+        this.metrics.increment("pikorua_turns_total", { result: "llm_error" });
+        if (!dispatchedText) {
+          const excuse = this.apologyText(locale);
+          try {
+            await streamSentence(excuse, sentenceIndex, sink.signal);
+          } catch {
+            // excuse audio is best-effort; transport will surface the error
+          }
+          return { transcript: utterance, reply: excuse, endCall: false, waitForMore: false, canceled: false };
+        }
+        // Some sentences were already spoken — end the turn with what was said.
+        await ttsQueue;
+        state.history.push({ role: "assistant", content: dispatchedText });
+        return { transcript: utterance, reply: dispatchedText, endCall: false, waitForMore: false, canceled: false };
+      }
+      const llmEnd = Date.now();
+      const llmElapsed = llmResolved.llmMs ?? Math.max(0, llmEnd - llmStart);
+
+      // Resolve the full reply text. JSON mode parses the buffered envelope;
+      // plain mode flushes whatever didn't end on a sentence boundary.
+      let reply: string;
+      if (jsonMode) {
+        const parsed = this.parseLlmReply(llmResolved.text, callId);
+        reply = parsed.reply;
+        endCallDetected = endCallDetected || parsed.endCall;
+        // Nothing was dispatched yet in JSON mode — dispatch parsed sentences now.
+        let rest = reply;
+        let m: RegExpExecArray | null;
+        while ((m = SENTENCE_BOUNDARY.exec(rest))) {
+          const end = m.index + m[1].length;
+          dispatchSentence(rest.slice(0, end));
+          rest = rest.slice(end).replace(/^\s+/, "");
+        }
+        if (rest.trim()) dispatchSentence(rest);
+      } else {
+        if (END_CALL_PATTERN.test(pendingText)) {
+          endCallDetected = true;
+          END_CALL_PATTERN.lastIndex = 0;
+          pendingText = pendingText.replace(END_CALL_PATTERN, "");
+        }
+        END_CALL_PATTERN.lastIndex = 0;
+        if (pendingText.trim()) dispatchSentence(pendingText);
+        pendingText = "";
+        const parsed = this.parseLlmReply(llmResolved.text, callId);
+        reply = parsed.reply;
+        endCallDetected = endCallDetected || parsed.endCall;
+      }
+
+      if (!reply.trim()) {
+        await this.failCall(callId, "LLM returned no reply");
+        throw new ServiceUnavailableException("LLM provider returned no reply");
+      }
+
+      // History keeps the model's real output even if a guardrail replaces
+      // what's spoken.
+      state.history.push({ role: "assistant", content: reply });
+
+      // Semantic guardrail runs concurrently with the remaining TTS work.
+      const semanticPromise = hardTrigger
+        ? Promise.resolve<GuardrailResult>({ triggered: false, rule: null, replacement: null })
+        : this.guardrail.checkSemantic(reply).catch((): GuardrailResult => {
+            return { triggered: false, rule: null, replacement: null };
+          });
+      const [, semantic] = await Promise.all([ttsQueue, semanticPromise]);
+
+      if (sink.signal.aborted) {
+        return this.finishCanceledTurn(state, dispatchedText, utterance, /* alreadyPushed */ true);
+      }
+
+      let guardrailTriggered = false;
+      let guardrailRule: string | null = null;
+      let spokenReply = dispatchedText || reply;
+
+      const replacement = hardTrigger ?? (semantic.triggered ? semantic : null);
+      if (replacement) {
+        guardrailTriggered = true;
+        guardrailRule = replacement.rule;
+        spokenReply =
+          replacement.replacement?.trim() ||
+          "I'm not able to provide that information. Our consultant will be happy to help.";
+        // Drop queued/playing audio on the transport, then speak the safe text.
+        turnController.abort();
+        sink.onCancel?.();
+        const replacementController = new AbortController();
+        const onSinkAbort = () => replacementController.abort();
+        sink.signal.addEventListener("abort", onSinkAbort);
+        try {
+          await streamSentence(spokenReply, sentenceIndex, replacementController.signal, () => {
+            if (ttfaMs === null) ttfaMs = Date.now() - turnStart;
+          });
+        } finally {
+          sink.signal.removeEventListener("abort", onSinkAbort);
+        }
+        this.logger.warn(`Guardrail (${guardrailRule}) replaced streamed reply call=${callId}`);
+      }
+
+      const sttElapsed = opts.sttMs ?? 0;
+      const totalMs = Date.now() - turnStart + sttElapsed;
+
+      const callerTurn: NewCallTurn = {
+        callId,
+        turnIndex: turnIndex * 2,
+        role: "caller",
+        content: utterance,
+        locale,
+        sttMs: sttElapsed,
+        totalMs: sttElapsed,
+        guardrailTriggered: false,
+        fallbackUsed: false,
+      } as NewCallTurn;
+
+      const assistantTurn: NewCallTurn = {
+        callId,
+        turnIndex: turnIndex * 2 + 1,
+        role: "assistant",
+        content: spokenReply,
+        locale,
+        sttMs: sttElapsed,
+        llmMs: llmElapsed,
+        ttsMs: ttsMsTotal,
+        totalMs,
+        llmModel: llmResolved.model ?? "",
+        promptTokens: llmResolved.promptTokens ?? null,
+        completionTokens: llmResolved.completionTokens ?? null,
+        guardrailTriggered,
+        guardrailRule,
+        fallbackUsed: guardrailTriggered,
+      } as NewCallTurn;
+
+      this.persistTurns(callerTurn, assistantTurn);
+      this.recordTurnMetrics({
+        sttMs: sttElapsed,
+        llmMs: llmElapsed,
+        ttsMs: ttsMsTotal,
+        totalMs,
+        ttfaMs,
+        result: guardrailTriggered ? "guardrail" : "ok",
+      });
+
+      if (endCallDetected) {
+        await this.completeCall(callId);
+      }
+
+      this.logger.log(
+        `Turn ${turnIndex} call=${callId} (stream) stt=${sttElapsed}ms llm=${llmElapsed}ms tts=${ttsMsTotal}ms ttfa=${ttfaMs ?? "?"}ms endCall=${endCallDetected}`,
+      );
+      return {
+        transcript: utterance,
+        reply: spokenReply,
+        endCall: endCallDetected,
+        waitForMore: false,
+        canceled: false,
+      };
+    } finally {
+      clearTimeout(watchdog);
+      sink.signal.removeEventListener("abort", abortTurn);
+      this.activeTurns -= 1;
+    }
+  }
+
+  // Barge-in/disconnect mid-turn: record what was actually spoken so the model
+  // knows where it was interrupted, and let the new utterance drive the next turn.
+  private finishCanceledTurn(
+    state: CallState,
+    dispatchedText: string,
+    utterance: string,
+    alreadyPushed = false,
+  ) {
+    this.metrics.increment("pikorua_turns_total", { result: "canceled" });
+    if (dispatchedText && !alreadyPushed) {
+      state.history.push({ role: "assistant", content: dispatchedText });
+    }
+    return {
+      transcript: utterance,
+      reply: dispatchedText,
+      endCall: false,
+      waitForMore: false,
+      canceled: true,
+    };
+  }
+
+  private recordTurnMetrics(t: {
+    sttMs: number;
+    llmMs: number;
+    ttsMs: number;
+    totalMs: number;
+    ttfaMs: number | null;
+    result: string;
+  }) {
+    this.metrics.increment("pikorua_turns_total", { result: t.result });
+    this.metrics.observe("pikorua_turn_stt_ms", t.sttMs);
+    this.metrics.observe("pikorua_turn_llm_ms", t.llmMs);
+    this.metrics.observe("pikorua_turn_tts_ms", t.ttsMs);
+    this.metrics.observe("pikorua_turn_total_ms", t.totalMs);
+    if (t.ttfaMs !== null) this.metrics.observe("pikorua_turn_ttfa_ms", t.ttfaMs);
   }
 
   // Called by webhook handler when a call reaches a terminal state.
@@ -495,29 +1093,27 @@ Set action to "end_call" ONLY when: (1) the appointment is confirmed AND you've 
     this.calls.delete(callId);
   }
 
+  private async failCall(callId: string, reason: string) {
+    this.logger.error(`Call ${callId} failed: ${reason}`);
+    this.calls.delete(callId);
+    try {
+      await this.callRepo.update(callId, { status: "failed" });
+    } catch (err) {
+      this.logger.warn("Failed to mark call failed", String(err));
+    }
+  }
+
   private evictStale() {
     const cutoff = Date.now() - STALE_MS;
     let evicted = 0;
-    for (const [id, state] of this.calls) {
+    for (const [callId, state] of this.calls.entries()) {
       if (state.lastActivityAt < cutoff) {
-        this.calls.delete(id);
-        evicted++;
+        this.calls.delete(callId);
+        evicted += 1;
       }
     }
     if (evicted > 0) {
       this.logger.log(`Evicted ${evicted} stale call state(s)`);
-    }
-  }
-
-  private async failCall(callId: string, reason: string) {
-    this.calls.delete(callId);
-    try {
-      await this.callRepo.update(callId, { status: "failed", error: reason });
-    } catch (err) {
-      this.logger.warn(
-        `Failed to mark call ${callId} failed`,
-        err instanceof Error ? err.stack : String(err),
-      );
     }
   }
 }

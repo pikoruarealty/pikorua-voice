@@ -10,10 +10,22 @@ export type LiveSessionCallbacks = {
   onError: (message: string) => void;
 };
 
+export type LiveSessionOptions = {
+  // "linear16" (default, 16 kHz PCM) or "mulaw" (8 kHz telephony streams).
+  encoding?: "linear16" | "mulaw";
+};
+
 export type LiveSession = {
   sendAudio: (chunk: Buffer) => void;
+  clearBuffer: () => void;
   close: () => void;
 };
+
+// Reconnect policy: one socket error must not leave the session deaf for the
+// rest of the call. Audio is buffered (bounded) while the socket re-opens.
+const MAX_RECONNECTS = 3;
+const RECONNECT_BACKOFF_MS = [300, 600, 1200];
+const MAX_BUFFERED_CHUNKS = 200; // ~20s of 100ms frames — drop oldest beyond this
 
 // Persistent Deepgram Live (streaming) STT with server-side endpointing.
 // Utterance boundaries come from Deepgram's VAD (speech_final / UtteranceEnd
@@ -35,7 +47,12 @@ export class DeepgramLiveService {
     return locale;
   }
 
-  openSession(locale: string, sampleRate: number, callbacks: LiveSessionCallbacks): LiveSession {
+  openSession(
+    locale: string,
+    sampleRate: number,
+    callbacks: LiveSessionCallbacks,
+    opts: LiveSessionOptions = {},
+  ): LiveSession {
     const apiKey = String(this.config.get("DEEPGRAM_API_KEY") ?? "");
     if (!apiKey) {
       throw new ServiceUnavailableException("Deepgram API key is not configured");
@@ -44,7 +61,7 @@ export class DeepgramLiveService {
     const params = new URLSearchParams({
       model: "nova-2",
       language: this.dgLanguage(locale),
-      encoding: "linear16",
+      encoding: opts.encoding ?? "linear16",
       sample_rate: String(sampleRate),
       channels: "1",
       punctuate: "true",
@@ -57,12 +74,12 @@ export class DeepgramLiveService {
       utterance_end_ms: "1400",
       vad_events: "true",
     });
-    const ws = new WebSocket(`wss://api.deepgram.com/v1/listen?${params.toString()}`, {
-      headers: { Authorization: `Token ${apiKey}` },
-    });
+    const url = `wss://api.deepgram.com/v1/listen?${params.toString()}`;
 
+    let ws: WebSocket | null = null;
     let open = false;
-    let closed = false;
+    let closedByUser = false;
+    let reconnects = 0;
     const pendingChunks: Buffer[] = [];
     // is_final transcript segments accumulated since the last utterance boundary
     let finalSegments: string[] = [];
@@ -75,79 +92,125 @@ export class DeepgramLiveService {
 
     // Deepgram closes idle sockets after ~10s — keep alive while the caller listens
     const keepAlive = setInterval(() => {
-      if (open && !closed) {
+      if (open && !closedByUser && ws) {
         try {
           ws.send(JSON.stringify({ type: "KeepAlive" }));
         } catch {}
       }
     }, 6000);
 
-    ws.on("open", () => {
-      open = true;
-      for (const chunk of pendingChunks) {
-        try {
-          ws.send(chunk);
-        } catch {}
-      }
-      pendingChunks.length = 0;
-      this.logger.log(`Deepgram live session open (lang=${this.dgLanguage(locale)})`);
-    });
+    const connect = () => {
+      const socket = new WebSocket(url, {
+        headers: { Authorization: `Token ${apiKey}` },
+      });
+      ws = socket;
+      open = false;
 
-    ws.on("message", (data: RawData) => {
-      try {
-        const msg = JSON.parse(data.toString());
-        if (msg.type === "Results") {
-          const alt = msg.channel?.alternatives?.[0];
-          const transcript = String(alt?.transcript ?? "").trim();
-          if (msg.is_final) {
-            if (transcript) finalSegments.push(transcript);
-            // speech_final: Deepgram's endpointing says the speaker finished
-            if (msg.speech_final) flushUtterance();
-          } else if (transcript) {
-            callbacks.onPartial(transcript);
-          }
-        } else if (msg.type === "UtteranceEnd") {
-          // Fires after utterance_end_ms of silence — covers segments where
-          // speech_final never arrived (e.g. trailing background noise).
-          flushUtterance();
+      socket.on("open", () => {
+        if (closedByUser) {
+          try {
+            socket.close();
+          } catch {}
+          return;
         }
-      } catch {
-        // ignore non-JSON frames
-      }
-    });
+        open = true;
+        reconnects = 0;
+        for (const chunk of pendingChunks) {
+          try {
+            socket.send(chunk);
+          } catch {}
+        }
+        pendingChunks.length = 0;
+        this.logger.log(
+          `Deepgram live session open (lang=${this.dgLanguage(locale)} enc=${opts.encoding ?? "linear16"})`,
+        );
+      });
 
-    ws.on("error", (err: Error) => {
-      this.logger.warn(`Deepgram live socket error: ${err.message}`);
-      if (!closed) callbacks.onError("Speech recognition connection failed");
-    });
+      socket.on("message", (data: RawData) => {
+        try {
+          const msg = JSON.parse(data.toString());
+          if (msg.type === "Results") {
+            const alt = msg.channel?.alternatives?.[0];
+            const transcript = String(alt?.transcript ?? "").trim();
+            if (msg.is_final) {
+              if (transcript) finalSegments.push(transcript);
+              // speech_final: Deepgram's endpointing says the speaker finished
+              if (msg.speech_final) flushUtterance();
+            } else if (transcript) {
+              callbacks.onPartial(transcript);
+            }
+          } else if (msg.type === "UtteranceEnd") {
+            // Fires after utterance_end_ms of silence — covers segments where
+            // speech_final never arrived (e.g. trailing background noise).
+            flushUtterance();
+          }
+        } catch {
+          // ignore non-JSON frames
+        }
+      });
 
-    ws.on("close", () => {
-      clearInterval(keepAlive);
-      // Deliver whatever was pending so the last words aren't lost
-      if (!closed) flushUtterance();
-      closed = true;
-    });
+      socket.on("error", (err: Error) => {
+        this.logger.warn(`Deepgram live socket error: ${err.message}`);
+        // close handler decides whether to reconnect or surface the error
+      });
+
+      socket.on("close", () => {
+        open = false;
+        if (ws !== socket) return; // superseded by a newer socket
+        if (closedByUser) {
+          clearInterval(keepAlive);
+          flushUtterance();
+          return;
+        }
+        // Unexpected close mid-call: reconnect with backoff so the session
+        // doesn't go deaf. Audio keeps buffering into pendingChunks meanwhile.
+        if (reconnects < MAX_RECONNECTS) {
+          const delay = RECONNECT_BACKOFF_MS[Math.min(reconnects, RECONNECT_BACKOFF_MS.length - 1)];
+          reconnects += 1;
+          this.logger.warn(
+            `Deepgram live socket closed unexpectedly — reconnecting (${reconnects}/${MAX_RECONNECTS}) in ${delay}ms`,
+          );
+          setTimeout(() => {
+            if (!closedByUser) connect();
+          }, delay);
+          return;
+        }
+        clearInterval(keepAlive);
+        // Deliver whatever was pending so the last words aren't lost
+        flushUtterance();
+        callbacks.onError("Speech recognition connection failed");
+      });
+    };
+
+    connect();
 
     return {
       sendAudio: (chunk: Buffer) => {
-        if (closed) return;
-        if (open) {
+        if (closedByUser) return;
+        if (open && ws) {
           try {
             ws.send(chunk);
           } catch {}
         } else {
           pendingChunks.push(chunk);
+          if (pendingChunks.length > MAX_BUFFERED_CHUNKS) pendingChunks.shift();
         }
       },
+      // Discard any buffered/pending transcript segments — call this when the
+      // assistant starts speaking so stale utterance fragments don't fire a
+      // spurious turn mid-playback.
+      clearBuffer: () => {
+        finalSegments = [];
+      },
       close: () => {
-        if (closed) return;
-        closed = true;
+        if (closedByUser) return;
+        closedByUser = true;
         clearInterval(keepAlive);
         try {
-          ws.send(JSON.stringify({ type: "CloseStream" }));
+          ws?.send(JSON.stringify({ type: "CloseStream" }));
         } catch {}
         try {
-          ws.close();
+          ws?.close();
         } catch {}
       },
     };

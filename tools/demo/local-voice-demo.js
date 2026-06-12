@@ -378,6 +378,13 @@ const html = `<!doctype html>
     let ws = null;
     let assistantSpeaking = false;
 
+    // Streaming playback: per-sentence audio chunks are assembled and queued
+    // so the first sentence plays while later ones are still synthesizing.
+    const sentenceChunks = new Map();
+    let playQueue = [];
+    let playing = false;
+    let pendingEndCall = false;
+
     // mic state
     let audioContext = null;
     let stream = null;
@@ -420,6 +427,8 @@ const html = `<!doctype html>
       conversationActive = false;
       vadActive = false;
       assistantSpeaking = false;
+      pendingEndCall = false;
+      stopPlayback();
       if (ws) {
         try { ws.send(JSON.stringify({ type: "stop" })); } catch {}
         try { ws.close(); } catch {}
@@ -450,6 +459,10 @@ const html = `<!doctype html>
         const copy = new Float32Array(input.length);
         copy.set(input);
         lastSamples = copy;
+        // Mic streams CONTINUOUSLY — even while the assistant speaks — so the
+        // server can detect barge-in. Browser echo cancellation keeps Maya's
+        // own voice out of the stream; the server aborts and sends "cancel"
+        // when real caller speech arrives mid-reply.
         if (ws && ws.readyState === WebSocket.OPEN) {
           const ds = downsampleTo16k(input, audioContext.sampleRate);
           ws.send(floatTo16BitPCM(ds).buffer);
@@ -473,6 +486,7 @@ const html = `<!doctype html>
           callId: session.callId,
           language: session.language,
           sampleRate: 16000,
+          streaming: true,
         }));
         setStatus("Listening — speak naturally, short pauses are fine");
       };
@@ -495,20 +509,121 @@ const html = `<!doctype html>
       };
     }
 
+    function enqueueAudio(bytes) {
+      playQueue.push(bytes);
+      if (!playing) void playNext();
+    }
+
+    async function playNext() {
+      const next = playQueue.shift();
+      if (!next) {
+        playing = false;
+        assistantSpeaking = false;
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          try { ws.send(JSON.stringify({ type: "playback-done" })); } catch {}
+        }
+        if (pendingEndCall) {
+          pendingEndCall = false;
+          await endConversation();
+          setStatus("Call complete — lead details collected");
+        } else if (conversationActive) {
+          setStatus("Listening");
+        }
+        return;
+      }
+      playing = true;
+      assistantSpeaking = true;
+      setStatus("Assistant speaking — you can interrupt");
+      const blob = new Blob([next], { type: "audio/mpeg" });
+      els.audio.src = URL.createObjectURL(blob);
+      try {
+        await new Promise((resolve, reject) => {
+          els.audio.onended = resolve;
+          els.audio.onerror = reject;
+          els.audio.play().catch(reject);
+        });
+      } catch {
+        setStatus("Tap play to hear the reply", "warn");
+        await new Promise((resolve) => { els.audio.onended = resolve; });
+      }
+      void playNext();
+    }
+
+    // Server-authoritative barge-in / guardrail replacement: drop everything
+    // queued or playing immediately.
+    function stopPlayback() {
+      playQueue = [];
+      sentenceChunks.clear();
+      try { els.audio.pause(); } catch {}
+      playing = false;
+      assistantSpeaking = false;
+    }
+
+    function handleAudioChunk(msg) {
+      const idx = Number(msg.sentenceIndex ?? 0);
+      if (!sentenceChunks.has(idx)) sentenceChunks.set(idx, []);
+      if (msg.audioBase64) sentenceChunks.get(idx).push(base64ToArrayBuffer(msg.audioBase64));
+      if (msg.last) {
+        const parts = sentenceChunks.get(idx) || [];
+        sentenceChunks.delete(idx);
+        const total = parts.reduce((n, b) => n + b.byteLength, 0);
+        if (total === 0) return;
+        const merged = new Uint8Array(total);
+        let offset = 0;
+        for (const part of parts) {
+          merged.set(new Uint8Array(part), offset);
+          offset += part.byteLength;
+        }
+        enqueueAudio(merged);
+      }
+    }
+
     async function handleServerMessage(msg) {
       if (msg.type === "partial") {
         els.transcript.textContent = msg.transcript + " …";
-        // Barge-in: the caller is talking over the assistant — stop playback
-        if (assistantSpeaking) {
-          els.audio.pause();
-          assistantSpeaking = false;
-          setStatus("Listening");
-        }
         return;
       }
       if (msg.type === "holding") {
         els.transcript.textContent = (msg.transcript || "") + " …";
         setStatus("Listening — please continue");
+        return;
+      }
+      if (msg.type === "turn-start") {
+        els.transcript.textContent = msg.transcript || "";
+        els.reply.textContent = "";
+        setStatus("Thinking…");
+        return;
+      }
+      if (msg.type === "reply-chunk") {
+        els.reply.textContent = (els.reply.textContent ? els.reply.textContent + " " : "") + (msg.text || "");
+        return;
+      }
+      if (msg.type === "filler") {
+        // Latency mask — only play if nothing real has arrived yet.
+        if (!playing && playQueue.length === 0 && msg.audioBase64) {
+          enqueueAudio(new Uint8Array(base64ToArrayBuffer(msg.audioBase64)));
+        }
+        return;
+      }
+      if (msg.type === "audio-chunk") {
+        handleAudioChunk(msg);
+        return;
+      }
+      if (msg.type === "cancel") {
+        stopPlayback();
+        setStatus("Listening");
+        return;
+      }
+      if (msg.type === "reply-end") {
+        els.transcript.textContent = msg.transcript || "(no transcript)";
+        if (msg.reply) els.reply.textContent = msg.reply;
+        if (msg.endCall) {
+          if (playing || playQueue.length > 0) pendingEndCall = true;
+          else {
+            await endConversation();
+            setStatus("Call complete — lead details collected");
+          }
+        }
         return;
       }
       if (msg.type === "reply") {

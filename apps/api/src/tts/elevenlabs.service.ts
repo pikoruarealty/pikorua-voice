@@ -13,7 +13,67 @@ const TTS_RESPELLINGS: Array<[RegExp, string]> = [
   [/\bAmbli\b/gi, "अंबली"],
   [/\bAhmedabad\b/gi, "अहमदाबाद"],
   [/\bBodakdev\b/gi, "बोडकदेव"],
-  [/\bsq\.?\s*ft\.?\b/gi, "square feet"],
+];
+
+// Area units: in Hindi mode the engine reads "square feet" with English
+// phonemes mid-Hindi-sentence, which sounds glitchy — respell in Devanagari.
+const SQ_FT_PATTERNS: RegExp[] = [
+  /\bsquare\s+feet\b/gi,
+  /\bsq\.?\s*(?:ft\.?|feet)\b/gi,
+  /\bsqft\b/gi,
+];
+
+// Romanized Hindi → Devanagari. The prompt asks the LLM for Devanagari, but
+// it still leaks romanized fragments ("Aaj 2 baje...") which the engine
+// mangles with English phonemes. Only unambiguous words are listed — tokens
+// that are also common English words ("to", "main", "do", "the") are excluded.
+const ROMAN_HINDI_WORDS: Array<[RegExp, string]> = [
+  [/\baapko\b/gi, "आपको"],
+  [/\baapka\b/gi, "आपका"],
+  [/\baapki\b/gi, "आपकी"],
+  [/\baap\b/gi, "आप"],
+  [/\bhaan\b/gi, "हाँ"],
+  [/\bnahin?\b/gi, "नहीं"],
+  [/\bkya\b/gi, "क्या"],
+  [/\bkaise\b/gi, "कैसे"],
+  [/\bkahan\b/gi, "कहाँ"],
+  [/\bhain\b/gi, "हैं"],
+  [/\bhai\b/gi, "है"],
+  [/\bbilkul\b/gi, "बिल्कुल"],
+  [/\bac+ha\b/gi, "अच्छा"],
+  [/\btheek\b/gi, "ठीक"],
+  [/\bthik\b/gi, "ठीक"],
+  [/\bbaje\b/gi, "बजे"],
+  [/\baaj\b/gi, "आज"],
+  [/\babhi\b/gi, "अभी"],
+  [/\bthoda\b/gi, "थोड़ा"],
+  [/\bthodi\b/gi, "थोड़ी"],
+  [/\bzaroor\b/gi, "ज़रूर"],
+  [/\bshukriya\b/gi, "शुक्रिया"],
+  [/\bdhanyavad\b/gi, "धन्यवाद"],
+  [/\bnamaste\b/gi, "नमस्ते"],
+  [/\bbahut\b/gi, "बहुत"],
+  [/\bbohot\b/gi, "बहुत"],
+  [/\bjo\b/gi, "जो"],
+  [/\bdikhate\b/gi, "दिखाते"],
+  [/\bdikhati\b/gi, "दिखाती"],
+  [/\brahega\b/gi, "रहेगा"],
+  [/\brahegi\b/gi, "रहेगी"],
+  [/\bsakte\b/gi, "सकते"],
+  [/\bsakti\b/gi, "सकती"],
+  [/\bsakta\b/gi, "सकता"],
+  [/\bkarenge\b/gi, "करेंगे"],
+  [/\bkarte\b/gi, "करते"],
+  [/\bkarti\b/gi, "करती"],
+  [/\bmilega\b/gi, "मिलेगा"],
+  [/\bmilegi\b/gi, "मिलेगी"],
+  [/\bchahiye\b/gi, "चाहिए"],
+  [/\bkarod\b/gi, "करोड़"],
+  [/\blaakh\b/gi, "लाख"],
+  [/\bhum\b/gi, "हम"],
+  [/\blekin\b/gi, "लेकिन"],
+  [/\bkyunki\b/gi, "क्योंकि"],
+  [/\bmatlab\b/gi, "मतलब"],
 ];
 
 // Hindi number words 0-99 (Hindi numerals are irregular — lookup table needed)
@@ -52,79 +112,261 @@ function hindiNumberWords(n: number): string {
   return parts.join(" ");
 }
 
-function normalizeForTts(text: string): string {
-  let out = text;
-  for (const [pattern, replacement] of TTS_RESPELLINGS) {
-    out = out.replace(pattern, replacement);
+const EN_0_19 = [
+  "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+  "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen",
+  "eighteen", "nineteen",
+];
+const EN_TENS = [
+  "", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety",
+];
+
+// Indian-English number words (lakh/crore grouping) for non-Hindi voice modes.
+function englishNumberWords(n: number): string {
+  if (n < 20) return EN_0_19[n];
+  if (n < 100) {
+    const tens = EN_TENS[Math.floor(n / 10)];
+    const rem = n % 10;
+    return rem ? `${tens} ${EN_0_19[rem]}` : tens;
   }
-  // Large numbers ("7,600", "5700", "1,23,456") get garbled by the engine in
-  // Hindi mode — speak them as Hindi words instead. Small numbers (times,
-  // counts, "4BHK") read fine and are left alone.
+  const parts: string[] = [];
+  const lakh = Math.floor(n / 100000);
+  if (lakh) {
+    parts.push(englishNumberWords(lakh), "lakh");
+    n %= 100000;
+  }
+  const thousand = Math.floor(n / 1000);
+  if (thousand) {
+    parts.push(englishNumberWords(thousand), "thousand");
+    n %= 1000;
+  }
+  const hundred = Math.floor(n / 100);
+  if (hundred) {
+    parts.push(englishNumberWords(hundred), "hundred");
+    n %= 100;
+  }
+  if (n) parts.push(englishNumberWords(n));
+  return parts.join(" ");
+}
+
+function isHindiMode(languageCode: string): boolean {
+  const code = languageCode.toLowerCase();
+  return code.startsWith("hi") || code.startsWith("gu");
+}
+
+// Normalize reply text for the voice engine. Locale-aware: Hindi/Gujarati
+// modes respell Indian words and large numbers in Devanagari and transliterate
+// leaked romanized Hindi; English modes only expand large numbers to words.
+export function normalizeForTts(text: string, languageCode = "hi"): string {
+  let out = text;
+  const hindi = isHindiMode(languageCode);
+
+  if (hindi) {
+    for (const [pattern, replacement] of TTS_RESPELLINGS) {
+      out = out.replace(pattern, replacement);
+    }
+    for (const pattern of SQ_FT_PATTERNS) {
+      out = out.replace(pattern, "स्क्वेयर फीट");
+    }
+    for (const [pattern, replacement] of ROMAN_HINDI_WORDS) {
+      out = out.replace(pattern, replacement);
+    }
+  }
+
+  // Large numbers ("7,600", "5700", "1,23,456") get garbled by the engine —
+  // speak them as words. Small numbers (times, counts, "4BHK") read fine and
+  // are left alone. Standalone years (1900-2099) stay as digits: "टू थाउज़ेंड
+  // ट्वेंटी सिक्स" word-form reads worse than the engine's native year reading.
   out = out.replace(/\b\d{1,3}(?:,\d{2,3})+\b|\b\d{4,7}\b/g, (match) => {
     const n = parseInt(match.replace(/,/g, ""), 10);
     if (!Number.isFinite(n) || n > 9999999) return match;
-    return hindiNumberWords(n);
+    if (!match.includes(",") && n >= 1900 && n <= 2099) return match;
+    return hindi ? hindiNumberWords(n) : englishNumberWords(n);
   });
   return out;
 }
 
+export type SynthesizeOptions = {
+  voiceId?: string;
+  // Overrides ELEVENLABS_LANGUAGE_CODE for this request (e.g. "en" for
+  // English-locale calls so number words come out in English).
+  languageCode?: string;
+  // Telephony output (e.g. "ulaw_8000" for Exotel/Twilio media streams).
+  outputFormat?: string;
+};
+
+export type StreamSynthesisResult = {
+  ttsMs: number;
+  // Time to first audio byte — the latency the caller actually perceives.
+  ttfbMs: number | null;
+  bytes: number;
+};
+
 @Injectable()
 export class ElevenlabsService {
   private readonly logger = new Logger("ElevenlabsService");
+
+  // Pre-synthesized short clips (fillers, apologies) keyed by text+language.
+  // Served instantly to mask turn latency and to survive TTS provider outages.
+  private readonly clips = new Map<string, Buffer>();
+
   constructor(private readonly config: ConfigService) {}
 
-  async synthesize(text: string, voiceId?: string) {
-    const start = Date.now();
+  private resolveLanguageCode(opts?: SynthesizeOptions): string {
+    return String(opts?.languageCode ?? this.config.get("ELEVENLABS_LANGUAGE_CODE") ?? "hi");
+  }
+
+  private requestConfig(opts?: SynthesizeOptions) {
     const key = String(this.config.get("ELEVENLABS_API_KEY") ?? "");
-    const vid = String(this.config.get("ELEVENLABS_VOICE_ID") ?? voiceId ?? "alloy");
+    const vid = String(this.config.get("ELEVENLABS_VOICE_ID") ?? opts?.voiceId ?? "alloy");
     if (!key) {
       this.logger.warn("ElevenLabs API key not configured — returning empty audio");
       throw new ServiceUnavailableException("ElevenLabs API key is not configured");
     }
+    // Voice tuning for a natural, human conversational tone (not robotic):
+    // moderate stability keeps it steady without monotone; lower style avoids
+    // the exaggerated/synthetic feel; high similarity keeps the voice's warmth.
+    // All overridable via env so you can tune without a redeploy.
+    const stability = Number(this.config.get("ELEVENLABS_STABILITY") ?? 0.6);
+    const similarityBoost = Number(this.config.get("ELEVENLABS_SIMILARITY_BOOST") ?? 0.9);
+    const style = Number(this.config.get("ELEVENLABS_STYLE") ?? 0.2);
+    const modelId = String(this.config.get("ELEVENLABS_MODEL") ?? "eleven_turbo_v2_5");
+    // Forcing the language makes the model read romanized Hindi correctly
+    // ("aapko", "kya") instead of mangling it with English phonemes. English
+    // words then get a natural Indian accent — right for Hinglish calls.
+    const languageCode = this.resolveLanguageCode(opts);
+    return { key, vid, stability, similarityBoost, style, modelId, languageCode };
+  }
 
-    try {
-      // optimize_streaming_latency trades a little quality for faster first-byte
-      // (3 = strong optimization) — noticeably cuts perceived TTS lag on calls.
-      const url = `https://api.elevenlabs.io/v1/text-to-speech/${vid}?optimize_streaming_latency=3`;
-      // Voice tuning for a natural, human conversational tone (not robotic):
-      // moderate stability keeps it steady without monotone; lower style avoids
-      // the exaggerated/synthetic feel; high similarity keeps the voice's warmth.
-      // All overridable via env so you can tune without a redeploy.
-      const stability = Number(this.config.get("ELEVENLABS_STABILITY") ?? 0.6);
-      const similarityBoost = Number(this.config.get("ELEVENLABS_SIMILARITY_BOOST") ?? 0.9);
-      const style = Number(this.config.get("ELEVENLABS_STYLE") ?? 0.2);
-      const modelId = String(this.config.get("ELEVENLABS_MODEL") ?? "eleven_turbo_v2_5");
-      // Forcing the language makes the model read romanized Hindi correctly
-      // ("aapko", "kya") instead of mangling it with English phonemes. English
-      // words then get a natural Indian accent — right for Hinglish calls.
-      const languageCode = String(this.config.get("ELEVENLABS_LANGUAGE_CODE") ?? "hi");
-      const body: Record<string, unknown> = {
-        text: normalizeForTts(text),
-        model_id: modelId,
-        voice_settings: {
-          stability,
-          similarity_boost: similarityBoost,
-          style,
-          use_speaker_boost: true,
-        },
-      };
-      if (languageCode) body.language_code = languageCode;
-      const resp = await axios.post(
-        url,
-        body,
-        {
-          headers: { "xi-api-key": key, "Content-Type": "application/json" },
+  private buildBody(text: string, cfg: ReturnType<ElevenlabsService["requestConfig"]>) {
+    const body: Record<string, unknown> = {
+      text: normalizeForTts(text, cfg.languageCode),
+      model_id: cfg.modelId,
+      voice_settings: {
+        stability: cfg.stability,
+        similarity_boost: cfg.similarityBoost,
+        style: cfg.style,
+        use_speaker_boost: true,
+      },
+    };
+    if (cfg.languageCode) body.language_code = cfg.languageCode.split("-")[0];
+    return body;
+  }
+
+  async synthesize(text: string, opts?: SynthesizeOptions) {
+    const start = Date.now();
+    const cfg = this.requestConfig(opts);
+    // optimize_streaming_latency trades a little quality for faster first-byte
+    // (3 = strong optimization) — noticeably cuts perceived TTS lag on calls.
+    const url = `https://api.elevenlabs.io/v1/text-to-speech/${cfg.vid}?optimize_streaming_latency=3${
+      opts?.outputFormat ? `&output_format=${opts.outputFormat}` : ""
+    }`;
+    const body = this.buildBody(text, cfg);
+
+    // A transient provider blip must not drop a live call — one quick retry.
+    let lastErr: unknown;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const resp = await axios.post(url, body, {
+          headers: { "xi-api-key": cfg.key, "Content-Type": "application/json" },
           responseType: "arraybuffer",
-          timeout: 10000,
-        },
-      );
-      const audio = Buffer.from(resp.data as ArrayBuffer);
-      const ms = Date.now() - start;
-      this.logger.log(`TTS complete (${ms}ms) bytes=${audio.length}`);
-      return { audio, ttsMs: ms };
-    } catch (err) {
-      this.logger.error("TTS failed", err instanceof Error ? err.stack : String(err));
-      throw new ServiceUnavailableException("ElevenLabs synthesis failed");
+          timeout: Number(this.config.get("TTS_TIMEOUT_MS") ?? 8000),
+        });
+        const audio = Buffer.from(resp.data as ArrayBuffer);
+        const ms = Date.now() - start;
+        this.logger.log(`TTS complete (${ms}ms) bytes=${audio.length}`);
+        return { audio, ttsMs: ms };
+      } catch (err) {
+        lastErr = err;
+        this.logger.warn(
+          `TTS attempt ${attempt + 1} failed${attempt === 0 ? " — retrying" : ""}`,
+          err instanceof Error ? err.message : String(err),
+        );
+        if (attempt === 0) await new Promise((r) => setTimeout(r, 300));
+      }
+    }
+    this.logger.error("TTS failed", lastErr instanceof Error ? lastErr.stack : String(lastErr));
+    throw new ServiceUnavailableException("ElevenLabs synthesis failed");
+  }
+
+  // Streaming synthesis: audio chunks are forwarded as they arrive from the
+  // /stream endpoint so the caller hears the first bytes in ~hundreds of ms
+  // instead of waiting for the full clip. Retries once, but only if nothing
+  // was emitted yet (chunks already forwarded can't be unsent).
+  async synthesizeStream(
+    text: string,
+    opts: SynthesizeOptions & {
+      signal?: AbortSignal;
+      onChunk: (chunk: Buffer) => void;
+    },
+  ): Promise<StreamSynthesisResult> {
+    const start = Date.now();
+    const cfg = this.requestConfig(opts);
+    const url = `https://api.elevenlabs.io/v1/text-to-speech/${cfg.vid}/stream?optimize_streaming_latency=3${
+      opts.outputFormat ? `&output_format=${opts.outputFormat}` : ""
+    }`;
+    const body = this.buildBody(text, cfg);
+
+    let bytes = 0;
+    let ttfbMs: number | null = null;
+    let lastErr: unknown;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const resp = await axios.post(url, body, {
+          headers: { "xi-api-key": cfg.key, "Content-Type": "application/json" },
+          responseType: "stream",
+          timeout: Number(this.config.get("TTS_TIMEOUT_MS") ?? 8000),
+          signal: opts.signal,
+        });
+        for await (const chunk of resp.data as AsyncIterable<Buffer>) {
+          if (opts.signal?.aborted) break;
+          if (ttfbMs === null) ttfbMs = Date.now() - start;
+          bytes += chunk.length;
+          opts.onChunk(chunk);
+        }
+        const ms = Date.now() - start;
+        this.logger.log(`TTS stream complete (${ms}ms ttfb=${ttfbMs}ms) bytes=${bytes}`);
+        return { ttsMs: ms, ttfbMs, bytes };
+      } catch (err) {
+        lastErr = err;
+        if (bytes > 0 || opts.signal?.aborted) break;
+        this.logger.warn(
+          `TTS stream attempt ${attempt + 1} failed${attempt === 0 ? " — retrying" : ""}`,
+          err instanceof Error ? err.message : String(err),
+        );
+        if (attempt === 0) await new Promise((r) => setTimeout(r, 300));
+      }
+    }
+    if (opts.signal?.aborted) {
+      return { ttsMs: Date.now() - start, ttfbMs, bytes };
+    }
+    this.logger.error(
+      "TTS stream failed",
+      lastErr instanceof Error ? lastErr.stack : String(lastErr),
+    );
+    throw new ServiceUnavailableException("ElevenLabs streaming synthesis failed");
+  }
+
+  // Return a cached short clip, synthesizing and caching it on first use.
+  // Used for fillers ("hmm, ek second...") and outage apologies — both must be
+  // instant, and the apology must work even when the TTS provider is down.
+  async getClip(text: string, opts?: SynthesizeOptions): Promise<Buffer | null> {
+    const key = `${this.resolveLanguageCode(opts)}|${opts?.outputFormat ?? "mp3"}|${text}`;
+    const cached = this.clips.get(key);
+    if (cached) return cached;
+    try {
+      const { audio } = await this.synthesize(text, opts);
+      if (audio.length > 0) this.clips.set(key, audio);
+      return audio;
+    } catch {
+      return null;
+    }
+  }
+
+  // Fire-and-forget warm-up so the first filler/apology of a call is cached.
+  prewarmClips(texts: string[], opts?: SynthesizeOptions) {
+    for (const text of texts) {
+      void this.getClip(text, opts).catch(() => undefined);
     }
   }
 }

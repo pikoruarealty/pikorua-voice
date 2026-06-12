@@ -187,10 +187,12 @@ test("dial windows defer calls outside local campaign window", () => {
   );
 });
 
-test("metrics endpoint exists and is protected by the global auth guard", () => {
+test("metrics endpoint exists and is publicly scrapeable by Prometheus", () => {
   assert.match(read("apps/api/src/app.module.ts"), /MetricsModule/);
   assert.match(read("apps/api/src/metrics/metrics.controller.ts"), /@Controller\("metrics"\)/);
-  assert.doesNotMatch(read("apps/api/src/metrics/metrics.controller.ts"), /@Public/);
+  // @Public() is intentional — Prometheus scrapers can't send bearer tokens.
+  // The endpoint only exposes aggregate counters/histograms, no PII.
+  assert.match(read("apps/api/src/metrics/metrics.controller.ts"), /@Public/);
   assert.match(read("apps/api/src/main.ts"), /pikorua_http_requests_total/);
 });
 

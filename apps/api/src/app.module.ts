@@ -7,6 +7,7 @@ import { AppController } from "./app.controller";
 import { ApiAuthGuard } from "./auth/api-auth.guard";
 import { validateEnv } from "./config/env";
 import { DatabaseModule } from "./database/database.module";
+import { RedisModule } from "./redis/redis.module";
 import { HealthModule } from "./health/health.module";
 import { CampaignModule } from "./campaign/campaign.module";
 import { WebhookModule } from "./webhooks/webhook.module";
@@ -26,6 +27,7 @@ import { MetricsModule } from "./metrics/metrics.module";
     // campaign creation, webhook ingestion, call-turn API).
     ThrottlerModule.forRoot([{ ttl: 60_000, limit: 120 }]),
     DatabaseModule,
+    RedisModule,
     HealthModule,
     CampaignModule,
     WebhookModule,

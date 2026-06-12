@@ -1,6 +1,7 @@
 import { Injectable, Logger, ServiceUnavailableException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import axios from "axios";
+import WebSocket from "ws";
 
 // Words the voice engine mispronounces under language_code=hi: Indian-English
 // words and local proper nouns get respelled in Devanagari so the engine uses
@@ -13,6 +14,9 @@ const TTS_RESPELLINGS: Array<[RegExp, string]> = [
   [/\bAmbli\b/gi, "अंबली"],
   [/\bAhmedabad\b/gi, "अहमदाबाद"],
   [/\bBodakdev\b/gi, "बोडकदेव"],
+  // "brochure" is French-derived — the Hindi engine reads it with English
+  // phonemes ("bro-chure") instead of the correct "BROH-shuh" sound.
+  [/\bbrochures?\b/gi, "ब्रोशर"],
 ];
 
 // Area units: in Hindi mode the engine reads "square feet" with English
@@ -368,5 +372,106 @@ export class ElevenlabsService {
     for (const text of texts) {
       void this.getClip(text, opts).catch(() => undefined);
     }
+  }
+
+  // WebSocket input-streaming TTS: open a persistent ElevenLabs WS session for
+  // a single turn. The caller feeds text tokens as they arrive from the LLM;
+  // audio chunks come back in real time. This achieves true token→audio
+  // pipelining — the first audio chunk arrives after the first few tokens,
+  // rather than waiting for a complete sentence.
+  //
+  // Returns a session handle; the caller must call session.close() when done.
+  openWsSession(
+    opts: SynthesizeOptions & { onChunk: (chunk: Buffer) => void; onDone: () => void; onError: (err: string) => void; signal?: AbortSignal },
+  ): { sendText: (text: string) => void; flush: () => void; close: () => void } {
+    const cfg = this.requestConfig(opts);
+    const outputFormat = opts.outputFormat ?? "mp3_44100_128";
+    const url = `wss://api.elevenlabs.io/v1/text-to-speech/${cfg.vid}/stream-input?model_id=${cfg.modelId}&output_format=${outputFormat}&optimize_streaming_latency=3`;
+
+    let ws: WebSocket | null = null;
+    let closed = false;
+    const pendingTexts: string[] = [];
+    let wsOpen = false;
+
+    const flushPending = () => {
+      for (const t of pendingTexts) {
+        try { ws?.send(JSON.stringify({ text: t, try_trigger_generation: true })); } catch {}
+      }
+      pendingTexts.length = 0;
+    };
+
+    const socket = new WebSocket(url, {
+      headers: { "xi-api-key": cfg.key },
+    });
+    ws = socket;
+
+    socket.on("open", () => {
+      if (closed) { try { socket.close(); } catch {} return; }
+      wsOpen = true;
+      // Send voice settings handshake
+      socket.send(JSON.stringify({
+        text: " ",
+        voice_settings: {
+          stability: cfg.stability,
+          similarity_boost: cfg.similarityBoost,
+          style: cfg.style,
+          use_speaker_boost: true,
+        },
+        ...(cfg.languageCode ? { language_code: cfg.languageCode.split("-")[0] } : {}),
+        xi_api_key: cfg.key,
+      }));
+      flushPending();
+    });
+
+    socket.on("message", (data) => {
+      try {
+        const msg = JSON.parse(data.toString());
+        if (msg.audio) {
+          const chunk = Buffer.from(msg.audio, "base64");
+          if (chunk.length > 0) opts.onChunk(chunk);
+        }
+        if (msg.isFinal) opts.onDone();
+      } catch {}
+    });
+
+    socket.on("error", (err) => {
+      if (!closed) opts.onError(err.message);
+    });
+
+    socket.on("close", () => {
+      if (!closed) opts.onDone();
+    });
+
+    opts.signal?.addEventListener("abort", () => {
+      closed = true;
+      try { socket.close(); } catch {}
+    });
+
+    return {
+      sendText: (text: string) => {
+        if (closed) return;
+        const normalized = normalizeForTts(text, cfg.languageCode);
+        if (wsOpen) {
+          try { socket.send(JSON.stringify({ text: normalized, try_trigger_generation: true })); } catch {}
+        } else {
+          pendingTexts.push(normalized);
+        }
+      },
+      flush: () => {
+        if (closed) return;
+        // ElevenLabs flushes on receiving an empty string
+        if (wsOpen) {
+          try { socket.send(JSON.stringify({ text: "" })); } catch {}
+        }
+      },
+      close: () => {
+        if (closed) return;
+        closed = true;
+        if (wsOpen) {
+          try { socket.send(JSON.stringify({ text: "" })); } catch {}
+        }
+        setTimeout(() => { try { socket.close(); } catch {} }, 500);
+      },
+    };
   }
 }

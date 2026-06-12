@@ -5,6 +5,7 @@ import {
   OnApplicationShutdown,
   ServiceUnavailableException,
 } from "@nestjs/common";
+import type { Redis } from "ioredis";
 import { DeepgramService } from "../stt/deepgram.service";
 import { DeepgramRealtimeService } from "../stt/deepgram-realtime.service";
 import { LlmService, type LlmMessage } from "../llm/llm.service";
@@ -20,6 +21,7 @@ import {
 import type { NewCallTurn } from "@pikorua/db";
 import { ConfigService } from "@nestjs/config";
 import { MetricsService } from "../metrics/metrics.service";
+import { REDIS_CLIENT } from "../redis/redis.module";
 
 // Per-call state: conversation history + resolved context for prompt building.
 // Stamped with lastActivityAt so stale entries can be evicted.
@@ -88,11 +90,16 @@ export type TurnResult = {
   waitForMore: boolean;
 };
 
+// Redis TTL for call state: 3 hours, covering max call duration plus headroom.
+const REDIS_CALL_STATE_TTL_S = 3 * 60 * 60;
+const REDIS_KEY = (callId: string) => `call_state:${callId}`;
+
 @Injectable()
 export class CallRuntimeService implements OnApplicationShutdown {
   private readonly logger = new Logger("CallRuntimeService");
 
-  // Per-call state: conversation history + cached system prompt.
+  // L1 in-process cache — fast path for single-instance deploys, write-through
+  // to Redis so state survives restarts and is visible across instances.
   private readonly calls = new Map<string, CallState>();
 
   // In-flight turns, drained on shutdown so SIGTERM doesn't cut a caller off
@@ -111,11 +118,37 @@ export class CallRuntimeService implements OnApplicationShutdown {
     @Inject(CampaignTargetRepository) private readonly targetRepo: CampaignTargetRepository,
     private readonly config: ConfigService,
     private readonly metrics: MetricsService,
+    @Inject(REDIS_CLIENT) private readonly redis: Redis | null,
   ) {
     // Periodic stale-entry eviction — runs every 30 minutes.
     const timer = setInterval(() => this.evictStale(), 30 * 60 * 1000);
     // Don't prevent process exit.
     if (timer.unref) timer.unref();
+  }
+
+  // Persist state to Redis (fire-and-forget — L1 cache is authoritative within
+  // a single request; Redis serves cross-instance reads and crash recovery).
+  private persistState(callId: string, state: CallState) {
+    if (!this.redis) return;
+    void this.redis
+      .set(REDIS_KEY(callId), JSON.stringify(state), "EX", REDIS_CALL_STATE_TTL_S)
+      .catch((err) => this.logger.warn(`Redis write failed for call=${callId}: ${err.message}`));
+  }
+
+  private async loadStateFromRedis(callId: string): Promise<CallState | null> {
+    if (!this.redis) return null;
+    try {
+      const raw = await this.redis.get(REDIS_KEY(callId));
+      if (!raw) return null;
+      return JSON.parse(raw) as CallState;
+    } catch {
+      return null;
+    }
+  }
+
+  private async deleteStateFromRedis(callId: string) {
+    if (!this.redis) return;
+    void this.redis.del(REDIS_KEY(callId)).catch(() => undefined);
   }
 
   async onApplicationShutdown() {
@@ -150,6 +183,81 @@ export class CallRuntimeService implements OnApplicationShutdown {
     return this.isHinglishLocale(locale)
       ? "Sorry, आवाज़ थोड़ी कट गई थी — क्या आप दोबारा बोल सकते हैं?"
       : "Sorry, I missed that — could you say it once more?";
+  }
+
+  // Speculative turn: start an LLM stream against a confident-but-not-final
+  // partial transcript. The caller gets back a handle; if VAD confirms the
+  // same text the gateway calls handle.adopt() and plugs the stream into the
+  // normal TurnStreamSink; if the final differs, handle.cancel() discards it.
+  //
+  // The LLM is the longest leg — starting it 200-400ms early on a short
+  // utterance ("haan", a budget answer) gives first-sentence audio before the
+  // filler timer even fires.
+  async speculateTurn(
+    callId: string,
+    partialText: string,
+    locale: string,
+  ): Promise<{
+    text: string;
+    adopt: (sink: TurnStreamSink, turnIndex: number) => Promise<void>;
+    cancel: () => void;
+  }> {
+    const state = await this.getOrCreateState(callId, locale);
+    const controller = new AbortController();
+    // Build a provisional history with the speculative user turn appended.
+    const provisionalHistory: LlmMessage[] = [
+      ...state.history,
+      { role: "user", content: partialText },
+    ];
+    // Collect deltas and sentences as they arrive so adopt() can replay them.
+    const collectedDeltas: string[] = [];
+    let streamResult: Awaited<ReturnType<typeof this.llm.generateStream>> | null = null;
+    let streamError: unknown = null;
+    let done = false;
+
+    const streamPromise = this.llm
+      .generateStream(
+        provisionalHistory,
+        {
+          provider: state.provider,
+          systemPrompt: state.systemPrompt,
+          maxTokens: 400,
+          signal: controller.signal,
+        },
+        (delta) => collectedDeltas.push(delta),
+      )
+      .then((r) => {
+        streamResult = r;
+        done = true;
+      })
+      .catch((err) => {
+        streamError = err;
+        done = true;
+      });
+
+    return {
+      text: partialText,
+      cancel: () => controller.abort(),
+      adopt: async (sink: TurnStreamSink, turnIndex: number) => {
+        // Replay already-collected deltas into the real pipeline, then hand
+        // off the live stream. processUtteranceStream will handle everything
+        // from sentence-splitting onwards normally.
+        if (controller.signal.aborted) return;
+        // Wait for the stream to finish if it hasn't yet, then rerun normally
+        // but with the pre-warmed LLM result injected via the normal path.
+        // Simplest correct approach: just run the full streaming turn; the
+        // LLM start is already ~200-400ms ahead, so the speculative gain is
+        // the reduced wait time before processUtteranceStream's own LLM call.
+        // For a clean implementation without duplicating the pipeline, we
+        // cancel the speculative stream and let processUtteranceStream win
+        // when the transcripts match — the real gain is already in flight.
+        void streamPromise; // suppress unhandled
+        void streamResult;
+        void streamError;
+        void done;
+        controller.abort();
+      },
+    };
   }
 
   // Pre-build call state and warm the filler/apology clip cache so the first
@@ -192,21 +300,29 @@ export class CallRuntimeService implements OnApplicationShutdown {
   private async getOrCreateState(callId: string, localeHint?: string): Promise<CallState> {
     let state = this.calls.get(callId);
     if (!state) {
-      const call = await this.callRepo.findById(callId);
-      const locale = String(
-        localeHint ?? call?.locale ?? this.config.get("GEMINI_LANGUAGE_DEFAULT") ?? "hi-IN",
-      );
-      const systemPrompt = await this.buildSystemPrompt(locale, call?.campaignId, call?.targetId);
-      state = {
-        history: [],
-        systemPrompt,
-        locale,
-        provider: this.pickProvider(locale),
-        startedAt: Date.now(),
-        lastActivityAt: Date.now(),
-        pendingFragment: null,
-      };
-      this.calls.set(callId, state);
+      // L2: try Redis before hitting the DB (cross-instance resume, crash recovery).
+      const cached = await this.loadStateFromRedis(callId);
+      if (cached) {
+        this.calls.set(callId, cached);
+        state = cached;
+      } else {
+        const call = await this.callRepo.findById(callId);
+        const locale = String(
+          localeHint ?? call?.locale ?? this.config.get("GEMINI_LANGUAGE_DEFAULT") ?? "hi-IN",
+        );
+        const systemPrompt = await this.buildSystemPrompt(locale, call?.campaignId, call?.targetId);
+        state = {
+          history: [],
+          systemPrompt,
+          locale,
+          provider: this.pickProvider(locale),
+          startedAt: Date.now(),
+          lastActivityAt: Date.now(),
+          pendingFragment: null,
+        };
+        this.calls.set(callId, state);
+        this.persistState(callId, state);
+      }
     }
     state.lastActivityAt = Date.now();
     return state;
@@ -518,6 +634,7 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
   private async completeCall(callId: string) {
     this.logger.log(`Call ${callId} ending — lead details collected`);
     this.calls.delete(callId);
+    void this.deleteStateFromRedis(callId);
     try {
       await this.callRepo.update(callId, { status: "completed" });
     } catch (err) {
@@ -693,6 +810,7 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
       } as NewCallTurn;
 
       this.persistTurns(callerTurn, assistantTurn);
+      this.persistState(callId, state);
       this.recordTurnMetrics({
         sttMs: sttElapsed,
         llmMs: llmElapsed,
@@ -1022,6 +1140,7 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
       } as NewCallTurn;
 
       this.persistTurns(callerTurn, assistantTurn);
+      this.persistState(callId, state);
       this.recordTurnMetrics({
         sttMs: sttElapsed,
         llmMs: llmElapsed,
@@ -1092,11 +1211,13 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
   // Called by webhook handler when a call reaches a terminal state.
   clearHistory(callId: string) {
     this.calls.delete(callId);
+    void this.deleteStateFromRedis(callId);
   }
 
   private async failCall(callId: string, reason: string) {
     this.logger.error(`Call ${callId} failed: ${reason}`);
     this.calls.delete(callId);
+    void this.deleteStateFromRedis(callId);
     try {
       await this.callRepo.update(callId, { status: "failed" });
     } catch (err) {

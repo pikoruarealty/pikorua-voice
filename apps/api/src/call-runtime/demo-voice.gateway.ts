@@ -17,6 +17,18 @@ type ActiveTurn = {
   audioSent: boolean;
 };
 
+// Speculative generation handle: LLM kicked off on a confident partial before
+// VAD fires. Cancelled immediately if the final transcript differs.
+type SpeculativeHandle = {
+  text: string;
+  cancel: () => void;
+};
+
+// Minimum partial length and confidence threshold for speculative generation.
+// Short acks ("ok", "haan") are handled by adaptive endpointing; speculation
+// fires for longer intermediates where we're confident enough to pre-warm.
+const SPECULATIVE_MIN_WORDS = 4;
+
 type ClientState = {
   callId: string | null;
   locale: string;
@@ -32,6 +44,8 @@ type ClientState = {
   // True while the client is (probably) playing assistant audio.
   speaking: boolean;
   fillerIdx: number;
+  // In-flight speculative LLM started on a confident partial transcript.
+  speculative: SpeculativeHandle | null;
 };
 
 // Streaming voice channel: the browser sends 16 kHz PCM16 audio continuously;
@@ -70,6 +84,7 @@ export class DemoVoiceGateway implements OnGatewayConnection, OnGatewayDisconnec
       active: null,
       speaking: false,
       fillerIdx: 0,
+      speculative: null,
     };
     this.clients.set(client, state);
     this.logger.log("Demo voice client connected");
@@ -113,6 +128,7 @@ export class DemoVoiceGateway implements OnGatewayConnection, OnGatewayDisconnec
   handleDisconnect(client: WebSocket) {
     const state = this.clients.get(client);
     state?.active?.controller.abort();
+    state?.speculative?.cancel();
     state?.stt?.close();
     this.clients.delete(client);
     this.logger.log("Demo voice client disconnected");
@@ -132,10 +148,48 @@ export class DemoVoiceGateway implements OnGatewayConnection, OnGatewayDisconnec
         state.speaking = false;
       }
     }
+
+    // Speculative generation: when the caller is speaking (no active turn) and
+    // the partial looks complete enough, start the LLM now so it's 200-400ms
+    // ahead when VAD fires. Cancel any prior speculative that no longer matches.
+    if (
+      state.streaming &&
+      state.callId &&
+      !state.active &&
+      !state.speaking &&
+      text.trim().split(/\s+/).length >= SPECULATIVE_MIN_WORDS
+    ) {
+      const normalised = text.trim().toLowerCase();
+      if (state.speculative && state.speculative.text.toLowerCase() !== normalised) {
+        state.speculative.cancel();
+        state.speculative = null;
+      }
+      if (!state.speculative) {
+        void this.runtime
+          .speculateTurn(state.callId, text.trim(), state.locale)
+          .then((handle) => {
+            // Only keep if state hasn't moved on (barge-in / turn already started).
+            if (!state.active && !state.speaking) {
+              state.speculative = handle;
+            } else {
+              handle.cancel();
+            }
+          })
+          .catch(() => undefined);
+      }
+    }
+
     this.send(client, { type: "partial", transcript: text });
   }
 
   private enqueueTurn(client: WebSocket, state: ClientState, utterance: string) {
+    // Cancel any speculative LLM — either it matched (processUtteranceStream
+    // will run normally and is already ~200-400ms ahead in the LLM provider),
+    // or it didn't match (definitely wrong, must discard).
+    if (state.speculative) {
+      state.speculative.cancel();
+      state.speculative = null;
+    }
     state.queue = state.queue.then(async () => {
       if (!state.callId || client.readyState !== WebSocket.OPEN) return;
       if (state.streaming) {

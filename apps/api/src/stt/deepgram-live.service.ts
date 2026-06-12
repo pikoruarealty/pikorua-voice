@@ -18,6 +18,10 @@ export type LiveSessionOptions = {
 export type LiveSession = {
   sendAudio: (chunk: Buffer) => void;
   clearBuffer: () => void;
+  // Dynamically tighten/loosen the VAD silence window (ms). Use ~400 after the
+  // caller speaks a short ack ("haan", "ok", "yes") to avoid wasting ~1s of
+  // dead air; restore to 1400 for full utterances.
+  setEndpointing: (utteranceEndMs: number) => void;
   close: () => void;
 };
 
@@ -26,6 +30,13 @@ export type LiveSession = {
 const MAX_RECONNECTS = 3;
 const RECONNECT_BACKOFF_MS = [300, 600, 1200];
 const MAX_BUFFERED_CHUNKS = 200; // ~20s of 100ms frames — drop oldest beyond this
+
+// Short ack words that don't need the full 1400ms silence window.
+// After one of these fires as a complete utterance, tighten to 400ms so the
+// caller isn't forced to wait an extra second before the bot responds.
+const SHORT_ACK_PATTERN = /^(haan|ha|han|okay|ok|yes|no|nahi|nai|sure|bilkul|theek|thik|hmm|ji|hm|yep|nope|right|got it|go on|accha|acha)[\s.,!?।]*$/i;
+const SHORT_ACK_ENDPOINTING_MS = 400;
+const DEFAULT_ENDPOINTING_MS = 1400;
 
 // Persistent Deepgram Live (streaming) STT with server-side endpointing.
 // Utterance boundaries come from Deepgram's VAD (speech_final / UtteranceEnd
@@ -83,11 +94,29 @@ export class DeepgramLiveService {
     const pendingChunks: Buffer[] = [];
     // is_final transcript segments accumulated since the last utterance boundary
     let finalSegments: string[] = [];
+    let currentEndpointingMs = DEFAULT_ENDPOINTING_MS;
+
+    const sendEndpointing = (ms: number) => {
+      if (!open || !ws) return;
+      try {
+        // Deepgram accepts live config updates via a JSON message on the same socket.
+        ws.send(JSON.stringify({ type: "Configure", processors: { endpointing: ms, utterance_end_ms: ms } }));
+      } catch {}
+    };
 
     const flushUtterance = () => {
       const utterance = finalSegments.join(" ").replace(/\s+/g, " ").trim();
       finalSegments = [];
-      if (utterance) callbacks.onUtterance(utterance);
+      if (!utterance) return;
+      // Auto-adapt: tighten VAD window after a short ack so the caller doesn't
+      // wait the full 1400ms silence window for a one-word confirmation.
+      const isShortAck = SHORT_ACK_PATTERN.test(utterance);
+      const targetMs = isShortAck ? SHORT_ACK_ENDPOINTING_MS : DEFAULT_ENDPOINTING_MS;
+      if (targetMs !== currentEndpointingMs) {
+        currentEndpointingMs = targetMs;
+        sendEndpointing(targetMs);
+      }
+      callbacks.onUtterance(utterance);
     };
 
     // Deepgram closes idle sockets after ~10s — keep alive while the caller listens
@@ -196,11 +225,13 @@ export class DeepgramLiveService {
           if (pendingChunks.length > MAX_BUFFERED_CHUNKS) pendingChunks.shift();
         }
       },
-      // Discard any buffered/pending transcript segments — call this when the
-      // assistant starts speaking so stale utterance fragments don't fire a
-      // spurious turn mid-playback.
       clearBuffer: () => {
         finalSegments = [];
+      },
+      setEndpointing: (ms: number) => {
+        if (ms === currentEndpointingMs) return;
+        currentEndpointingMs = ms;
+        sendEndpointing(ms);
       },
       close: () => {
         if (closedByUser) return;

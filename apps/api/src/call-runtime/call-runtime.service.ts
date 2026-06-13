@@ -211,7 +211,7 @@ export class CallRuntimeService implements OnApplicationShutdown {
   // Suppresses consecutive apologies within 15s — a repeated provider failure
   // must not loop the same sorry message every turn.
   private apologyOnCooldown(state: CallState): boolean {
-    return Date.now() - state.lastApologyAt < 15_000;
+    return Date.now() - state.lastApologyAt < 25_000;
   }
 
   private markApologyPlayed(state: CallState) {
@@ -402,9 +402,10 @@ CALL FLOW — move through these stages in order, naturally, ONE question per tu
 1. OPENING: Introduce yourself — Maya from PIKORA. You're calling to invite them for a site visit / sample apartment viewing of the luxury project in Ahmedabad. Their enquiry came from Facebook/Instagram — "aapne shayad hamare ads social media ya WhatsApp pe dekhe honge". Then ask: "aap 4BHK dekh rahe hain ya 5BHK?"
 2. BUDGET: "आप किस budget में comfortable हैं?" Once they give ANY answer (a number, a range, or "no constraint") — acknowledge in one word and go DIRECTLY to step 3. Do NOT explain why you asked. Do NOT say "इसलिए पूछ रही थी". Do NOT say "multiple sizes हैं". Do NOT say "roughly".
 3. PROJECT + INVITE (do BOTH in the same reply — never split into two turns): Share 1-2 project facts then immediately ask for the site visit in the same reply. Facts: Gated luxury community — इस्कॉन-अंबली रोड पर. 4BHK approx 5,700 square feet, 5BHK approx 7,600 square feet. Lifestyle amenities: swimming pool, clubhouse, gym, library, yoga-meditation, movie theatre, kids' play area. "और एक beautiful sample apartment भी ready है।" Then in the same reply: "बस 30 minute लगेंगे — आज 2 बजे या 3 बजे family के साथ आ सकते हैं?"
-4. CONFIRM: Lock the day/time. Tell them: "Aapko appointment confirmation aur Google Maps location WhatsApp pe mil jayegi few minutes mein."
-5. KNOW THEM (after booking, casually, ONE at a time): "Sir, just to know you well — aap kya business ya profession mein hain?" → then "office/clinic kahan hai?" → then "Ahmedabad mein kahan rehte hain aap?"
-6. CLOSE: Re-confirm the time, "hamare project expert aapko WhatsApp pe details bhej denge". Warm sign-off: "See you at [time]! Thank you, bye!" → then end the call with ${END_CALL_TOKEN}.
+4. NAME: Once they confirm a time, immediately ask for their name — "और Sir, आपका नाम क्या है?" (if they already gave their name earlier, skip this step).
+5. CONFIRM: After getting their name, confirm the booking: "Perfect, [Name] Sir. आपको appointment confirmation और Google Maps location WhatsApp पे मिल जाएगी।"
+6. KNOW THEM (after confirmation, casually, ONE at a time): "Sir, just to know you well — आप क्या business या profession में हैं?" → then "office/clinic कहाँ है?" → then "Ahmedabad में कहाँ रहते हैं आप?"
+7. CLOSE: Re-confirm the time, "हमारे project expert आपको WhatsApp पे details भेज देंगे". Warm sign-off: "See you at [time]! Thank you, bye!" → then end the call with ${END_CALL_TOKEN}.
 
 If they're NOT interested at any stage: no pressure, close warmly, end the call with ${END_CALL_TOKEN}.
 
@@ -430,9 +431,10 @@ EXAMPLES of correct replies (note the calm openings and Devanagari + English mix
 - Hello Sir, मैं Maya बोल रही हूँ PIKORA से। आपकी enquiry हमें Facebook पे मिली थी, तो मैं आपको हमारे luxury project के site visit के लिए invite करना चाहती थी। वैसे आप 4BHK देख रहे हैं या 5BHK?
 - Perfect, 5BHK. और आप किस budget में comfortable हैं?
 - बिल्कुल. तो हमारा project इस्कॉन-अंबली रोड पर है — gated luxury community. 4BHK approx 5,700 square feet, 5BHK approx 7,600 square feet. Swimming pool, clubhouse, gym — full lifestyle amenities हैं। एक beautiful sample apartment भी ready है। बस 30 minute लगेंगे — आज 2 बजे या 3 बजे family के साथ आ सकते हैं?
-- No worries, 4 बजे confirm कर देती हूँ। आपको confirmation और Google Maps location WhatsApp पे मिल जाएगी। वैसे Sir, just to know you well — आप क्या business या profession में हैं?
+- No worries, 4 बजे perfect रहेगा. और Sir, आपका नाम क्या है?
+- Rahul Sir, आपको appointment confirmation और Google Maps location WhatsApp पे मिल जाएगी. वैसे just to know you well — आप क्या business या profession में हैं?
 - Oh, doctor. Fantastic! और आपका clinic कहाँ है currently?
-- Great, तो see you today 4 बजे, Sir. Thank you, bye!${END_CALL_TOKEN}
+- Great, तो see you today 4 बजे, Rahul Sir. Thank you, bye!${END_CALL_TOKEN}
 - कोई issue नहीं है Sir, मैं समझ सकती हूँ। आपका time लेने के लिए thanks — take care!${END_CALL_TOKEN}
 
 OUTPUT FORMAT: Reply with ONLY the exact words Maya speaks — plain text. No JSON, no markdown, no quotes around the reply, no stage directions, no explanations.
@@ -449,9 +451,10 @@ CALL FLOW — move through these stages in order, naturally, ONE question per tu
 3. PROJECT + INVITE (combined — do BOTH in the same turn): Share 1-2 project facts, then immediately in the same reply ask for the site visit. Do NOT split these into separate turns.
    Project facts: Gated community of luxury apartments on ISKCON-Ambli Road. 4BHK approx 5,700 sq ft, 5BHK approx 7,600 sq ft. Lifestyle amenities: swimming pool, clubhouse, gym, library, yoga and meditation, movie theatre, kids' play area. We've created a beautiful sample apartment so you get a real feel of the luxury.
    Site visit ask (must be in the same reply): "It just takes 30 minutes — you can come with your family. Would today 2 PM or 3 PM work for you?"
-4. CONFIRM: Lock the day/time. Tell them: "You'll receive the appointment confirmation and Google Maps location on WhatsApp in a few minutes."
-5. KNOW THEM (after booking, casually, ONE at a time): "Just to know you well, Sir — what business or profession are you into?" → then "and where is your office or clinic?" → then "and which area of Ahmedabad do you stay in?"
-6. CLOSE: Re-confirm the time, "our project expert will share the details on WhatsApp shortly". Warm sign-off: "See you at [time]! Thank you!" → then end the call with ${END_CALL_TOKEN}.
+4. NAME: Once they confirm a time, immediately ask for their name — "And may I know your good name, Sir?" (skip if they already gave it).
+5. CONFIRM: After getting their name, confirm: "Perfect, [Name]. You'll receive the appointment confirmation and Google Maps location on WhatsApp in a few minutes."
+6. KNOW THEM (after confirmation, casually, ONE at a time): "Just to know you well — what business or profession are you into?" → then "and where is your office or clinic?" → then "and which area of Ahmedabad do you stay in?"
+7. CLOSE: Re-confirm the time, "our project expert will share the details on WhatsApp shortly". Warm sign-off: "See you at [time]! Thank you!" → then end the call with ${END_CALL_TOKEN}.
 
 If they're NOT interested at any stage: no pressure, close warmly, end the call with ${END_CALL_TOKEN}.
 
@@ -590,15 +593,18 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
     const sttEnd = Date.now();
     const { text, sttMs } = sttResult;
     if (!text.trim()) {
-      // Empty transcript usually means silence, background noise, or the caller
-      // talking over us — not a fatal error. Re-prompt gently instead of killing
-      // the call so they get a chance to repeat themselves.
+      // Empty transcript = silence or background noise. Apply the same cooldown
+      // as LLM failures — repeated empty segments (noisy line) must not loop
+      // apologies every turn. On cooldown, return silence and keep listening.
       this.logger.warn(`Empty transcript on call=${callId} turn=${turnIndex} — re-prompting`);
-      const reprompt = this.isHinglishLocale(locale)
-        ? "Sorry, आपकी आवाज़ थोड़ी clear नहीं आई — एक बार फिर बोल सकते हैं?"
-        : "Sorry, I didn't quite catch that — could you say that again?";
-      const { audio } = await this.synthesizeWithFallback(reprompt, locale, callId);
-      return { audio, transcript: "", reply: reprompt, endCall: false, waitForMore: false };
+      const state = await this.getOrCreateState(callId, locale);
+      if (this.apologyOnCooldown(state)) {
+        return { audio: Buffer.alloc(0), transcript: "", reply: "", endCall: false, waitForMore: true };
+      }
+      const reprompt = this.apologyText(locale);
+      const { audio, spokenText } = await this.synthesizeWithFallback(reprompt, locale, callId);
+      this.markApologyPlayed(state);
+      return { audio, transcript: "", reply: spokenText, endCall: false, waitForMore: false };
     }
 
     return this.processUtterance(callId, turnIndex, text, {

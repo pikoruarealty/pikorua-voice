@@ -81,8 +81,9 @@ const ROMAN_HINDI_WORDS: Array<[RegExp, string]> = [
 ];
 
 // Hindi number words 0-99 (Hindi numerals are irregular — lookup table needed)
+// 0 is "ज़ीरो" (the everyday spoken form) not "शून्य" (formal/mathematical).
 const HINDI_0_99 = [
-  "शून्य", "एक", "दो", "तीन", "चार", "पाँच", "छह", "सात", "आठ", "नौ",
+  "ज़ीरो", "एक", "दो", "तीन", "चार", "पाँच", "छह", "सात", "आठ", "नौ",
   "दस", "ग्यारह", "बारह", "तेरह", "चौदह", "पंद्रह", "सोलह", "सत्रह", "अठारह", "उन्नीस",
   "बीस", "इक्कीस", "बाईस", "तेईस", "चौबीस", "पच्चीस", "छब्बीस", "सत्ताईस", "अट्ठाईस", "उनतीस",
   "तीस", "इकतीस", "बत्तीस", "तैंतीस", "चौंतीस", "पैंतीस", "छत्तीस", "सैंतीस", "अड़तीस", "उनतालीस",
@@ -177,14 +178,24 @@ export function normalizeForTts(text: string, languageCode = "hi"): string {
     }
   }
 
-  // Large numbers ("7,600", "5700", "1,23,456") get garbled by the engine —
-  // speak them as words. Small numbers (times, counts, "4BHK") read fine and
-  // are left alone. Standalone years (1900-2099) stay as digits: "टू थाउज़ेंड
-  // ट्वेंटी सिक्स" word-form reads worse than the engine's native year reading.
-  out = out.replace(/\b\d{1,3}(?:,\d{2,3})+\b|\b\d{4,7}\b/g, (match) => {
+  // Convert numbers to words so the engine doesn't mispronounce them.
+  // Exclusions (kept as digits — engine handles these natively or word-form is worse):
+  //   • Years 1900–2099 not in a comma-grouped string
+  //   • Numbers immediately followed by BHK / AM / PM / % (e.g. "3BHK", "9AM")
+  //   • Time patterns like "10:30"
+  //   • Numbers > 9,999,999 (crore+) — too rare/complex to handle reliably
+  out = out.replace(/\b\d{1,3}(?:,\d{2,3})+\b|\b\d+\b/g, (match, offset, str) => {
     const n = parseInt(match.replace(/,/g, ""), 10);
     if (!Number.isFinite(n) || n > 9999999) return match;
+    // Skip years when not comma-formatted
     if (!match.includes(",") && n >= 1900 && n <= 2099) return match;
+    // Skip if followed by BHK, AM/PM, %
+    const after = str.slice(offset + match.length);
+    if (/^(?:bhk|am|pm|%)/i.test(after)) return match;
+    // Skip time patterns like "10:30" — both the hour and minute digits
+    const before = str.slice(0, offset);
+    if (/[:.]\s*$/.test(before)) return match;
+    if (/^\s*:/.test(after)) return match;
     return hindi ? hindiNumberWords(n) : englishNumberWords(n);
   });
   return out;

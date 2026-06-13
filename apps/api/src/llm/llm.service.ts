@@ -14,7 +14,7 @@ export type LlmResult = {
 
 export type LlmOptions = {
   model?: string;
-  provider?: "anthropic" | "google" | "auto" | "openrouter";
+  provider?: "google" | "auto" | "openrouter";
   systemPrompt?: string;
   maxTokens?: number;
   // Aborts the in-flight request — used by the per-turn watchdog and barge-in.
@@ -69,45 +69,11 @@ export class LlmService {
     const provider = opts?.provider ?? "auto";
     const maxTokens = opts?.maxTokens ?? 300;
 
-    // OpenRouter as PRIMARY (e.g. Claude Haiku via OpenRouter for fast voice
-    // turns). On failure, falls through to the Gemini block below.
-    if (provider === "openrouter" && !this.breakerOpen("openrouter")) {
+    // OpenRouter primary
+    if ((provider === "openrouter" || provider === "auto") && !this.breakerOpen("openrouter")) {
       const result = await this.tryOpenRouter(messages, opts, start, maxTokens);
       if (result) return result;
-      this.logger.warn("OpenRouter primary failed — falling back to Gemini");
-    }
-
-    if (provider === "anthropic" || provider === "auto") {
-      const anthropicKey = this.config.get<string>("ANTHROPIC_API_KEY");
-      const anthropicModel = String(
-        this.config.get("ANTHROPIC_MODEL") ?? opts?.model ?? "claude-haiku-4-5-20251001",
-      );
-      if (anthropicKey && !this.breakerOpen("anthropic")) {
-        try {
-          const body = this.anthropicBody(messages, opts, maxTokens, anthropicModel, false);
-          const res = await axios.post("https://api.anthropic.com/v1/messages", body, {
-            headers: this.anthropicHeaders(anthropicKey),
-            timeout: this.llmTimeoutMs(),
-            signal: opts?.signal,
-          });
-          const text: string = res.data?.content?.[0]?.text ?? res.data?.content?.[0]?.value ?? "";
-          const ms = Date.now() - start;
-          const promptTokens: number | null = res.data?.usage?.input_tokens ?? null;
-          const completionTokens: number | null = res.data?.usage?.output_tokens ?? null;
-          this.logger.log(
-            `LLM(anthropic/${anthropicModel}) ${ms}ms prompt=${promptTokens ?? "?"} completion=${completionTokens ?? "?"}`,
-          );
-          this.recordSuccess("anthropic");
-          return { text, llmMs: ms, model: anthropicModel, promptTokens, completionTokens };
-        } catch (err) {
-          this.recordFailure("anthropic");
-          const message = this.providerFailureMessage("Anthropic", err);
-          this.logger.warn(message, err instanceof Error ? err.stack : String(err));
-          if (provider === "anthropic") {
-            throw new ServiceUnavailableException(message);
-          }
-        }
-      }
+      this.logger.warn("OpenRouter failed — falling back to Gemini");
     }
 
     // Google Gemini fallback
@@ -123,7 +89,6 @@ export class LlmService {
               `https://generativelanguage.googleapis.com/v1beta/models/${googleModel}:generateContent`,
               {
                 contents: geminiContents,
-                // Lower temperature keeps Hinglish output on real, common words
                 generationConfig: { maxOutputTokens: maxTokens, temperature: 0.6 },
               },
               { params: { key: googleKey }, timeout: this.llmTimeoutMs(), signal: opts?.signal },
@@ -154,12 +119,6 @@ export class LlmService {
       }
     }
 
-    // OpenRouter as last-resort fallback (skip if it was already tried as primary)
-    if (provider !== "openrouter" && !this.breakerOpen("openrouter")) {
-      const result = await this.tryOpenRouter(messages, opts, start, maxTokens);
-      if (result) return result;
-    }
-
     this.logger.error("No LLM provider available or configured");
     throw new ServiceUnavailableException("No LLM provider available or configured");
   }
@@ -186,17 +145,12 @@ export class LlmService {
 
     const attempts: Array<() => Promise<LlmResult | null>> = [];
 
-    if (provider === "openrouter") {
+    // OpenRouter first, Gemini as fallback
+    if (provider === "openrouter" || provider === "auto") {
       attempts.push(() => this.streamOpenRouter(messages, opts, start, maxTokens, guardedDelta));
-    }
-    if (provider === "anthropic" || provider === "auto") {
-      attempts.push(() => this.streamAnthropic(messages, opts, start, maxTokens, guardedDelta));
     }
     if (provider === "google" || provider === "auto" || provider === "openrouter") {
       attempts.push(() => this.streamGemini(messages, opts, start, maxTokens, guardedDelta));
-    }
-    if (provider !== "openrouter") {
-      attempts.push(() => this.streamOpenRouter(messages, opts, start, maxTokens, guardedDelta));
     }
 
     for (const attempt of attempts) {
@@ -214,39 +168,6 @@ export class LlmService {
 
     this.logger.error("No LLM provider available for streaming");
     throw new ServiceUnavailableException("No LLM provider available or configured");
-  }
-
-  private anthropicHeaders(key: string) {
-    return {
-      "x-api-key": key,
-      "anthropic-version": "2023-06-01",
-      "content-type": "application/json",
-    };
-  }
-
-  private anthropicBody(
-    messages: LlmMessage[],
-    opts: LlmOptions | undefined,
-    maxTokens: number,
-    model: string,
-    stream: boolean,
-  ): Record<string, unknown> {
-    const body: Record<string, unknown> = {
-      model,
-      max_tokens: maxTokens,
-      // Lower temperature keeps Hinglish output on real, common words
-      temperature: 0.6,
-      messages,
-    };
-    if (stream) body.stream = true;
-    if (opts?.systemPrompt) {
-      // The system prompt is large (~2.5k words) and identical across every
-      // turn of a call — cache_control cuts Anthropic TTFT and input cost.
-      body.system = opts.systemPrompt
-        ? [{ type: "text", text: opts.systemPrompt, cache_control: { type: "ephemeral" } }]
-        : undefined;
-    }
-    return body;
   }
 
   private geminiContents(messages: LlmMessage[], opts?: LlmOptions) {
@@ -267,60 +188,6 @@ export class LlmService {
       });
     }
     return geminiContents;
-  }
-
-  private async streamAnthropic(
-    messages: LlmMessage[],
-    opts: LlmOptions,
-    start: number,
-    maxTokens: number,
-    onDelta: (text: string) => void,
-  ): Promise<LlmResult | null> {
-    const key = this.config.get<string>("ANTHROPIC_API_KEY");
-    const model = String(this.config.get("ANTHROPIC_MODEL") ?? "claude-haiku-4-5-20251001");
-    if (!key || this.breakerOpen("anthropic")) return null;
-    try {
-      const res = await axios.post(
-        "https://api.anthropic.com/v1/messages",
-        this.anthropicBody(messages, opts, maxTokens, model, true),
-        {
-          headers: this.anthropicHeaders(key),
-          responseType: "stream",
-          timeout: this.llmTimeoutMs(),
-          signal: opts.signal,
-        },
-      );
-      let text = "";
-      let promptTokens: number | null = null;
-      let completionTokens: number | null = null;
-      await this.consumeSse(res.data, (data) => {
-        try {
-          const event = JSON.parse(data);
-          if (event.type === "message_start") {
-            promptTokens = event.message?.usage?.input_tokens ?? null;
-          } else if (event.type === "content_block_delta") {
-            const delta: string = event.delta?.text ?? "";
-            text += delta;
-            onDelta(delta);
-          } else if (event.type === "message_delta") {
-            completionTokens = event.usage?.output_tokens ?? completionTokens;
-          }
-        } catch {
-          // ignore non-JSON SSE payloads
-        }
-      });
-      const ms = Date.now() - start;
-      this.logger.log(`LLM-stream(anthropic/${model}) ${ms}ms completion=${completionTokens ?? "?"}`);
-      this.recordSuccess("anthropic");
-      return { text, llmMs: ms, model, promptTokens, completionTokens };
-    } catch (err) {
-      this.recordFailure("anthropic");
-      this.logger.warn(
-        this.providerFailureMessage("Anthropic (stream)", err),
-        err instanceof Error ? err.stack : String(err),
-      );
-      throw err;
-    }
   }
 
   private async streamGemini(

@@ -1,13 +1,13 @@
 const required = ["DEEPGRAM_API_KEY", "ELEVENLABS_API_KEY"];
 const llmSatisfied = Boolean(
-  process.env.ANTHROPIC_API_KEY || process.env.GOOGLE_GENERATIVE_AI_API_KEY,
+  process.env.OPENROUTER_API_KEY || process.env.GOOGLE_GENERATIVE_AI_API_KEY,
 );
 const live = process.env.RUN_LIVE_PROVIDER_SMOKE === "true";
 
 async function main() {
   const missing = required.filter((key) => !process.env[key]);
   if (!llmSatisfied) {
-    missing.push("ANTHROPIC_API_KEY or GOOGLE_GENERATIVE_AI_API_KEY");
+    missing.push("OPENROUTER_API_KEY or GOOGLE_GENERATIVE_AI_API_KEY");
   }
   if (missing.length > 0) {
     throw new Error(`Missing provider credentials: ${missing.join(", ")}`);
@@ -23,7 +23,7 @@ async function main() {
   const checks = [];
   checks.push(checkDeepgram());
   checks.push(checkElevenLabs());
-  if (process.env.ANTHROPIC_API_KEY) checks.push(checkAnthropic());
+  if (process.env.OPENROUTER_API_KEY) checks.push(checkOpenRouter());
   if (process.env.GOOGLE_GENERATIVE_AI_API_KEY) checks.push(checkGoogle());
 
   const results = await Promise.allSettled(checks);
@@ -53,22 +53,22 @@ async function checkElevenLabs() {
   return "ElevenLabs auth ok";
 }
 
-async function checkAnthropic() {
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
+async function checkOpenRouter() {
+  const model = process.env.OPENROUTER_MODEL ?? "anthropic/claude-haiku-4-5";
+  const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
     headers: {
-      "x-api-key": process.env.ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01",
-      "content-type": "application/json",
+      Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
+      "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: process.env.ANTHROPIC_MODEL ?? "claude-haiku-4-5-20251001",
+      model,
       max_tokens: 8,
       messages: [{ role: "user", content: "Reply OK." }],
     }),
   });
-  if (!res.ok) throw new Error(`Anthropic smoke failed: ${res.status}`);
-  return "Anthropic smoke ok";
+  if (!res.ok) throw new Error(`OpenRouter smoke failed: ${res.status}`);
+  return "OpenRouter auth ok";
 }
 
 async function checkGoogle() {

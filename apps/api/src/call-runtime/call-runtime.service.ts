@@ -31,12 +31,15 @@ type CallState = {
   locale: string;
   // LLM provider is pinned at call start so the voice/persona doesn't drift
   // mid-conversation from per-turn provider roulette.
-  provider: "anthropic" | "google" | "auto" | "openrouter";
+  provider: "google" | "auto" | "openrouter";
   startedAt: number;
   lastActivityAt: number;
   // Caller speech held back because it looked like a mid-thought pause.
   // Merged with the next segment before the LLM sees it.
   pendingFragment: string | null;
+  // Timestamp of last apology played — prevents consecutive apologies from
+  // firing on rapid repeated LLM/TTS failures within the same call.
+  lastApologyAt: number;
 };
 
 // Trailing words that signal the caller paused mid-thought rather than finishing.
@@ -140,7 +143,9 @@ export class CallRuntimeService implements OnApplicationShutdown {
     try {
       const raw = await this.redis.get(REDIS_KEY(callId));
       if (!raw) return null;
-      return JSON.parse(raw) as CallState;
+      const s = JSON.parse(raw) as CallState;
+      s.lastApologyAt ??= 0;
+      return s;
     } catch {
       return null;
     }
@@ -179,10 +184,38 @@ export class CallRuntimeService implements OnApplicationShutdown {
       : ["Hmm, one second...", "Sure, just a moment..."];
   }
 
+  // Rotating fallback lines used when the LLM fails. Varied so the caller
+  // doesn't hear the same phrase on every provider blip. Pre-warmed as clips.
+  private readonly FALLBACK_LINES_HI = [
+    "ज़रा एक second — connection थोड़ी slow है, फिर से बोलिए?",
+    "माफ़ करें, आपकी बात पूरी नहीं सुन पाई — क्या आप दोबारा बोल सकते हैं?",
+    "Hmm, थोड़ी आवाज़ नहीं आई — एक बार फिर बताइए?",
+    "Sorry, last part miss हो गया — please फिर से कहिए?",
+    "एक second, network issue लग रहा है — आप क्या कह रहे थे?",
+  ];
+
+  private readonly FALLBACK_LINES_EN = [
+    "Sorry, I didn't quite catch that — could you say it again?",
+    "Hmm, I missed the last bit — could you repeat that?",
+    "Apologies, there was a small hiccup — what were you saying?",
+    "I'm sorry, I didn't get that clearly — could you say it once more?",
+    "Just a moment — I missed that, could you repeat please?",
+  ];
+
   apologyText(locale: string): string {
-    return this.isHinglishLocale(locale)
-      ? "Sorry, आवाज़ थोड़ी कट गई थी — क्या आप दोबारा बोल सकते हैं?"
-      : "Sorry, I missed that — could you say it once more?";
+    const lines = this.isHinglishLocale(locale) ? this.FALLBACK_LINES_HI : this.FALLBACK_LINES_EN;
+    return lines[Math.floor(Math.random() * lines.length)];
+  }
+
+  // Returns true (and stamps the cooldown) when an apology should play.
+  // Suppresses consecutive apologies within 15s — a repeated provider failure
+  // must not loop the same sorry message every turn.
+  private apologyOnCooldown(state: CallState): boolean {
+    return Date.now() - state.lastApologyAt < 15_000;
+  }
+
+  private markApologyPlayed(state: CallState) {
+    state.lastApologyAt = Date.now();
   }
 
   // Speculative turn: start an LLM stream against a confident-but-not-final
@@ -262,11 +295,15 @@ export class CallRuntimeService implements OnApplicationShutdown {
 
   // Pre-build call state and warm the filler/apology clip cache so the first
   // turn doesn't pay for campaign/target fetch + prompt build + clip synthesis.
+  private allFallbackLines(locale: string): string[] {
+    return this.isHinglishLocale(locale) ? this.FALLBACK_LINES_HI : this.FALLBACK_LINES_EN;
+  }
+
   async warmCall(callId: string, locale?: string) {
     try {
       const state = await this.getOrCreateState(callId, locale);
       this.tts.prewarmClips(
-        [...this.fillerTexts(state.locale), this.apologyText(state.locale)],
+        [...this.fillerTexts(state.locale), ...this.allFallbackLines(state.locale)],
         { languageCode: this.ttsLanguageCode(state.locale) },
       );
     } catch (err) {
@@ -275,26 +312,16 @@ export class CallRuntimeService implements OnApplicationShutdown {
   }
 
   // LLM provider for this call, decided ONCE at call start.
-  private pickProvider(locale: string): CallState["provider"] {
-    let provider: CallState["provider"] = "auto";
+  private pickProvider(_locale: string): CallState["provider"] {
     try {
-      const providerOverride = this.config.get<
-        "anthropic" | "google" | "auto" | "openrouter" | undefined
-      >("LLM_PROVIDER_OVERRIDE");
-      if (providerOverride) {
-        provider = providerOverride;
-      } else {
-        const anthropicPercent = Number(this.config.get("ENGLISH_ANTHROPIC_PERCENT") ?? 25);
-        if (locale.toLowerCase().startsWith("en")) {
-          provider = Math.random() * 100 < anthropicPercent ? "anthropic" : "google";
-        } else {
-          provider = "google";
-        }
-      }
+      const override = this.config.get<"google" | "auto" | "openrouter" | undefined>(
+        "LLM_PROVIDER_OVERRIDE",
+      );
+      if (override) return override;
     } catch {
-      provider = "auto";
+      // ignore
     }
-    return provider;
+    return "auto";
   }
 
   private async getOrCreateState(callId: string, localeHint?: string): Promise<CallState> {
@@ -319,6 +346,7 @@ export class CallRuntimeService implements OnApplicationShutdown {
           startedAt: Date.now(),
           lastActivityAt: Date.now(),
           pendingFragment: null,
+          lastApologyAt: 0,
         };
         this.calls.set(callId, state);
         this.persistState(callId, state);
@@ -521,13 +549,13 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
       const { audio, ttsMs } = await this.tts.synthesize(spokenReply);
       return { audio, ttsMs, spokenText: spokenReply };
     } catch (err) {
-      const apology = this.apologyText(locale);
-      const clip = await this.tts.getClip(apology, {
-        languageCode: this.ttsLanguageCode(locale),
-      });
-      if (clip && clip.length > 0) {
-        this.logger.warn(`TTS down — using cached apology clip for call=${callId}`);
-        return { audio: clip, ttsMs: 0, spokenText: apology };
+      // TTS is down — find any pre-warmed fallback clip and use it.
+      for (const line of this.allFallbackLines(locale)) {
+        const clip = await this.tts.getClip(line, { languageCode: this.ttsLanguageCode(locale) });
+        if (clip && clip.length > 0) {
+          this.logger.warn(`TTS down — using cached fallback clip for call=${callId}`);
+          return { audio: clip, ttsMs: 0, spokenText: line };
+        }
       }
       await this.failCall(callId, "TTS failed with no fallback clip");
       throw err instanceof Error ? err : new ServiceUnavailableException("TTS failed");
@@ -696,6 +724,10 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
           signal: turnController.signal,
         });
       } catch (err) {
+        if (turnController.signal.aborted) {
+          // Watchdog fired — don't punish the caller with an apology, just end the turn silently.
+          return { audio: Buffer.alloc(0), transcript: utterance, reply: "", endCall: false, waitForMore: false };
+        }
         // Every provider failed — keep the call alive with a polite re-prompt
         // instead of surfacing a 503 mid-conversation. The caller repeats, and
         // the consecutive-user-message merge folds it into history cleanly.
@@ -704,9 +736,13 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
           err instanceof Error ? err.stack : String(err),
         );
         this.metrics.increment("pikorua_turns_total", { result: "llm_error" });
+        if (this.apologyOnCooldown(state)) {
+          return { audio: Buffer.alloc(0), transcript: utterance, reply: "", endCall: false, waitForMore: false };
+        }
         const excuse = this.apologyText(locale);
-        const { audio } = await this.synthesizeWithFallback(excuse, locale, callId);
-        return { audio, transcript: utterance, reply: excuse, endCall: false, waitForMore: false };
+        const { audio, spokenText } = await this.synthesizeWithFallback(excuse, locale, callId);
+        this.markApologyPlayed(state);
+        return { audio, transcript: utterance, reply: spokenText, endCall: false, waitForMore: false };
       }
 
       const { text: rawLlmText, llmMs, model, promptTokens, completionTokens } = llmResolved;
@@ -1003,7 +1039,7 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
           feedDelta,
         );
       } catch (err) {
-        if (sink.signal.aborted) {
+        if (sink.signal.aborted || turnController.signal.aborted) {
           return this.finishCanceledTurn(state, dispatchedText, utterance);
         }
         this.logger.error(
@@ -1011,14 +1047,18 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
           err instanceof Error ? err.stack : String(err),
         );
         this.metrics.increment("pikorua_turns_total", { result: "llm_error" });
-        if (!dispatchedText) {
+        if (!dispatchedText && !this.apologyOnCooldown(state)) {
           const excuse = this.apologyText(locale);
           try {
             await streamSentence(excuse, sentenceIndex, sink.signal);
+            this.markApologyPlayed(state);
           } catch {
             // excuse audio is best-effort; transport will surface the error
           }
           return { transcript: utterance, reply: excuse, endCall: false, waitForMore: false, canceled: false };
+        }
+        if (!dispatchedText) {
+          return { transcript: utterance, reply: "", endCall: false, waitForMore: false, canceled: false };
         }
         // Some sentences were already spoken — end the turn with what was said.
         await ttsQueue;

@@ -96,33 +96,31 @@ export class GuardrailService {
 
     const prompt = buildGuardrailPrompt(text);
 
-    // Always use Haiku for guardrail classification regardless of the conversation model
-    // configured in ANTHROPIC_MODEL — it's fast, cheap, and accurate enough for binary checks.
-    const anthropicKey = this.config.get<string>("ANTHROPIC_API_KEY");
-    const anthropicModel = "claude-haiku-4-5-20251001";
-    if (anthropicKey) {
+    // OpenRouter primary (Claude Haiku via OpenRouter — fast, cheap, accurate for binary checks)
+    const openRouterKey = this.config.get<string>("OPENROUTER_API_KEY");
+    const openRouterModel = String(this.config.get("OPENROUTER_MODEL") ?? "anthropic/claude-haiku-4-5");
+    if (openRouterKey) {
       try {
         const res = await axios.post(
-          "https://api.anthropic.com/v1/messages",
+          "https://openrouter.ai/api/v1/chat/completions",
           {
-            model: anthropicModel,
+            model: openRouterModel,
             max_tokens: 150,
             messages: [{ role: "user", content: prompt }],
           },
           {
             headers: {
-              "x-api-key": anthropicKey,
-              "anthropic-version": "2023-06-01",
-              "content-type": "application/json",
+              Authorization: `Bearer ${openRouterKey}`,
+              "Content-Type": "application/json",
             },
             timeout: 4000,
           },
         );
-        const raw = String(res.data?.content?.[0]?.text ?? "").trim();
+        const raw = String(res.data?.choices?.[0]?.message?.content ?? "").trim();
         return this.parseSemanticResult(raw, text);
       } catch (err) {
         this.logger.warn(
-          "Semantic guardrail (Anthropic) failed — skipping LLM check",
+          "Semantic guardrail (OpenRouter) failed — skipping LLM check",
           err instanceof Error ? err.message : String(err),
         );
       }

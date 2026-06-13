@@ -16,7 +16,7 @@ const booleanFlag = z.preprocess((value) => {
 
 const optionalLlmProvider = z.preprocess(
   (value) => (value === "" ? undefined : value),
-  z.enum(["anthropic", "google", "auto", "openrouter"]).optional(),
+  z.enum(["google", "auto", "openrouter"]).optional(),
 );
 
 // ─── Environment schema ──────────────────────────────────────────────────────
@@ -45,7 +45,6 @@ export const envSchema = z
 
     // Voice routing
     GEMINI_LANGUAGE_DEFAULT: z.string().max(16).default("hi-IN"),
-    ENGLISH_ANTHROPIC_PERCENT: z.coerce.number().min(0).max(100).default(25),
     LLM_PROVIDER_OVERRIDE: optionalLlmProvider,
     GUARDRAIL_SEMANTIC_ENABLED: booleanFlag.default(true),
     STT_REALTIME_ENABLED: booleanFlag.default(false),
@@ -69,10 +68,6 @@ export const envSchema = z
     // Text-to-Speech · ElevenLabs
     ELEVENLABS_API_KEY: optionalNonEmpty,
     ELEVENLABS_VOICE_ID: optionalNonEmpty,
-
-    // LLM · Anthropic (primary)
-    ANTHROPIC_API_KEY: optionalNonEmpty,
-    ANTHROPIC_MODEL: z.string().default("claude-haiku-4-5-20251001"),
 
     // LLM · Google Generative AI (fallback)
     GOOGLE_GENERATIVE_AI_API_KEY: optionalNonEmpty,
@@ -107,10 +102,10 @@ export const envSchema = z
       }
     }
 
-    if (!env.ANTHROPIC_API_KEY && !env.GOOGLE_GENERATIVE_AI_API_KEY) {
+    if (!env.OPENROUTER_API_KEY && !env.GOOGLE_GENERATIVE_AI_API_KEY) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        path: ["ANTHROPIC_API_KEY"],
+        path: ["OPENROUTER_API_KEY"],
         message: "At least one LLM provider key is required in production",
       });
     }

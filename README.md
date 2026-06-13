@@ -19,7 +19,7 @@ Standalone outbound voice-concierge service for Pikorua Realty. It places campai
 | Telephony      | Exotel                                                |
 | Speech-to-Text | Deepgram                                              |
 | Text-to-Speech | ElevenLabs                                            |
-| LLM            | Anthropic (primary) · Google Generative AI (fallback) |
+| LLM            | OpenRouter/Claude Haiku 4.5 (primary) · Google Gemini (fallback) |
 | Monorepo       | pnpm workspaces + Turborepo                           |
 
 ## Language & Routing
@@ -27,7 +27,7 @@ Standalone outbound voice-concierge service for Pikorua Realty. It places campai
 - Primary language mix: Hindi primary (~60%), English (~25%), Gujarati (~15%).
 - Current implemented voice stack:
   - STT: Deepgram buffered or realtime helper.
-  - LLM: Anthropic first when configured, Google Generative AI fallback.
+  - LLM: OpenRouter (Claude Haiku 4.5) primary, Google Gemini fallback.
   - TTS: ElevenLabs.
 - IVR mapping: Press 1 = English, Press 2 = Hindi, Press 3 = Gujarati. Default/no press = Hindi.
 
@@ -40,8 +40,7 @@ Standalone outbound voice-concierge service for Pikorua Realty. It places campai
 ## Config / ENV additions
 
 - `GEMINI_LANGUAGE_DEFAULT` — default language sent to Gemini when call locale absent (default `hi-IN`).
-- `ENGLISH_ANTHROPIC_PERCENT` — percentage (0-100) of English turns routed to Anthropic before falling back to Google.
-- `LLM_PROVIDER_OVERRIDE` — optional `anthropic`, `google`, or `auto` override for local/provider testing.
+- `LLM_PROVIDER_OVERRIDE` — optional `openrouter`, `google`, or `auto` override for local/provider testing.
 - `GUARDRAIL_SEMANTIC_ENABLED` — set `false` for low-quota local demos; hard keyword guardrails still run.
 
 ## Production notes

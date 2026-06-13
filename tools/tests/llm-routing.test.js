@@ -5,14 +5,14 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 
-test("LlmService passes system prompt as separate field to Anthropic and Gemini", () => {
+test("LlmService passes system prompt to OpenRouter and Gemini", () => {
   const src = require("fs").readFileSync(
     require("path").join(process.cwd(), "apps/api/src/llm/llm.service.ts"),
     "utf8",
   );
 
   assert.match(src, /systemPrompt/, "systemPrompt option must be present in LlmService.generate");
-  assert.match(src, /body\.system = opts/, "system prompt must be set on Anthropic body");
+  assert.match(src, /role.*system.*systemPrompt/, "system prompt must be sent as system role to OpenRouter");
   assert.match(src, /\[System\].*opts/, "system prompt injected into Gemini contents");
 });
 
@@ -21,9 +21,8 @@ test("LlmService passes full message history not just latest message", () => {
     require("path").join(process.cwd(), "apps/api/src/llm/llm.service.ts"),
     "utf8",
   );
-  // The function signature should accept LlmMessage[] not a plain string
   assert.match(src, /messages: LlmMessage\[\]/, "generate() must accept message array");
-  assert.match(src, /messages,/, "messages array must be forwarded to Anthropic body");
+  assert.match(src, /for \(const m of messages\)/, "messages array must be iterated for providers");
 });
 
 test("LlmService returns promptTokens and completionTokens", () => {
@@ -31,10 +30,10 @@ test("LlmService returns promptTokens and completionTokens", () => {
     require("path").join(process.cwd(), "apps/api/src/llm/llm.service.ts"),
     "utf8",
   );
-  assert.match(src, /promptTokens.*input_tokens/, "Anthropic input_tokens mapped to promptTokens");
-  assert.match(src, /completionTokens.*output_tokens/, "Anthropic output_tokens mapped to completionTokens");
   assert.match(src, /promptTokenCount/, "Google promptTokenCount consumed");
   assert.match(src, /candidatesTokenCount/, "Google candidatesTokenCount consumed");
+  assert.match(src, /prompt_tokens/, "OpenRouter prompt_tokens consumed");
+  assert.match(src, /completion_tokens/, "OpenRouter completion_tokens consumed");
 });
 
 test("CallRuntimeService stores state per callId and clears on completion", () => {
@@ -71,15 +70,13 @@ test("WebhookService clears call history on terminal status", () => {
   assert.match(src, /callRuntime\?\.clearHistory/, "clearHistory must be optional-chained");
 });
 
-test("LLM provider routing: Google used for Hindi locale", () => {
+test("LLM provider routing: OpenRouter primary, Gemini fallback", () => {
   const src = require("fs").readFileSync(
-    require("path").join(process.cwd(), "apps/api/src/call-runtime/call-runtime.service.ts"),
+    require("path").join(process.cwd(), "apps/api/src/llm/llm.service.ts"),
     "utf8",
   );
-  assert.match(src, /startsWith\("en"\)/, "locale-based routing must check for English");
-  assert.match(
-    src,
-    /provider = "google"/,
-    "non-English locales must route to Google",
-  );
+  assert.match(src, /openrouter.*auto/, "OpenRouter must be tried for auto provider");
+  assert.match(src, /streamGemini/, "Gemini streaming fallback must exist");
+  assert.match(src, /tryOpenRouter/, "tryOpenRouter helper must exist");
+  assert.doesNotMatch(src, /anthropic\.com\/v1\/messages/, "direct Anthropic API must not be called");
 });

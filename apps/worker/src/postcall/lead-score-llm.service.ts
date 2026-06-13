@@ -48,22 +48,22 @@ export class LeadScoreLlmService {
     }
 
     const provider = String(this.config.get("LLM_SCORING_PROVIDER") ?? "auto") as
-      | "anthropic"
+      | "openrouter"
       | "google"
       | "auto";
     const prompt = this.buildPrompt(trimmed, locale);
 
-    if (provider === "anthropic" || provider === "auto") {
-      const anthropicKey = String(this.config.get("ANTHROPIC_API_KEY") ?? "");
-      if (anthropicKey) {
+    if (provider === "openrouter" || provider === "auto") {
+      const openRouterKey = String(this.config.get("OPENROUTER_API_KEY") ?? "");
+      if (openRouterKey) {
         const model = String(
           this.config.get("LLM_SCORING_MODEL") ??
-            this.config.get("ANTHROPIC_MODEL") ??
-            "claude-haiku-4-5-20251001",
+            this.config.get("OPENROUTER_MODEL") ??
+            "anthropic/claude-haiku-4-5",
         );
         try {
           const res = await axios.post(
-            "https://api.anthropic.com/v1/messages",
+            "https://openrouter.ai/api/v1/chat/completions",
             {
               model,
               max_tokens: 400,
@@ -71,24 +71,23 @@ export class LeadScoreLlmService {
             },
             {
               headers: {
-                "x-api-key": anthropicKey,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
+                Authorization: `Bearer ${openRouterKey}`,
+                "Content-Type": "application/json",
               },
               timeout: 8000,
             },
           );
 
-          const raw = String(res.data?.content?.[0]?.text ?? res.data?.content?.[0]?.value ?? "");
+          const raw = String(res.data?.choices?.[0]?.message?.content ?? "");
           const parsed = LeadScoreLlmSchema.parse(JSON.parse(this.stripFences(raw)));
-          this.logger.log(`LLM scoring(anthropic/${model}) succeeded`);
+          this.logger.log(`LLM scoring(openrouter/${model}) succeeded`);
           return this.clampResult(parsed);
         } catch (err) {
           this.logger.warn(
-            "Anthropic scoring request failed",
+            "OpenRouter scoring request failed",
             err instanceof Error ? err.stack : String(err),
           );
-          if (provider === "anthropic") {
+          if (provider === "openrouter") {
             return null;
           }
         }

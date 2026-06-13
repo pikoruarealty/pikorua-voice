@@ -1,6 +1,6 @@
 import { Injectable } from "@nestjs/common";
 
-export type IvrMapResult = { locale: string; provider?: "anthropic" | "google" };
+export type IvrMapResult = { locale: string; provider?: "openrouter" | "google" };
 
 @Injectable()
 export class IvrService {
@@ -8,14 +8,13 @@ export class IvrService {
   mapDigitToLocale(digit?: string): IvrMapResult {
     switch (String(digit ?? "").trim()) {
       case "1":
-        return { locale: "en-IN", provider: "anthropic" };
+        return { locale: "en-IN", provider: "openrouter" };
       case "2":
-        return { locale: "hi-IN", provider: "google" };
+        return { locale: "hi-IN", provider: "openrouter" };
       case "3":
-        return { locale: "gu-IN", provider: "google" };
+        return { locale: "gu-IN", provider: "openrouter" };
       default:
-        // Default recommended = Hindi
-        return { locale: "hi-IN", provider: "google" };
+        return { locale: "hi-IN", provider: "openrouter" };
     }
   }
 }

@@ -31,10 +31,10 @@ export const workerEnvSchema = z
     CRM_API_TOKEN: optionalNonEmpty,
 
     // Optional LLM scoring configuration (falls back to heuristics if absent)
-    LLM_SCORING_PROVIDER: z.enum(["anthropic", "google", "auto"]).default("auto"),
+    LLM_SCORING_PROVIDER: z.enum(["openrouter", "google", "auto"]).default("auto"),
     LLM_SCORING_MODEL: optionalNonEmpty,
-    ANTHROPIC_API_KEY: optionalNonEmpty,
-    ANTHROPIC_MODEL: optionalNonEmpty,
+    OPENROUTER_API_KEY: optionalNonEmpty,
+    OPENROUTER_MODEL: optionalNonEmpty,
     GOOGLE_GENERATIVE_AI_API_KEY: optionalNonEmpty,
     GOOGLE_MODEL: optionalNonEmpty,
   })

@@ -104,13 +104,16 @@ export class DeepgramLiveService {
       } catch {}
     };
 
-    const flushUtterance = () => {
+    // noiseFilter: only suppress single unrecognized words from VAD/UtteranceEnd
+    // events (likely background noise). Do NOT filter on socket-close paths where
+    // the caller's final word must always be delivered.
+    const flushUtterance = (noiseFilter = false) => {
       const utterance = finalSegments.join(" ").replace(/\s+/g, " ").trim();
       finalSegments = [];
       if (!utterance) return;
-      // Auto-adapt: tighten VAD window after a short ack so the caller doesn't
-      // wait the full 1400ms silence window for a one-word confirmation.
       const isShortAck = SHORT_ACK_PATTERN.test(utterance);
+      // Drop single-word noise transcriptions only when called from VAD paths.
+      if (noiseFilter && utterance.split(/\s+/).length === 1 && !isShortAck) return;
       const targetMs = isShortAck ? SHORT_ACK_ENDPOINTING_MS : DEFAULT_ENDPOINTING_MS;
       if (targetMs !== currentEndpointingMs) {
         currentEndpointingMs = targetMs;
@@ -164,14 +167,14 @@ export class DeepgramLiveService {
             if (msg.is_final) {
               if (transcript) finalSegments.push(transcript);
               // speech_final: Deepgram's endpointing says the speaker finished
-              if (msg.speech_final) flushUtterance();
+              if (msg.speech_final) flushUtterance(true);
             } else if (transcript) {
               callbacks.onPartial(transcript);
             }
           } else if (msg.type === "UtteranceEnd") {
-            // Fires after utterance_end_ms of silence — covers segments where
-            // speech_final never arrived (e.g. trailing background noise).
-            flushUtterance();
+            // Fires after utterance_end_ms of silence — most likely source of
+            // noise transcriptions; apply the single-word filter here.
+            flushUtterance(true);
           }
         } catch {
           // ignore non-JSON frames

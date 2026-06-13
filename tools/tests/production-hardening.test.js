@@ -22,7 +22,7 @@ test("production env requires internal API token", () => {
         EXOTEL_WEBHOOK_SECRET: "secret",
         DEEPGRAM_API_KEY: "deepgram",
         ELEVENLABS_API_KEY: "eleven",
-        ANTHROPIC_API_KEY: "anthropic",
+        OPENROUTER_API_KEY: "sk-or-test",
       }),
     /API_AUTH_TOKEN/,
   );

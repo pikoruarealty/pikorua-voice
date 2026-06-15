@@ -1,0 +1,149 @@
+databases:
+  - name: pikorua-voice-db
+    plan: free
+    databaseName: pikorua_voice
+    user: pikorua
+
+services:
+  # ── Redis ──────────────────────────────────────────────────────────────────
+  - type: redis
+    name: pikorua-voice-redis
+    plan: free
+    maxmemoryPolicy: noeviction
+
+  # ── API (NestJS + WebSockets — public-facing, Exotel webhooks) ─────────────
+  - type: web
+    name: pikorua-voice-api
+    plan: starter
+    env: docker
+    dockerfilePath: ./apps/api/Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/health
+    preDeployCommand: node packages/db/scripts/migrate.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: pikorua-voice-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          name: pikorua-voice-redis
+          type: redis
+          property: connectionString
+
+      # ── App ──────────────────────────────────────────────────────────────
+      - key: API_PORT
+        value: "4100"
+      - key: API_AUTH_TOKEN
+        sync: false                # set in Render dashboard
+
+      # ── Telephony · Exotel ───────────────────────────────────────────────
+      - key: EXOTEL_SID
+        sync: false
+      - key: EXOTEL_API_KEY
+        sync: false
+      - key: EXOTEL_API_TOKEN
+        sync: false
+      - key: EXOTEL_CALLER_ID
+        sync: false
+      - key: EXOTEL_WEBHOOK_SECRET
+        sync: false
+      - key: EXOTEL_SUBDOMAIN
+        value: api.exotel.com
+      # Set this to your Render service URL after first deploy:
+      - key: PUBLIC_BASE_URL
+        sync: false
+
+      # ── STT · Deepgram ───────────────────────────────────────────────────
+      - key: DEEPGRAM_API_KEY
+        sync: false
+
+      # ── TTS · ElevenLabs ─────────────────────────────────────────────────
+      - key: ELEVENLABS_API_KEY
+        sync: false
+      - key: ELEVENLABS_VOICE_ID
+        sync: false
+
+      # ── LLM · OpenRouter (primary) ────────────────────────────────────────
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: OPENROUTER_MODEL
+        value: google/gemini-2.0-flash-lite:free
+
+      # ── LLM · Google Gemini (fallback) ───────────────────────────────────
+      - key: GOOGLE_GENERATIVE_AI_API_KEY
+        sync: false
+      - key: GOOGLE_MODEL
+        value: gemini-2.0-flash
+      - key: GEMINI_LANGUAGE_DEFAULT
+        value: hi-IN
+
+      # ── Feature flags ─────────────────────────────────────────────────────
+      - key: LLM_PROVIDER_OVERRIDE
+        value: ""
+      - key: GUARDRAIL_SEMANTIC_ENABLED
+        value: "true"
+      - key: STT_REALTIME_ENABLED
+        value: "false"
+      - key: STT_STREAMING_ENABLED
+        value: "false"
+
+      # ── CRM (optional) ───────────────────────────────────────────────────
+      - key: CRM_API_BASE_URL
+        sync: false
+      - key: CRM_API_TOKEN
+        sync: false
+
+  # ── Worker (BullMQ consumer — outbound dialing + post-call processing) ──────
+  - type: worker
+    name: pikorua-voice-worker
+    plan: starter
+    env: docker
+    dockerfilePath: ./apps/worker/Dockerfile
+    dockerContext: .
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: pikorua-voice-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          name: pikorua-voice-redis
+          type: redis
+          property: connectionString
+
+      # ── Telephony · Exotel ───────────────────────────────────────────────
+      - key: EXOTEL_SID
+        sync: false
+      - key: EXOTEL_API_KEY
+        sync: false
+      - key: EXOTEL_API_TOKEN
+        sync: false
+      - key: EXOTEL_CALLER_ID
+        sync: false
+
+      # ── STT · Deepgram (post-call transcription) ──────────────────────────
+      - key: DEEPGRAM_API_KEY
+        sync: false
+
+      # ── LLM scoring ───────────────────────────────────────────────────────
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: OPENROUTER_MODEL
+        value: google/gemini-2.0-flash-lite:free
+      - key: GOOGLE_GENERATIVE_AI_API_KEY
+        sync: false
+      - key: GOOGLE_MODEL
+        value: gemini-2.0-flash
+      - key: LLM_SCORING_PROVIDER
+        value: auto
+
+      # ── CRM (optional) ───────────────────────────────────────────────────
+      - key: CRM_API_BASE_URL
+        sync: false
+      - key: CRM_API_TOKEN
+        sync: false

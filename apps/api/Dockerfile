@@ -42,6 +42,10 @@ COPY --from=builder /repo/packages/db/dist packages/db/dist
 COPY --from=builder /repo/packages/shared/dist packages/shared/dist
 COPY --from=builder /repo/apps/api/dist apps/api/dist
 
+# Copy migration script + SQL files so preDeployCommand can run them
+COPY --from=builder /repo/packages/db/scripts packages/db/scripts
+COPY --from=builder /repo/packages/db/drizzle packages/db/drizzle
+
 ENV NODE_ENV=production
 EXPOSE 4100
 

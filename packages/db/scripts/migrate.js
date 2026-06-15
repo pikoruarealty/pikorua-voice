@@ -1,10 +1,13 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const postgres = require("postgres");
-const dotenv = require("dotenv");
 
-const root = path.resolve(__dirname, "../../..");
-dotenv.config({ path: path.join(root, ".env") });
+// Load .env for local dev only; in production env vars are injected by the platform
+try {
+  const dotenv = require("dotenv");
+  const root = path.resolve(__dirname, "../../..");
+  dotenv.config({ path: path.join(root, ".env") });
+} catch {}
 
 const databaseUrl = process.env.DATABASE_URL;
 if (!databaseUrl) {

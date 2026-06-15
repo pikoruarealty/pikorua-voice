@@ -6,12 +6,25 @@ import { WsAdapter } from "@nestjs/platform-ws";
 import { SERVICE } from "@pikorua/shared";
 import { json, urlencoded, type NextFunction, type Request, type Response } from "express";
 import { randomUUID } from "crypto";
+import { spawnSync } from "node:child_process";
+import { resolve } from "node:path";
 import { AppModule } from "./app.module";
 import { MetricsService } from "./metrics/metrics.service";
 
 type RawBodyRequest = Request & { rawBody?: Buffer };
 
 async function bootstrap() {
+  // Run DB migrations before NestJS boots so the schema is always current.
+  const migrateScript = resolve(__dirname, "../../../packages/db/scripts/migrate.js");
+  const migration = spawnSync(process.execPath, [migrateScript], {
+    stdio: "inherit",
+    env: process.env,
+  });
+  if (migration.status !== 0) {
+    console.error("Migrations failed — aborting startup");
+    process.exit(1);
+  }
+
   // Disable NestJS built-in body parser so voice turns can carry base64 WAV.
   const app = await NestFactory.create(AppModule, {
     rawBody: true,

@@ -1,42 +1,26 @@
-databases:
-  - name: pikorua-voice-db
-    plan: free
-    databaseName: pikorua_voice
-    user: pikorua
-
 services:
-  # ── Redis ──────────────────────────────────────────────────────────────────
-  - type: redis
-    name: pikorua-voice-redis
-    plan: free
-    maxmemoryPolicy: noeviction
-    ipAllowList: []
-
-  # ── API (NestJS + WebSockets — public-facing, Exotel webhooks) ─────────────
+  # ── API (NestJS + WebSockets — public-facing) ──────────────────────────────
   - type: web
     name: pikorua-voice-api
-    plan: starter
+    plan: free
     env: docker
-    dockerfilePath: ./apps/api/Dockerfile
+    dockerfilePath: ./Dockerfile
     dockerContext: .
     healthCheckPath: /api/health
     preDeployCommand: node packages/db/scripts/migrate.js
     envVars:
       - key: NODE_ENV
         value: production
-      - key: DATABASE_URL
-        fromDatabase:
-          name: pikorua-voice-db
-          property: connectionString
-      - key: REDIS_URL
-        fromService:
-          name: pikorua-voice-redis
-          type: redis
-          property: connectionString
-
-      # ── App ──────────────────────────────────────────────────────────────
       - key: API_PORT
         value: "4100"
+
+      # Set these in Render dashboard after creating Neon + Upstash accounts
+      - key: DATABASE_URL
+        sync: false        # paste Neon connection string
+      - key: REDIS_URL
+        sync: false        # paste Upstash Redis URL
+
+      # ── App ──────────────────────────────────────────────────────────────
       - key: API_AUTH_TOKEN
         sync: false
 
@@ -104,58 +88,6 @@ services:
         value: "5000"
       - key: TURN_TIMEOUT_MS
         value: "18000"
-
-      # ── CRM (not used in demo) ────────────────────────────────────────────
-      - key: CRM_API_BASE_URL
-        sync: false
-      - key: CRM_API_TOKEN
-        sync: false
-
-  # ── Worker (BullMQ consumer — outbound dialing + post-call processing) ──────
-  - type: worker
-    name: pikorua-voice-worker
-    plan: starter
-    env: docker
-    dockerfilePath: ./apps/worker/Dockerfile
-    dockerContext: .
-    envVars:
-      - key: NODE_ENV
-        value: production
-      - key: DATABASE_URL
-        fromDatabase:
-          name: pikorua-voice-db
-          property: connectionString
-      - key: REDIS_URL
-        fromService:
-          name: pikorua-voice-redis
-          type: redis
-          property: connectionString
-
-      # ── Telephony · Exotel ───────────────────────────────────────────────
-      - key: EXOTEL_SID
-        sync: false
-      - key: EXOTEL_API_KEY
-        sync: false
-      - key: EXOTEL_API_TOKEN
-        sync: false
-      - key: EXOTEL_CALLER_ID
-        sync: false
-
-      # ── STT · Deepgram (post-call transcription) ──────────────────────────
-      - key: DEEPGRAM_API_KEY
-        sync: false
-
-      # ── LLM scoring ───────────────────────────────────────────────────────
-      - key: OPENROUTER_API_KEY
-        sync: false
-      - key: OPENROUTER_MODEL
-        value: anthropic/claude-haiku-4-5
-      - key: GOOGLE_GENERATIVE_AI_API_KEY
-        sync: false
-      - key: GOOGLE_MODEL
-        value: gemini-2.5-flash
-      - key: LLM_SCORING_PROVIDER
-        value: auto
 
       # ── CRM (not used in demo) ────────────────────────────────────────────
       - key: CRM_API_BASE_URL

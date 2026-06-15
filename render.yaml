@@ -37,9 +37,9 @@ services:
       - key: API_PORT
         value: "4100"
       - key: API_AUTH_TOKEN
-        sync: false                # set in Render dashboard
+        sync: false
 
-      # ── Telephony · Exotel ───────────────────────────────────────────────
+      # ── Telephony · Exotel (configure later) ─────────────────────────────
       - key: EXOTEL_SID
         sync: false
       - key: EXOTEL_API_KEY
@@ -52,7 +52,7 @@ services:
         sync: false
       - key: EXOTEL_SUBDOMAIN
         value: api.exotel.com
-      # Set this to your Render service URL after first deploy:
+      # Set this to your Render service URL after first deploy
       - key: PUBLIC_BASE_URL
         sync: false
 
@@ -65,32 +65,46 @@ services:
         sync: false
       - key: ELEVENLABS_VOICE_ID
         sync: false
+      - key: ELEVENLABS_MODEL
+        value: eleven_turbo_v2_5
+      - key: ELEVENLABS_LANGUAGE_CODE
+        value: hi
+      - key: ELEVENLABS_STABILITY
+        value: "0.65"
+      - key: ELEVENLABS_SIMILARITY_BOOST
+        value: "0.9"
+      - key: ELEVENLABS_STYLE
+        value: "0.1"
 
       # ── LLM · OpenRouter (primary) ────────────────────────────────────────
       - key: OPENROUTER_API_KEY
         sync: false
       - key: OPENROUTER_MODEL
-        value: google/gemini-2.0-flash-lite:free
+        value: anthropic/claude-haiku-4-5
 
       # ── LLM · Google Gemini (fallback) ───────────────────────────────────
       - key: GOOGLE_GENERATIVE_AI_API_KEY
         sync: false
       - key: GOOGLE_MODEL
-        value: gemini-2.0-flash
+        value: gemini-2.5-flash
       - key: GEMINI_LANGUAGE_DEFAULT
         value: hi-IN
 
       # ── Feature flags ─────────────────────────────────────────────────────
       - key: LLM_PROVIDER_OVERRIDE
-        value: ""
+        value: openrouter
       - key: GUARDRAIL_SEMANTIC_ENABLED
-        value: "true"
+        value: "false"
       - key: STT_REALTIME_ENABLED
         value: "false"
       - key: STT_STREAMING_ENABLED
         value: "false"
+      - key: LLM_TIMEOUT_MS
+        value: "5000"
+      - key: TURN_TIMEOUT_MS
+        value: "18000"
 
-      # ── CRM (optional) ───────────────────────────────────────────────────
+      # ── CRM (not used in demo) ────────────────────────────────────────────
       - key: CRM_API_BASE_URL
         sync: false
       - key: CRM_API_TOKEN
@@ -134,15 +148,15 @@ services:
       - key: OPENROUTER_API_KEY
         sync: false
       - key: OPENROUTER_MODEL
-        value: google/gemini-2.0-flash-lite:free
+        value: anthropic/claude-haiku-4-5
       - key: GOOGLE_GENERATIVE_AI_API_KEY
         sync: false
       - key: GOOGLE_MODEL
-        value: gemini-2.0-flash
+        value: gemini-2.5-flash
       - key: LLM_SCORING_PROVIDER
         value: auto
 
-      # ── CRM (optional) ───────────────────────────────────────────────────
+      # ── CRM (not used in demo) ────────────────────────────────────────────
       - key: CRM_API_BASE_URL
         sync: false
       - key: CRM_API_TOKEN

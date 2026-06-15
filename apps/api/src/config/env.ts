@@ -88,7 +88,6 @@ export const envSchema = z
 
     const required: Array<keyof typeof env> = [
       "API_AUTH_TOKEN",
-      "EXOTEL_WEBHOOK_SECRET",
       "DEEPGRAM_API_KEY",
       "ELEVENLABS_API_KEY",
     ];

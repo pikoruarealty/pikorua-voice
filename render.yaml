@@ -10,6 +10,7 @@ services:
     name: pikorua-voice-redis
     plan: free
     maxmemoryPolicy: noeviction
+    ipAllowList: []
 
   # ── API (NestJS + WebSockets — public-facing, Exotel webhooks) ─────────────
   - type: web

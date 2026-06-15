@@ -9,6 +9,7 @@ import { randomUUID } from "crypto";
 import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 import { AppModule } from "./app.module";
+import { DEMO_HTML } from "./demo-ui";
 import { MetricsService } from "./metrics/metrics.service";
 
 type RawBodyRequest = Request & { rawBody?: Buffer };
@@ -44,6 +45,12 @@ async function bootstrap() {
   // Render (and most PaaS) injects PORT; fall back to API_PORT for local dev.
   const port = Number(process.env.PORT ?? config.get("API_PORT") ?? 4100);
   const nodeEnv = String(config.get("NODE_ENV") ?? "development");
+
+  // Serve demo UI at root — must be registered before setGlobalPrefix
+  app.getHttpAdapter().get("/", (_req: Request, res: Response) => {
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.send(DEMO_HTML);
+  });
 
   app.setGlobalPrefix("api");
   app.use((req: Request, res: Response, next: NextFunction) => {

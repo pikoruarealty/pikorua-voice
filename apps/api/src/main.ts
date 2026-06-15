@@ -41,7 +41,8 @@ async function bootstrap() {
 
   const config = app.get(ConfigService);
   const metrics = app.get(MetricsService);
-  const port = Number(config.get("API_PORT") ?? 4100);
+  // Render (and most PaaS) injects PORT; fall back to API_PORT for local dev.
+  const port = Number(process.env.PORT ?? config.get("API_PORT") ?? 4100);
   const nodeEnv = String(config.get("NODE_ENV") ?? "development");
 
   app.setGlobalPrefix("api");
@@ -61,8 +62,8 @@ async function bootstrap() {
   // Request-body validation uses Zod (Rule 8); a Zod validation pipe is added
   // alongside the first DTOs (campaign module / webhooks).
 
-  await app.listen(port);
-  logger.log(`Listening on http://localhost:${port}/api [${nodeEnv}]`);
+  await app.listen(port, "0.0.0.0");
+  logger.log(`Listening on 0.0.0.0:${port}/api [${nodeEnv}]`);
 }
 
 bootstrap().catch((err) => {

@@ -41,6 +41,5 @@ COPY --from=builder /repo/packages/db/scripts packages/db/scripts
 COPY --from=builder /repo/packages/db/drizzle packages/db/drizzle
 
 ENV NODE_ENV=production
-EXPOSE 4100
 
 CMD ["node", "apps/api/dist/main.js"]

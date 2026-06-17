@@ -17,6 +17,9 @@ const TTS_RESPELLINGS: Array<[RegExp, string]> = [
   // "brochure" is French-derived — the Hindi engine reads it with English
   // phonemes ("bro-chure") instead of the correct "BROH-shuh" sound.
   [/\bbrochures?\b/gi, "ब्रोशर"],
+  // "Take care" at sentence end gets clipped/rushed — Devanagari phonetic
+  // form makes the Hindi voice read it with natural calm cadence.
+  [/\btake care\b\.?/gi, "टेक केयर."],
 ];
 
 // Area units: in Hindi mode the engine reads "square feet" with English
@@ -176,12 +179,27 @@ export function normalizeForTts(text: string, languageCode = "hi"): string {
     for (const [pattern, replacement] of ROMAN_HINDI_WORDS) {
       out = out.replace(pattern, replacement);
     }
+  } else {
+    // English mode: insert a comma before "Take care" so the engine pauses
+    // naturally instead of rushing the phrase.
+    out = out.replace(/\.\s*take care\b\.?/gi, ". Take, care.");
   }
+
+  // Expand BHK configurations: "4BHK" → "चार BHK" (Hindi) / "4 BHK" (English).
+  // Handles whole and half configs: 4, 4.5, 5, etc.
+  // Must run before the general number pass so the digit isn't left raw for TTS.
+  out = out.replace(/\b(\d+(?:\.\d+)?)\s*BHK\b/gi, (_, num) => {
+    const n = parseFloat(num);
+    const whole = Math.floor(n);
+    const half = n % 1 !== 0;
+    const wordWhole = Number.isInteger(whole) && whole < 100 ? englishNumberWords(whole) : String(whole);
+    return half ? `${wordWhole} and a half BHK` : `${wordWhole} BHK`;
+  });
 
   // Convert numbers to words so the engine doesn't mispronounce them.
   // Exclusions (kept as digits — engine handles these natively or word-form is worse):
   //   • Years 1900–2099 not in a comma-grouped string
-  //   • Numbers immediately followed by BHK / AM / PM / % (e.g. "3BHK", "9AM")
+  //   • Numbers immediately followed by AM/PM / % (e.g. "9AM")
   //   • Time patterns like "10:30"
   //   • Numbers > 9,999,999 (crore+) — too rare/complex to handle reliably
   out = out.replace(/\b\d{1,3}(?:,\d{2,3})+\b|\b\d+\b/g, (match, offset, str) => {
@@ -189,9 +207,9 @@ export function normalizeForTts(text: string, languageCode = "hi"): string {
     if (!Number.isFinite(n) || n > 9999999) return match;
     // Skip years when not comma-formatted
     if (!match.includes(",") && n >= 1900 && n <= 2099) return match;
-    // Skip if followed by BHK, AM/PM, %
+    // Skip if followed by AM/PM, %
     const after = str.slice(offset + match.length);
-    if (/^(?:bhk|am|pm|%)/i.test(after)) return match;
+    if (/^(?:am|pm|%)/i.test(after)) return match;
     // Skip time patterns like "10:30" — both the hour and minute digits
     const before = str.slice(0, offset);
     if (/[:.]\s*$/.test(before)) return match;

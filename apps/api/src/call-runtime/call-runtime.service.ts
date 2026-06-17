@@ -199,8 +199,8 @@ export class CallRuntimeService implements OnApplicationShutdown {
   // Short clips played instantly on utterance-end to mask turn latency.
   fillerTexts(locale: string): string[] {
     return this.isHinglishLocale(locale)
-      ? ["Hmm, एक second...", "जी, बिल्कुल..."]
-      : ["Hmm, one second...", "Sure, just a moment..."];
+      ? ["Hmm...", "जी..."]
+      : ["Hmm...", "Right..."];
   }
 
   // Rotating fallback lines used when the LLM fails. Varied so the caller
@@ -352,7 +352,12 @@ export class CallRuntimeService implements OnApplicationShutdown {
         this.calls.set(callId, cached);
         state = cached;
       } else {
-        const call = await this.callRepo.findById(callId);
+        let call: Awaited<ReturnType<typeof this.callRepo.findById>> | null = null;
+        try {
+          call = await this.callRepo.findById(callId);
+        } catch (err) {
+          this.logger.warn(`DB unavailable — using locale hint for call=${callId}: ${String(err)}`);
+        }
         const locale = String(
           localeHint ?? call?.locale ?? this.config.get("GEMINI_LANGUAGE_DEFAULT") ?? "hi-IN",
         );

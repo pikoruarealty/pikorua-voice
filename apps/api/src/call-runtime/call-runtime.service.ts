@@ -282,7 +282,7 @@ export class CallRuntimeService implements OnApplicationShutdown {
         {
           provider: state.provider,
           systemPrompt: state.systemPrompt,
-          maxTokens: 400,
+          maxTokens: 700,
           signal: controller.signal,
         },
         (delta) => collectedDeltas.push(delta),
@@ -470,6 +470,7 @@ WORDS:
 - NEVER heavy/formal Hindi words: "sampatti", "niwesh", "kripya", "uttam", "suvidha", "vyakti", "vibhinn", "aakar", "pariksar", "nivedan", "prakar", "vistaar". Say "sizes" not "आकार", "details" not "विवरण", "visit" not "भ्रमण".
 
 RULES: Never quote apartment prices — pricing is shared at the site visit only: "pricing aur layout ki saari details site pe team share kar degi". Asking THEIR budget is fine. Never guarantee returns. Never pressure.
+INFORMATION BEFORE VISIT: जब caller site visit से पहले project name, room size, ticket size, या "सब details" माँगे — share करें जो share हो सकता है: location area, BHK/sqft range, possession stage, और एक amenity highlight। Pricing या ticket size के लिए gracefully acknowledge करें: "Pricing की details site पर personally share होती हैं — team आपके budget और preference के हिसाब से सब explain करेगी, इसलिए in-person सबसे useful होती है।" फिर SAME reply में re-invite करें: "बस 30 minute — आज 5 बजे या 6 बजे family के साथ आ सकते हैं?" Never leave this question without re-inviting.
 
 EXAMPLES of correct replies (note: composed tone, brief acknowledgments, luxury vocabulary, "curated/gated community/residence" not "option/badiya", no "ji" after names):
 - Hello Sir, मैं Maya बोल रही हूँ पिकोरा GROUP से। आपकी enquiry मिली थी, तो आपको personally invite करना चाहती थी — हमारे एक ultra-luxury project का private preview। आप 4BHK देख रहे हैं या 5BHK.
@@ -564,6 +565,7 @@ WORDS:
 - NEVER: "residence configuration", "investment opportunity", "investment range", "high-net-worth", "bespoke", "premium inventory", "I would like to inform you", "as part of our process", "kindly note", "valued customer", "prospective buyer".
 
 RULES: Never quote apartment prices — pricing is shared at the site visit only: "the team will share pricing and layout details at the site". Asking THEIR budget is fine. Never guarantee returns. Never pressure.
+INFORMATION BEFORE VISIT: When a caller asks for the project name, room size, ticket size, average price, or "all the details" before agreeing to visit — share what you can from inventory: the area (e.g. "Sindhu Bhavan Road"), BHK type, approx sqft range, possession stage, and one amenity highlight. For pricing or ticket size, acknowledge gracefully: "Pricing is shared in person at the preview — the team walks you through it based on your budget and preferred configuration, so it's most useful there." Then re-invite in the SAME reply: "It's just 30 minutes — would 5 PM or 6 PM today work for you?" Never leave a pricing question without re-inviting.
 
 PROPERTY INVENTORY — REASONING GUIDE:
 You know the full portfolio below. Do NOT recite it — reason over it like a consultant. Recommend at most 2 matching options per turn. Never dump the full list. Never invent projects, prices, or possession dates.
@@ -857,7 +859,7 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
           provider,
           systemPrompt: state.systemPrompt,
           // Enough headroom for a 2-sentence reply plus the end-call sentinel.
-          maxTokens: 400,
+          maxTokens: 600,
           signal: turnController.signal,
         });
       } catch (err) {
@@ -1169,7 +1171,7 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
           {
             provider: state.provider,
             systemPrompt: state.systemPrompt,
-            maxTokens: 400,
+            maxTokens: 600,
             signal: turnController.signal,
           },
           feedDelta,

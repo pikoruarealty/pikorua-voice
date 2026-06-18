@@ -1,5 +1,5 @@
 # ── Stage 1: builder ──────────────────────────────────────────────────────────
-FROM node:20-alpine AS builder
+FROM node:22-alpine AS builder
 WORKDIR /repo
 
 # Install pnpm
@@ -24,7 +24,7 @@ RUN pnpm --filter @pikorua/db build
 RUN pnpm --filter @pikorua/api build
 
 # ── Stage 2: runtime ──────────────────────────────────────────────────────────
-FROM node:20-alpine AS runtime
+FROM node:22-alpine AS runtime
 WORKDIR /app
 
 RUN corepack enable && corepack prepare pnpm@11.7.0 --activate

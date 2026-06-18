@@ -35,7 +35,7 @@ COPY packages/db/package.json packages/db/
 COPY packages/shared/package.json packages/shared/
 COPY apps/api/package.json apps/api/
 
-RUN pnpm install --frozen-lockfile --prod
+RUN pnpm install --frozen-lockfile --production
 
 # Copy compiled outputs
 COPY --from=builder /repo/packages/db/dist packages/db/dist

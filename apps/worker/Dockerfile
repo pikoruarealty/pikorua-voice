@@ -30,7 +30,7 @@ COPY packages/db/package.json packages/db/
 COPY packages/shared/package.json packages/shared/
 COPY apps/worker/package.json apps/worker/
 
-RUN pnpm install --frozen-lockfile --prod
+RUN pnpm install --frozen-lockfile --production
 
 COPY --from=builder /repo/packages/db/dist packages/db/dist
 COPY --from=builder /repo/packages/shared/dist packages/shared/dist

@@ -103,11 +103,7 @@ export class DemoVoiceGateway implements OnGatewayConnection, OnGatewayDisconnec
           const sampleRate = Number(msg.sampleRate ?? 16000);
           // Warm call state + filler clips so the first turn is fast.
           if (state.callId) void this.runtime.warmCall(state.callId, state.locale);
-          state.stt = this.deepgramLive.openSession(state.locale, sampleRate, {
-            onPartial: (text) => this.handlePartial(client, state, text),
-            onUtterance: (text) => this.enqueueTurn(client, state, text),
-            onError: (message) => this.send(client, { type: "error", message }),
-          });
+          state.stt = this.openSttSession(client, state, sampleRate, false);
           this.send(client, { type: "ready", streaming: state.streaming });
         } else if (msg?.type === "playback-done") {
           state.speaking = false;
@@ -132,6 +128,33 @@ export class DemoVoiceGateway implements OnGatewayConnection, OnGatewayDisconnec
     state?.stt?.close();
     this.clients.delete(client);
     this.logger.log("Demo voice client disconnected");
+  }
+
+  // Opens a Deepgram Live session. On permanent failure, schedules one
+  // gateway-level recovery attempt (5 s delay, isRecovery=true) so a transient
+  // Deepgram outage doesn't kill the call. The recovery attempt does NOT recurse.
+  private openSttSession(
+    client: WebSocket,
+    state: ClientState,
+    sampleRate: number,
+    isRecovery: boolean,
+  ) {
+    return this.deepgramLive.openSession(state.locale, sampleRate, {
+      onPartial: (text) => this.handlePartial(client, state, text),
+      onUtterance: (text) => this.enqueueTurn(client, state, text),
+      onError: (message) => {
+        this.send(client, { type: "error", message });
+        if (!isRecovery && client.readyState === WebSocket.OPEN && state.callId) {
+          this.logger.warn(`STT session failed call=${state.callId} — recovering in 5 s`);
+          setTimeout(() => {
+            if (client.readyState !== WebSocket.OPEN || !state.callId) return;
+            try { state.stt?.close(); } catch {}
+            this.logger.log(`Re-opening STT session call=${state.callId}`);
+            state.stt = this.openSttSession(client, state, sampleRate, true);
+          }, 5000);
+        }
+      },
+    });
   }
 
   private handlePartial(client: WebSocket, state: ClientState, text: string) {

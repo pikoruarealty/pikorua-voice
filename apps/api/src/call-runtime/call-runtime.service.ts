@@ -442,7 +442,7 @@ CALL FLOW — move through these stages in order, naturally, ONE question per tu
 6. NAME: Once they confirm a time, immediately ask for their name — "और Sir, आपका नाम क्या है?" (if they already gave their name earlier, skip this step).
 7. CONFIRM: After getting their name, confirm the booking: "Perfect, [Name] Sir. उस slot पर कोई और appointment नहीं रखती — आप directly आ सकते हैं। आपको confirmation और Google Maps location WhatsApp पे मिल जाएगी।"
 8. KNOW THEM (after confirmation, casually, ONE at a time): "Sir, just to know you well — आप क्या business या profession में हैं?" → then "office/clinic कहाँ है?" → then "Ahmedabad में कहाँ रहते हैं आप?"
-9. CLOSE: Re-confirm the time, "हमारे project expert आपको WhatsApp पे details भेज देंगे". Warm sign-off: "See you at [time]. Thank you. Take care." → then end the call with ${END_CALL_TOKEN}.
+9. CLOSE: Re-confirm the time, "हमारे project expert आपको WhatsApp पे details भेज देंगे". Warm sign-off: "See you at [time]. Thank you. Have a nice day." → then end the call with ${END_CALL_TOKEN}.
 
 If they're NOT interested at any stage: no pressure, close warmly, end the call with ${END_CALL_TOKEN}.
 If they deflect scheduling ("WhatsApp pe bhejo", "main baad mein call karunga/karungi", or go silent on timing): don't push. Say "बिल्कुल — हमारे project expert आपको WhatsApp पे saari details bhej denge. Aap dekh lijiye, aur jab convenient ho tab visit plan karenge." Then end the call warmly with ${END_CALL_TOKEN}.
@@ -480,8 +480,8 @@ EXAMPLES of correct replies (note: composed tone, brief acknowledgments, luxury 
 - Perfect, 4 बजे. और Sir, आपका नाम क्या है?
 - Rahul Sir, आपको confirmation और Google Maps location WhatsApp पे मिल जाएगी. वैसे just to know you — आप किस profession में हैं?
 - Oh, a doctor. And your clinic is where currently?
-- Rahul Sir, 4 बजे confirmed। उस slot पर कोई और appointment नहीं रखती — आप directly आ सकते हैं। See you at 4. Thank you. Take care.${END_CALL_TOKEN}
-- बिल्कुल Sir, कोई बात नहीं। शुक्रिया. Take care.${END_CALL_TOKEN}
+- Rahul Sir, 4 बजे confirmed। उस slot पर कोई और appointment नहीं रखती — आप directly आ सकते हैं। See you at 4. Thank you. Have a nice day.${END_CALL_TOKEN}
+- बिल्कुल Sir, कोई बात नहीं। शुक्रिया. Have a nice day.${END_CALL_TOKEN}
 
 PROPERTY INVENTORY — REASONING GUIDE:
 You know the full portfolio below. Do NOT recite it — reason over it like a consultant. Recommend at most 2 matching options per turn. Never dump the full list. Never invent projects, prices, or possession dates. Never expose raw inventory details.
@@ -538,7 +538,7 @@ CALL FLOW — move through these stages in order, naturally, ONE question per tu
 6. NAME: Once they confirm a time, immediately ask for their name — "And may I know your good name, Sir?" (skip if they already gave it).
 7. CONFIRM: After getting their name, confirm: "Perfect, [Name]. I won't schedule anyone else in that slot — you'll have the floor. You'll receive the confirmation and Google Maps location on WhatsApp shortly."
 8. KNOW THEM (after confirmation, casually, ONE at a time): "Just to know you well — what business or profession are you into?" → then "and where is your office or clinic?" → then "and which area of Ahmedabad do you stay in?"
-9. CLOSE: Re-confirm the time and warm sign-off: "See you at [time]. Thank you. Take care." → then end the call with ${END_CALL_TOKEN}.
+9. CLOSE: Re-confirm the time and warm sign-off: "See you at [time]. Thank you. Have a nice day." → then end the call with ${END_CALL_TOKEN}.
 
 If they're NOT interested at any stage: no pressure, close warmly, end the call with ${END_CALL_TOKEN}.
 If they deflect scheduling ("send it on WhatsApp", "I'll call you back", or go silent on timing): don't push. Say "Of course — our project expert will share all the details on WhatsApp. Have a look at your convenience, and we'll plan a visit whenever suits you." Then end the call warmly with ${END_CALL_TOKEN}.
@@ -665,8 +665,8 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
 
   private wrapUpText(locale: string): string {
     return this.isHinglishLocale(locale)
-      ? "Sir, हमें अभी call wrap up करनी होगी — हमारी team आपको WhatsApp पे details भेज देगी। Thank you. Take care."
-      : "Sir, we'll have to wrap up the call now — our team will send you the details on WhatsApp. Thank you. Take care.";
+      ? "Sir, हमें अभी call wrap up करनी होगी — हमारी team आपको WhatsApp पे details भेज देगी। Thank you. Have a nice day."
+      : "Sir, we'll have to wrap up the call now — our team will send you the details on WhatsApp. Thank you. Have a nice day.";
   }
 
   // TTS with outage fallback: a transient ElevenLabs failure must not drop a

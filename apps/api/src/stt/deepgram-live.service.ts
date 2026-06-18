@@ -186,7 +186,7 @@ export class DeepgramLiveService {
         // close handler decides whether to reconnect or surface the error
       });
 
-      socket.on("close", () => {
+      socket.on("close", (code: number, reason: Buffer) => {
         open = false;
         if (ws !== socket) return; // superseded by a newer socket
         if (closedByUser) {
@@ -194,13 +194,14 @@ export class DeepgramLiveService {
           flushUtterance();
           return;
         }
+        const detail = `code=${code}${reason.length ? ` reason="${reason.toString("utf8").slice(0, 80)}"` : ""}`;
         // Unexpected close mid-call: reconnect with backoff so the session
         // doesn't go deaf. Audio keeps buffering into pendingChunks meanwhile.
         if (reconnects < MAX_RECONNECTS) {
           const delay = RECONNECT_BACKOFF_MS[Math.min(reconnects, RECONNECT_BACKOFF_MS.length - 1)];
           reconnects += 1;
           this.logger.warn(
-            `Deepgram live socket closed unexpectedly — reconnecting (${reconnects}/${MAX_RECONNECTS}) in ${delay}ms`,
+            `Deepgram live socket closed (${detail}) — reconnecting (${reconnects}/${MAX_RECONNECTS}) in ${delay}ms`,
           );
           setTimeout(() => {
             if (!closedByUser) connect();
@@ -208,6 +209,9 @@ export class DeepgramLiveService {
           return;
         }
         clearInterval(keepAlive);
+        this.logger.error(
+          `Deepgram live session failed permanently (${detail}) after ${MAX_RECONNECTS} reconnect(s)`,
+        );
         // Deliver whatever was pending so the last words aren't lost
         flushUtterance();
         callbacks.onError("Speech recognition connection failed");

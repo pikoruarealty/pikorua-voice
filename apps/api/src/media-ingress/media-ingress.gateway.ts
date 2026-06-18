@@ -213,16 +213,7 @@ export class MediaIngressGateway implements OnGatewayConnection, OnGatewayDiscon
       const sampleRate = Number(message.sampleRate ?? (encoding === "mulaw" ? 8000 : 16000));
       state.outputFormat = encoding === "mulaw" ? "ulaw_8000" : undefined;
       void this.runtime.warmCall(state.callId, state.language);
-      state.stt = this.deepgramLive.openSession(
-        state.language,
-        sampleRate,
-        {
-          onPartial: (text) => this.handlePartial(client, state, text),
-          onUtterance: (text) => this.enqueueStreamingTurn(client, state, text),
-          onError: (m) => this.send(client, { type: "error", message: m }),
-        },
-        { encoding },
-      );
+      state.stt = this.openSttSession(client, state, sampleRate, encoding, false);
     }
 
     this.send(client, {
@@ -232,6 +223,36 @@ export class MediaIngressGateway implements OnGatewayConnection, OnGatewayDiscon
       turnIndex: state.turnIndex,
       mode: state.streamMode ? "stream" : "buffered",
     });
+  }
+
+  private openSttSession(
+    client: WebSocket,
+    state: MediaIngressState,
+    sampleRate: number,
+    encoding: "mulaw" | "linear16",
+    isRecovery: boolean,
+  ) {
+    return this.deepgramLive.openSession(
+      state.language,
+      sampleRate,
+      {
+        onPartial: (text) => this.handlePartial(client, state, text),
+        onUtterance: (text) => this.enqueueStreamingTurn(client, state, text),
+        onError: (m) => {
+          this.send(client, { type: "error", message: m });
+          if (!isRecovery && client.readyState === WebSocket.OPEN && state.callId) {
+            this.logger.warn(`STT session failed call=${state.callId} — recovering in 5 s`);
+            setTimeout(() => {
+              if (client.readyState !== WebSocket.OPEN || !state.callId) return;
+              try { state.stt?.close(); } catch {}
+              this.logger.log(`Re-opening STT session call=${state.callId}`);
+              state.stt = this.openSttSession(client, state, sampleRate, encoding, true);
+            }, 5000);
+          }
+        },
+      },
+      { encoding },
+    );
   }
 
   private handlePartial(client: WebSocket, state: MediaIngressState, text: string) {

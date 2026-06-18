@@ -2,7 +2,7 @@
 FROM node:22-alpine AS builder
 WORKDIR /repo
 
-RUN corepack enable && corepack prepare pnpm@11.7.0 --activate
+RUN corepack enable && corepack prepare pnpm@9.15.4 --activate
 
 COPY pnpm-workspace.yaml package.json pnpm-lock.yaml* .npmrc* ./
 COPY packages/db/package.json packages/db/
@@ -23,7 +23,7 @@ RUN pnpm --filter @pikorua/worker build
 FROM node:22-alpine AS runtime
 WORKDIR /app
 
-RUN corepack enable && corepack prepare pnpm@11.7.0 --activate
+RUN corepack enable && corepack prepare pnpm@9.15.4 --activate
 
 COPY pnpm-workspace.yaml package.json pnpm-lock.yaml* .npmrc* ./
 COPY packages/db/package.json packages/db/

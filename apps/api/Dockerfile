@@ -3,7 +3,7 @@ FROM node:20-alpine AS builder
 WORKDIR /repo
 
 # Install pnpm
-RUN corepack enable && corepack prepare pnpm@latest --activate
+RUN corepack enable && corepack prepare pnpm@11.7.0 --activate
 
 # Copy workspace manifests first for better layer caching
 COPY pnpm-workspace.yaml package.json pnpm-lock.yaml* .npmrc* ./
@@ -27,7 +27,7 @@ RUN pnpm --filter @pikorua/api build
 FROM node:20-alpine AS runtime
 WORKDIR /app
 
-RUN corepack enable && corepack prepare pnpm@latest --activate
+RUN corepack enable && corepack prepare pnpm@11.7.0 --activate
 
 # Copy workspace structure (needed so workspace: references resolve)
 COPY pnpm-workspace.yaml package.json pnpm-lock.yaml* .npmrc* ./

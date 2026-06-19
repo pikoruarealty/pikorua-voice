@@ -40,7 +40,9 @@ export const envSchema = z
     EXOTEL_API_TOKEN: optionalNonEmpty,
     EXOTEL_SUBDOMAIN: z.string().default("api.exotel.com"),
     EXOTEL_CALLER_ID: optionalNonEmpty,
+    EXOTEL_APP_ID: optionalNonEmpty,
     EXOTEL_WEBHOOK_SECRET: optionalNonEmpty,
+    EXOTEL_STREAM_SECRET: optionalNonEmpty,
     PUBLIC_BASE_URL: z.string().url().default("http://localhost:4100"),
 
     // Voice routing

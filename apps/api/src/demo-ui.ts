@@ -187,6 +187,13 @@ export const DEMO_HTML = `<!doctype html>
       conversationActive = true;
       els.start.disabled = true;
       els.stop.disabled = false;
+      // Unlock audio playback within the user-gesture stack frame so the
+      // browser's autoplay policy doesn't block Maya's greeting audio.
+      // Use a silent data URI — setting src="" throws on some browsers.
+      els.audio.src = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=";
+      try { await els.audio.play(); } catch {}
+      els.audio.pause();
+      els.audio.src = "";
       await openMic();
       connectSocket();
     }
@@ -247,7 +254,7 @@ export const DEMO_HTML = `<!doctype html>
           sampleRate: 16000,
           streaming: true,
         }));
-        setStatus("Listening — speak naturally, short pauses are fine");
+        setStatus("Maya is connecting…");
       };
       ws.onmessage = (event) => {
         let msg;
@@ -335,7 +342,8 @@ export const DEMO_HTML = `<!doctype html>
     async function handleServerMessage(msg) {
       if (msg.type === "partial") { els.transcript.textContent = msg.transcript + " …"; return; }
       if (msg.type === "holding") { els.transcript.textContent = (msg.transcript || "") + " …"; setStatus("Listening — please continue"); return; }
-      if (msg.type === "turn-start") { els.transcript.textContent = msg.transcript || ""; els.reply.textContent = ""; setStatus("Thinking…"); return; }
+      if (msg.type === "turn-start") { els.transcript.textContent = msg.transcript || ""; els.reply.textContent = ""; setStatus(msg.transcript ? "Thinking…" : "Maya is connecting…"); return; }
+      if (msg.type === "greeting-end") { if (msg.reply) els.reply.textContent = msg.reply; setStatus("Listening — speak naturally, short pauses are fine"); return; }
       if (msg.type === "reply-chunk") { els.reply.textContent = (els.reply.textContent ? els.reply.textContent + " " : "") + (msg.text || ""); return; }
       if (msg.type === "filler") {
         if (!playing && playQueue.length === 0 && msg.audioBase64) enqueueAudio(new Uint8Array(base64ToArrayBuffer(msg.audioBase64)));

@@ -2,8 +2,8 @@ import { Module } from "@nestjs/common";
 import { DeepgramService } from "../stt/deepgram.service";
 import { DeepgramRealtimeService } from "../stt/deepgram-realtime.service";
 import { DeepgramLiveService } from "../stt/deepgram-live.service";
-import { RealtimeGateway } from "../stt/realtime.gateway";
 import { DemoVoiceGateway } from "./demo-voice.gateway";
+import { ExotelVoicebotGateway } from "./exotel-voicebot.gateway";
 import { LlmService } from "../llm/llm.service";
 import { ElevenlabsService } from "../tts/elevenlabs.service";
 import { CallRuntimeService } from "./call-runtime.service";
@@ -23,8 +23,8 @@ import { IvrService } from "../ivr/ivr.service";
     DeepgramService,
     DeepgramRealtimeService,
     DeepgramLiveService,
-    RealtimeGateway,
     DemoVoiceGateway,
+    ExotelVoicebotGateway,
     LlmService,
     ElevenlabsService,
     GuardrailService,

@@ -123,6 +123,10 @@ export class DialService implements OnModuleDestroy {
           To: call.toNumber ?? "",
           CallerId: String(this.config.get("EXOTEL_CALLER_ID") ?? ""),
         });
+        // Route the answered call through the Voicebot app configured in the
+        // Exotel dashboard. Without AppId, Exotel has no behaviour to run.
+        const appId = this.config.get("EXOTEL_APP_ID");
+        if (appId) params.set("AppId", String(appId));
         if (publicBaseUrl) {
           params.set("StatusCallback", `${publicBaseUrl}/api/webhooks/exotel`);
           params.set("StatusCallbackContentType", "application/json");

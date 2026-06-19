@@ -24,6 +24,9 @@ export const workerEnvSchema = z
     EXOTEL_API_TOKEN: optionalNonEmpty,
     EXOTEL_SUBDOMAIN: z.string().default("api.exotel.com"),
     EXOTEL_CALLER_ID: optionalNonEmpty,
+    // Exotel App ID for the Voicebot app configured in the Exotel dashboard.
+    // Required for outbound calls to route through the voicebot.
+    EXOTEL_APP_ID: optionalNonEmpty,
     PUBLIC_BASE_URL: z.string().url().default("http://localhost:4100"),
 
     // CRM integration (REST only — Step 9)

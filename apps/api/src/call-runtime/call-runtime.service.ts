@@ -321,6 +321,176 @@ export class CallRuntimeService implements OnApplicationShutdown {
     };
   }
 
+  // Generates and streams Maya's opening greeting the moment a call connects.
+  // The LLM speaks first — no caller utterance needed. A synthetic "Begin the call."
+  // user message is used as the LLM trigger (providers require history to start with
+  // a user role) but is never spoken. Both the trigger and Maya's reply are committed
+  // to history so subsequent turns know step 1 (intro) is already done.
+  async generateGreetingStream(
+    callId: string,
+    locale: string,
+    sink: TurnStreamSink,
+  ): Promise<{ reply: string; canceled: boolean; skipped: boolean }> {
+    const state = await this.getOrCreateState(callId, locale);
+
+    // Skip if the call already has history (resumed session or greeting sent).
+    if (state.history.length > 0) {
+      return { reply: "", canceled: false, skipped: true };
+    }
+
+    const turnStart = Date.now();
+    const turnController = new AbortController();
+    const abortTurn = () => turnController.abort();
+    sink.signal.addEventListener("abort", abortTurn);
+    const watchdog = setTimeout(abortTurn, this.turnTimeoutMs());
+
+    let sentenceIndex = 0;
+    let dispatchedText = "";
+    let ttsMsTotal = 0;
+    let ttsQueue: Promise<void> = Promise.resolve();
+    let ttfaMs: number | null = null;
+    let jsonMode: boolean | null = null;
+    let pendingText = "";
+    let endCallDetected = false;
+
+    const streamSentence = async (text: string, idx: number) => {
+      let first = true;
+      const res = await this.tts.synthesizeStream(text, {
+        languageCode: this.replyLanguageCode(text, state.locale),
+        signal: turnController.signal,
+        onChunk: (chunk) => {
+          if (first) {
+            first = false;
+            if (ttfaMs === null) ttfaMs = Date.now() - turnStart;
+          }
+          sink.onAudioChunk(chunk, { sentenceIndex: idx, last: false });
+        },
+      });
+      sink.onAudioChunk(Buffer.alloc(0), { sentenceIndex: idx, last: true });
+      return res;
+    };
+
+    const dispatchSentence = (sentence: string) => {
+      const text = sentence.trim();
+      if (!text || turnController.signal.aborted) return;
+      if (this.guardrail.checkHard(text).triggered) return;
+      const idx = sentenceIndex++;
+      dispatchedText = dispatchedText ? `${dispatchedText} ${text}` : text;
+      sink.onReplyDelta?.(text);
+      ttsQueue = ttsQueue
+        .then(async () => {
+          if (turnController.signal.aborted) return;
+          const res = await streamSentence(text, idx);
+          ttsMsTotal += res.ttsMs;
+        })
+        .catch(() => {});
+    };
+
+    const feedDelta = (delta: string) => {
+      pendingText += delta;
+      if (jsonMode === null) {
+        const head = pendingText.trimStart();
+        if (!head) return;
+        jsonMode = head.startsWith("{") || head.startsWith("`");
+      }
+      if (jsonMode) return;
+      if (END_CALL_PATTERN.test(pendingText)) {
+        endCallDetected = true;
+        END_CALL_PATTERN.lastIndex = 0;
+        pendingText = pendingText.replace(END_CALL_PATTERN, "");
+      }
+      END_CALL_PATTERN.lastIndex = 0;
+      let match: RegExpExecArray | null;
+      while ((match = SENTENCE_BOUNDARY.exec(pendingText))) {
+        const end = match.index + match[1].length;
+        if (/<[^>]*$/.test(pendingText.slice(0, end))) break;
+        dispatchSentence(pendingText.slice(0, end));
+        pendingText = pendingText.slice(end).replace(/^\s+/, "");
+      }
+    };
+
+    // Synthetic trigger — never spoken, just satisfies the provider requirement
+    // that a conversation history must begin with a user message.
+    const GREETING_TRIGGER: LlmMessage = { role: "user", content: "Begin the call." };
+
+    this.activeTurns += 1;
+    try {
+      let llmResolved: Awaited<ReturnType<typeof this.llm.generateStream>>;
+      try {
+        llmResolved = await this.llm.generateStream(
+          [GREETING_TRIGGER],
+          {
+            provider: state.provider,
+            systemPrompt: state.systemPrompt,
+            maxTokens: 700,
+            signal: turnController.signal,
+          },
+          feedDelta,
+        );
+      } catch (err) {
+        if (sink.signal.aborted || turnController.signal.aborted) {
+          return { reply: dispatchedText, canceled: true, skipped: false };
+        }
+        this.logger.warn(
+          `Greeting LLM failed call=${callId}`,
+          err instanceof Error ? err.message : String(err),
+        );
+        return { reply: "", canceled: false, skipped: true };
+      }
+
+      let reply: string;
+      if (jsonMode) {
+        const parsed = this.parseLlmReply(llmResolved.text, callId);
+        reply = parsed.reply;
+        endCallDetected = endCallDetected || parsed.endCall;
+        let rest = reply;
+        let m: RegExpExecArray | null;
+        while ((m = SENTENCE_BOUNDARY.exec(rest))) {
+          const end = m.index + m[1].length;
+          dispatchSentence(rest.slice(0, end));
+          rest = rest.slice(end).replace(/^\s+/, "");
+        }
+        if (rest.trim()) dispatchSentence(rest);
+      } else {
+        if (END_CALL_PATTERN.test(pendingText)) {
+          endCallDetected = true;
+          END_CALL_PATTERN.lastIndex = 0;
+          pendingText = pendingText.replace(END_CALL_PATTERN, "");
+        }
+        END_CALL_PATTERN.lastIndex = 0;
+        if (pendingText.trim()) dispatchSentence(pendingText);
+        pendingText = "";
+        const parsed = this.parseLlmReply(llmResolved.text, callId);
+        reply = parsed.reply;
+        endCallDetected = endCallDetected || parsed.endCall;
+      }
+
+      if (!reply.trim()) {
+        return { reply: "", canceled: false, skipped: true };
+      }
+
+      // Commit trigger + greeting to history before TTS drains so a barge-in
+      // that arrives during playback still sees a complete greeting in context.
+      state.history.push(GREETING_TRIGGER);
+      state.history.push({ role: "assistant", content: reply });
+      await ttsQueue;
+      this.persistState(callId, state);
+
+      if (sink.signal.aborted) {
+        return { reply: dispatchedText, canceled: true, skipped: false };
+      }
+
+      this.logger.log(
+        `Greeting call=${callId} llm=${llmResolved.llmMs ?? 0}ms ttfa=${ttfaMs ?? "?"}ms tts=${ttsMsTotal}ms endCall=${endCallDetected}`,
+      );
+      return { reply: dispatchedText || reply, canceled: false, skipped: false };
+    } finally {
+      clearTimeout(watchdog);
+      sink.signal.removeEventListener("abort", abortTurn);
+      this.activeTurns -= 1;
+    }
+  }
+
   // Pre-build call state and warm the filler/apology clip cache so the first
   // turn doesn't pay for campaign/target fetch + prompt build + clip synthesis.
   private allFallbackLines(locale: string): string[] {
@@ -450,7 +620,7 @@ If they deflect scheduling ("WhatsApp pe bhejo", "main baad mein call karunga/ka
 HOW YOU TALK:
 - Match the customer's language. Hindi → natural Hinglish. English → natural Indian English. Never switch abruptly, never force Hinglish.
 - BREVITY: Short spoken sentences only. Every reply ends with a question — never a statement with no prompt. Max 2–3 sentences total. Never a paragraph, never a brochure.
-- TONE: Calm, composed, confident throughout — the quiet authority of someone who represents Ahmedabad's finest addresses. No sudden spikes in energy. NEVER use an exclamation mark in the first sentence; period only. At most one "!" per reply, mid-reply or end only.
+- TONE: Calm, composed, confident throughout — the quiet authority of someone who represents Ahmedabad's finest addresses. No sudden spikes in energy. NEVER use an exclamation mark in the first sentence; period only. At most one "!" per reply, mid-reply or end only. SIGN-OFF DELIVERY: "Have a nice day." is always spoken as a warm, unhurried farewell — give it its own sentence so the voice engine can breathe into it, never rush it onto the end of another sentence.
 - FILLER WORDS — CRITICAL: NEVER start a reply with stall words like "ek second", "ek minute", "just a second", "hold on". Respond directly. If you need a moment, the silence is enough — do not narrate it.
 - NAMES — CRITICAL: NEVER append "जी" or "ji" to a name. "Rahul जी" and "Sharma ji" are WRONG. Say "Rahul Sir" or just "Rahul". "जी" is only used standalone ("हाँ जी") or at the start of a reply ("जी, बिल्कुल") — never after a name.
 - ACKNOWLEDGMENTS: One brief phrase that feels genuinely responsive — sometimes just the acknowledgment word, sometimes a micro-reaction to what they actually said. "5BHK — perfect.", "सिंधु भवन रोड — excellent choice.", "Ready to Move In — certainly.", "बिल्कुल.", "Noted.", "जी, perfect." — then immediately move forward. Rotate so no two consecutive replies open the same way. Never repeat the exact same phrase twice in a row.
@@ -466,7 +636,8 @@ WORDS:
 - Say "exceptional", "elegant", "distinguished", "remarkable", "exclusive", "genuinely curated" — NEVER "beautiful", "nice", "good", "badiya", "bahut accha", "bahut sare".
 - Say "private preview" or "exclusive viewing" — "site visit" is also acceptable.
 - When speaking of who lives in the community: "distinguished residents", "accomplished community", "peer circle" — not "buyers" or "investors".
-- NEVER: "residence configuration", "investment opportunity", "investment range", "high-net-worth", "bespoke", "premium inventory", "I would like to inform you", "as part of our process", "kindly note", "valued customer", "prospective buyer".
+- NEVER: "residence configuration", "investment opportunity", "investment range", "high-net-worth", "bespoke", "premium inventory", "I would like to inform you", "as part of our process", "kindly note", "valued customer", "prospective buyer", "take care".
+- Sign-off is ALWAYS "Have a nice day." — NEVER "take care", "take care of yourself", or any variation.
 - NEVER heavy/formal Hindi words: "sampatti", "niwesh", "kripya", "uttam", "suvidha", "vyakti", "vibhinn", "aakar", "pariksar", "nivedan", "prakar", "vistaar". Say "sizes" not "आकार", "details" not "विवरण", "visit" not "भ्रमण".
 
 RULES: Never quote apartment prices — pricing is shared at the site visit only: "pricing aur layout ki saari details site pe team share kar degi". Asking THEIR budget is fine. Never guarantee returns. Never pressure.
@@ -477,7 +648,7 @@ EXAMPLES of correct replies (note: composed tone, brief acknowledgments, luxury 
 - Perfect. और किस budget में comfortable हैं?
 - Certainly. आप Ahmedabad में किस area को prefer करेंगे — सिंधु भवन रोड, इस्कॉन-अंबली रोड, थलतेज, या वैष्णोदेवी?
 - सिंधु भवन रोड — excellent choice. और possession के बारे में — Ready to Move In चाहिए, या Under Construction में भी comfortable हैं?
-- Noted. सिंधु भवन रोड पर हमारा एक curated 5BHK residence है — Ready to Move In, approx 5,200 से 7,500 square feet, elegant gated community। Club class amenities — grand clubhouse, infinity pool, private cinema। Private preview के लिए बस 30 minutes — आज 5 बजे या 6 बजे family के साथ आ सकते हैं?
+- Noted. सिंधु भवन रोड पर हमारा एक curated 5BHK residence है — Ready to Move In, approx 5,200 से 7,500 square feet, elegant gated community। Club class amenities — grand clubhouse, infinity pool, private cinema। Private preview के लिए बस 30 minute — आज 5 बजे या 6 बजे family के साथ आ सकते हैं?
 - Perfect, 4 बजे. और Sir, आपका नाम क्या है?
 - Rahul Sir, आपको confirmation और Google Maps location WhatsApp पे मिल जाएगी. वैसे just to know you — आप किस profession में हैं?
 - Oh, a doctor. And your clinic is where currently?
@@ -548,7 +719,7 @@ HOW YOU TALK:
 - Natural Indian English — the way an educated, senior professional speaks in Mumbai or Delhi. NEVER British idioms: no "brilliant", "cheers", "lovely", "quid", "whilst", "shall I", "fortnight".
 - If they switch to Hindi, follow them into natural Hinglish. Never switch abruptly.
 - BREVITY: Max 2–3 short sentences per reply. One question per turn. Never a paragraph, never a brochure.
-- TONE: Calm, composed, confident throughout. No sudden spikes in energy. NEVER use an exclamation mark in the first sentence; period only. At most one "!" per reply, mid-reply or end only.
+- TONE: Calm, composed, confident throughout. No sudden spikes in energy. NEVER use an exclamation mark in the first sentence; period only. At most one "!" per reply, mid-reply or end only. SIGN-OFF DELIVERY: "Have a nice day." is always its own sentence — warm and unhurried, never rushed onto the tail of another line.
 - FILLER WORDS — CRITICAL: NEVER start a reply with "one second", "just a moment", "hold on", or any stall phrase. Respond directly.
 - NAMES — CRITICAL: NEVER use "ji" or "Ji" in any form — not after a name, not standalone. Say "[Name] Sir" or just "[Name]".
 - ACKNOWLEDGMENTS: One brief phrase that feels genuinely responsive — sometimes just the acknowledgment word, sometimes a micro-reaction to what they actually said. "5BHK — perfect.", "Sindhu Bhavan Road — excellent choice.", "Ready to Move In — certainly.", "Noted.", "Wonderful.", "Understood." — then immediately move forward. Rotate so no two consecutive replies open the same way. Never "Okay nice!", "Got it!", "Nice!".
@@ -562,7 +733,8 @@ WORDS:
 - Say "exceptional", "elegant", "distinguished", "remarkable", "exclusive", "genuinely curated" — NEVER "beautiful", "nice", "good".
 - Say "private preview" or "exclusive viewing" — "site visit" is also acceptable.
 - When speaking of who lives in the community: "distinguished residents", "accomplished community", "peer circle" — not "buyers" or "investors".
-- NEVER: "residence configuration", "investment opportunity", "investment range", "high-net-worth", "bespoke", "premium inventory", "I would like to inform you", "as part of our process", "kindly note", "valued customer", "prospective buyer".
+- NEVER: "residence configuration", "investment opportunity", "investment range", "high-net-worth", "bespoke", "premium inventory", "I would like to inform you", "as part of our process", "kindly note", "valued customer", "prospective buyer", "take care".
+- Sign-off is ALWAYS "Have a nice day." — NEVER "take care", "take care of yourself", or any variation.
 
 RULES: Never quote apartment prices — pricing is shared at the site visit only: "the team will share pricing and layout details at the site". Asking THEIR budget is fine. Never guarantee returns. Never pressure.
 INFORMATION BEFORE VISIT: When a caller asks for the project name, room size, ticket size, average price, or "all the details" before agreeing to visit — share what you can from inventory: the area (e.g. "Sindhu Bhavan Road"), BHK type, approx sqft range, possession stage, and one amenity highlight. For pricing or ticket size, acknowledge gracefully: "Pricing is shared in person at the preview — the team walks you through it based on your budget and preferred configuration, so it's most useful there." Then re-invite in the SAME reply: "It's just 30 minutes — would 5 PM or 6 PM today work for you?" Never leave a pricing question without re-inviting.

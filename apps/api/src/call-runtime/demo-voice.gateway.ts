@@ -104,7 +104,8 @@ export class DemoVoiceGateway implements OnGatewayConnection, OnGatewayDisconnec
           // Warm call state + filler clips so the first turn is fast.
           if (state.callId) void this.runtime.warmCall(state.callId, state.locale);
           state.stt = this.openSttSession(client, state, sampleRate, false);
-          this.send(client, { type: "ready", streaming: state.streaming });
+          // Play Maya's opening greeting immediately — she speaks first.
+          state.queue = state.queue.then(() => this.sendGreeting(client, state));
         } else if (msg?.type === "playback-done") {
           state.speaking = false;
         } else if (msg?.type === "stop") {
@@ -314,6 +315,67 @@ export class DemoVoiceGateway implements OnGatewayConnection, OnGatewayDisconnec
     } finally {
       if (fillerTimer) clearTimeout(fillerTimer);
       if (state.active === active) state.active = null;
+    }
+  }
+
+  private async sendGreeting(client: WebSocket, state: ClientState): Promise<void> {
+    if (!state.callId || client.readyState !== WebSocket.OPEN) return;
+
+    const controller = new AbortController();
+    const active: ActiveTurn = { controller, audioSent: false };
+    state.active = active;
+
+    // Signal to the UI that Maya is about to speak before the LLM responds.
+    this.send(client, { type: "turn-start", transcript: "" });
+
+    const fillerDelay = Number(this.config.get("FILLER_DELAY_MS") ?? 900);
+    const fillerTimer =
+      fillerDelay > 0
+        ? setTimeout(() => void this.sendFiller(client, state, active), fillerDelay)
+        : null;
+
+    try {
+      const result = await this.runtime.generateGreetingStream(
+        state.callId,
+        state.locale,
+        {
+          signal: controller.signal,
+          onReplyDelta: (text) => this.send(client, { type: "reply-chunk", text }),
+          onAudioChunk: (chunk, info) => {
+            active.audioSent = true;
+            state.speaking = true;
+            this.send(client, {
+              type: "audio-chunk",
+              audioBase64: chunk.length > 0 ? chunk.toString("base64") : "",
+              sentenceIndex: info.sentenceIndex,
+              last: info.last,
+            });
+          },
+          onCancel: () => {
+            state.speaking = false;
+            this.send(client, { type: "cancel" });
+          },
+        },
+      );
+
+      if (!result.skipped) {
+        this.send(client, {
+          type: "greeting-end",
+          reply: result.reply,
+          canceled: result.canceled,
+        });
+      }
+    } catch (err) {
+      this.logger.warn(
+        "Greeting failed",
+        err instanceof Error ? err.message : String(err),
+      );
+    } finally {
+      if (fillerTimer) clearTimeout(fillerTimer);
+      if (state.active === active) {
+        state.active = null;
+        state.speaking = false;
+      }
     }
   }
 

@@ -3,9 +3,9 @@
   "version": "0.0.1",
   "private": true,
   "scripts": {
-    "dev": "nest start --watch",
+    "dev": "node -e \"const {execSync}=require('child_process');try{const o=execSync('netstat -ano').toString();const m=o.match(/TCP[\\s\\S]*?:4100\\s+\\S+\\s+LISTENING\\s+(\\d+)/m);if(m){execSync('taskkill /PID '+m[1]+' /F');}}catch(e){}\" && nest start --watch",
     "build": "nest build",
-    "start": "node dist/main",
+    "start": "node -e \"const {execSync}=require('child_process');try{const o=execSync('netstat -ano').toString();const m=o.match(/TCP[\\s\\S]*?:4100\\s+\\S+\\s+LISTENING\\s+(\\d+)/m);if(m){execSync('taskkill /PID '+m[1]+' /F');}}catch(e){}\" && node dist/main",
     "type-check": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {

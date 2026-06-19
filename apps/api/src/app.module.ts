@@ -12,7 +12,6 @@ import { HealthModule } from "./health/health.module";
 import { CampaignModule } from "./campaign/campaign.module";
 import { WebhookModule } from "./webhooks/webhook.module";
 import { CallRuntimeModule } from "./call-runtime/call-runtime.module";
-import { MediaIngressModule } from "./media-ingress/media-ingress.module";
 import { MetricsModule } from "./metrics/metrics.module";
 import { DemoModule } from "./demo/demo.module";
 
@@ -33,7 +32,6 @@ import { DemoModule } from "./demo/demo.module";
     CampaignModule,
     WebhookModule,
     CallRuntimeModule,
-    MediaIngressModule,
     MetricsModule,
     DemoModule,
   ],

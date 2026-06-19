@@ -17,9 +17,8 @@ const TTS_RESPELLINGS: Array<[RegExp, string]> = [
   // "brochure" is French-derived — the Hindi engine reads it with English
   // phonemes ("bro-chure") instead of the correct "BROH-shuh" sound.
   [/\bbrochures?\b/gi, "ब्रोशर"],
-  // "Take care" at sentence end gets clipped/rushed — Devanagari phonetic
-  // form makes the Hindi voice read it with natural calm cadence.
-  [/\btake care\b\.?/gi, "टेक केयर."],
+  // Hard-block "take care" — replace with the correct sign-off at the TTS layer.
+  [/\btake care[!.]*/gi, "Have a nice day."],
 ];
 
 // Area units: in Hindi mode the engine reads "square feet" with English
@@ -180,9 +179,8 @@ export function normalizeForTts(text: string, languageCode = "hi"): string {
       out = out.replace(pattern, replacement);
     }
   } else {
-    // English mode: insert a comma before "Take care" so the engine pauses
-    // naturally instead of rushing the phrase.
-    out = out.replace(/\.\s*take care\b\.?/gi, ". Take, care.");
+    // Hard-block "take care" — replace with the correct sign-off at the TTS layer.
+    out = out.replace(/\btake care[!.]*/gi, "Have a nice day.");
   }
 
   // Expand BHK configurations: "4BHK" → "चार BHK" (Hindi) / "4 BHK" (English).
@@ -260,9 +258,9 @@ export class ElevenlabsService {
     // moderate stability keeps it steady without monotone; lower style avoids
     // the exaggerated/synthetic feel; high similarity keeps the voice's warmth.
     // All overridable via env so you can tune without a redeploy.
-    const stability = Number(this.config.get("ELEVENLABS_STABILITY") ?? 0.6);
+    const stability = Number(this.config.get("ELEVENLABS_STABILITY") ?? 0.75);
     const similarityBoost = Number(this.config.get("ELEVENLABS_SIMILARITY_BOOST") ?? 0.9);
-    const style = Number(this.config.get("ELEVENLABS_STYLE") ?? 0.2);
+    const style = Number(this.config.get("ELEVENLABS_STYLE") ?? 0.1);
     const modelId = String(this.config.get("ELEVENLABS_MODEL") ?? "eleven_turbo_v2_5");
     // Forcing the language makes the model read romanized Hindi correctly
     // ("aapko", "kya") instead of mangling it with English phonemes. English

@@ -42,7 +42,7 @@ function createDemoSession() {
   const callId = crypto.randomUUID();
   const campaignId = crypto.randomUUID();
   const targetId = crypto.randomUUID();
-  const locale = process.env.GEMINI_LANGUAGE_DEFAULT || "hi-IN";
+  const locale = process.env.CALL_LOCALE_DEFAULT || "hi-IN";
   const sid = `local-demo-${Date.now()}`;
 
   const sql = `

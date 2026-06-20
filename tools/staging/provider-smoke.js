@@ -1,14 +1,8 @@
-const required = ["DEEPGRAM_API_KEY", "ELEVENLABS_API_KEY"];
-const llmSatisfied = Boolean(
-  process.env.OPENROUTER_API_KEY || process.env.GOOGLE_GENERATIVE_AI_API_KEY,
-);
+const required = ["DEEPGRAM_API_KEY", "ELEVENLABS_API_KEY", "OPENROUTER_API_KEY"];
 const live = process.env.RUN_LIVE_PROVIDER_SMOKE === "true";
 
 async function main() {
   const missing = required.filter((key) => !process.env[key]);
-  if (!llmSatisfied) {
-    missing.push("OPENROUTER_API_KEY or GOOGLE_GENERATIVE_AI_API_KEY");
-  }
   if (missing.length > 0) {
     throw new Error(`Missing provider credentials: ${missing.join(", ")}`);
   }
@@ -23,8 +17,7 @@ async function main() {
   const checks = [];
   checks.push(checkDeepgram());
   checks.push(checkElevenLabs());
-  if (process.env.OPENROUTER_API_KEY) checks.push(checkOpenRouter());
-  if (process.env.GOOGLE_GENERATIVE_AI_API_KEY) checks.push(checkGoogle());
+  checks.push(checkOpenRouter());
 
   const results = await Promise.allSettled(checks);
   const failed = results.filter((result) => result.status === "rejected");
@@ -69,18 +62,6 @@ async function checkOpenRouter() {
   });
   if (!res.ok) throw new Error(`OpenRouter smoke failed: ${res.status}`);
   return "OpenRouter auth ok";
-}
-
-async function checkGoogle() {
-  const model = process.env.GOOGLE_MODEL ?? "gemini-2.0-flash";
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${process.env.GOOGLE_GENERATIVE_AI_API_KEY}`;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: "Reply OK." }] }] }),
-  });
-  if (!res.ok) throw new Error(`Google smoke failed: ${res.status}`);
-  return "Google smoke ok";
 }
 
 main().catch((err) => {

@@ -46,7 +46,7 @@ export const envSchema = z
     PUBLIC_BASE_URL: z.string().url().default("http://localhost:4100"),
 
     // Voice routing
-    GEMINI_LANGUAGE_DEFAULT: z.string().max(16).default("hi-IN"),
+    CALL_LOCALE_DEFAULT: z.string().max(16).default("hi-IN"),
     LLM_PROVIDER_OVERRIDE: optionalLlmProvider,
     GUARDRAIL_SEMANTIC_ENABLED: booleanFlag.default(true),
     STT_REALTIME_ENABLED: booleanFlag.default(false),
@@ -71,13 +71,10 @@ export const envSchema = z
     ELEVENLABS_API_KEY: optionalNonEmpty,
     ELEVENLABS_VOICE_ID: optionalNonEmpty,
 
-    // LLM · Google Generative AI (fallback)
-    GOOGLE_GENERATIVE_AI_API_KEY: optionalNonEmpty,
-    GOOGLE_MODEL: z.string().default("gemini-2.0-flash"),
-
-    // LLM · OpenRouter (last-resort fallback)
+    // LLM · OpenRouter
     OPENROUTER_API_KEY: optionalNonEmpty,
-    OPENROUTER_MODEL: z.string().default("google/gemini-2.0-flash-lite:free"),
+    OPENROUTER_MODEL: z.string().default("anthropic/claude-haiku-4-5"),
+    OPENROUTER_FALLBACK_MODEL: optionalNonEmpty,
 
     // CRM integration (REST only)
     CRM_API_BASE_URL: z.string().url().default("http://localhost:4000"),
@@ -103,11 +100,11 @@ export const envSchema = z
       }
     }
 
-    if (!env.OPENROUTER_API_KEY && !env.GOOGLE_GENERATIVE_AI_API_KEY) {
+    if (!env.OPENROUTER_API_KEY) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["OPENROUTER_API_KEY"],
-        message: "At least one LLM provider key is required in production",
+        message: "OPENROUTER_API_KEY is required in production",
       });
     }
   });

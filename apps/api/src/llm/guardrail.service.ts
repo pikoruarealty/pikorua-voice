@@ -126,26 +126,6 @@ export class GuardrailService {
       }
     }
 
-    // Fallback: Google Gemini
-    const googleKey = this.config.get<string>("GOOGLE_GENERATIVE_AI_API_KEY");
-    const googleModel = String(this.config.get("GOOGLE_MODEL") ?? "gemini-2.0-flash");
-    if (googleKey) {
-      try {
-        const res = await axios.post(
-          `https://generativelanguage.googleapis.com/v1beta/models/${googleModel}:generateContent`,
-          { contents: [{ role: "user", parts: [{ text: prompt }] }] },
-          { params: { key: googleKey }, timeout: 4000 },
-        );
-        const raw = String(res.data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "").trim();
-        return this.parseSemanticResult(raw, text);
-      } catch (err) {
-        this.logger.warn(
-          "Semantic guardrail (Google) failed — skipping LLM check",
-          err instanceof Error ? err.message : String(err),
-        );
-      }
-    }
-
     // No LLM available — hard rules only (already applied by caller)
     return { triggered: false, rule: null, replacement: null };
   }

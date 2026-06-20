@@ -49,7 +49,6 @@ export class LeadScoreLlmService {
 
     const provider = String(this.config.get("LLM_SCORING_PROVIDER") ?? "auto") as
       | "openrouter"
-      | "google"
       | "auto";
     const prompt = this.buildPrompt(trimmed, locale);
 
@@ -87,40 +86,7 @@ export class LeadScoreLlmService {
             "OpenRouter scoring request failed",
             err instanceof Error ? err.stack : String(err),
           );
-          if (provider === "openrouter") {
-            return null;
-          }
-        }
-      }
-    }
-
-    if (provider === "google" || provider === "auto") {
-      const googleKey = String(this.config.get("GOOGLE_GENERATIVE_AI_API_KEY") ?? "");
-      if (googleKey) {
-        const model = String(
-          this.config.get("LLM_SCORING_MODEL") ??
-            this.config.get("GOOGLE_MODEL") ??
-            "gemini-2.0-flash",
-        );
-        try {
-          const res = await axios.post(
-            `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
-            { contents: [{ role: "user", parts: [{ text: prompt }] }] },
-            { params: { key: googleKey }, timeout: 8000 },
-          );
-
-          const raw = String(res.data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "");
-          const parsed = LeadScoreLlmSchema.parse(JSON.parse(this.stripFences(raw)));
-          this.logger.log(`LLM scoring(google/${model}) succeeded`);
-          return this.clampResult(parsed);
-        } catch (err) {
-          this.logger.warn(
-            "Google scoring request failed",
-            err instanceof Error ? err.stack : String(err),
-          );
-          if (provider === "google") {
-            return null;
-          }
+          return null;
         }
       }
     }

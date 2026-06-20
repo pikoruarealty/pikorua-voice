@@ -64,12 +64,7 @@ services:
       - key: OPENROUTER_MODEL
         value: anthropic/claude-haiku-4-5
 
-      # ── LLM · Google Gemini (fallback) ───────────────────────────────────
-      - key: GOOGLE_GENERATIVE_AI_API_KEY
-        sync: false
-      - key: GOOGLE_MODEL
-        value: gemini-2.5-flash
-      - key: GEMINI_LANGUAGE_DEFAULT
+      - key: CALL_LOCALE_DEFAULT
         value: hi-IN
 
       # ── Feature flags ─────────────────────────────────────────────────────

@@ -73,50 +73,6 @@ export class LlmService {
     if ((provider === "openrouter" || provider === "auto") && !this.breakerOpen("openrouter")) {
       const result = await this.tryOpenRouter(messages, opts, start, maxTokens);
       if (result) return result;
-      this.logger.warn("OpenRouter failed — falling back to Gemini");
-    }
-
-    // Google Gemini fallback
-    const googleKey = this.config.get<string>("GOOGLE_GENERATIVE_AI_API_KEY");
-    const googleModel = String(this.config.get("GOOGLE_MODEL") ?? "gemini-2.0-flash");
-    if (provider === "google" || provider === "auto" || provider === "openrouter") {
-      if (googleKey && !this.breakerOpen("google")) {
-        const geminiContents = this.geminiContents(messages, opts);
-        // One retry with a short backoff — free-tier 429s are often transient
-        for (let attempt = 0; attempt < 2; attempt++) {
-          try {
-            const res = await axios.post(
-              `https://generativelanguage.googleapis.com/v1beta/models/${googleModel}:generateContent`,
-              {
-                contents: geminiContents,
-                generationConfig: { maxOutputTokens: maxTokens, temperature: 0.6 },
-              },
-              { params: { key: googleKey }, timeout: this.llmTimeoutMs(), signal: opts?.signal },
-            );
-            const text: string = res.data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
-            const ms = Date.now() - start;
-            const promptTokens: number | null = res.data?.usageMetadata?.promptTokenCount ?? null;
-            const completionTokens: number | null =
-              res.data?.usageMetadata?.candidatesTokenCount ?? null;
-            this.logger.log(
-              `LLM(google/${googleModel}) ${ms}ms prompt=${promptTokens ?? "?"} completion=${completionTokens ?? "?"}`,
-            );
-            this.recordSuccess("google");
-            return { text, llmMs: ms, model: googleModel, promptTokens, completionTokens };
-          } catch (err) {
-            const message = this.providerFailureMessage("Google Gemini", err);
-            this.logger.error(message, err instanceof Error ? err.stack : String(err));
-            if (attempt === 0 && !opts?.signal?.aborted) {
-              await new Promise((r) => setTimeout(r, 600));
-              continue;
-            }
-            this.recordFailure("google");
-            if (provider === "google") {
-              throw new ServiceUnavailableException(message);
-            }
-          }
-        }
-      }
     }
 
     this.logger.error("No LLM provider available or configured");
@@ -145,12 +101,13 @@ export class LlmService {
 
     const attempts: Array<() => Promise<LlmResult | null>> = [];
 
-    // OpenRouter first, Gemini as fallback
+    // OpenRouter primary, then OpenRouter fallback model
     if (provider === "openrouter" || provider === "auto") {
       attempts.push(() => this.streamOpenRouter(messages, opts, start, maxTokens, guardedDelta));
-    }
-    if (provider === "google" || provider === "auto" || provider === "openrouter") {
-      attempts.push(() => this.streamGemini(messages, opts, start, maxTokens, guardedDelta));
+      const fallbackModel = this.config.get<string>("OPENROUTER_FALLBACK_MODEL");
+      if (fallbackModel) {
+        attempts.push(() => this.streamOpenRouter(messages, opts, start, maxTokens, guardedDelta, fallbackModel));
+      }
     }
 
     for (const attempt of attempts) {
@@ -170,93 +127,17 @@ export class LlmService {
     throw new ServiceUnavailableException("No LLM provider available or configured");
   }
 
-  private geminiContents(messages: LlmMessage[], opts?: LlmOptions) {
-    // Map messages to Gemini format; prepend system prompt as a user turn if provided
-    const geminiContents: Array<{ role: string; parts: Array<{ text: string }> }> = [];
-    if (opts?.systemPrompt) {
-      // Gemini doesn't have a system role — inject as first user message with model ack
-      geminiContents.push({
-        role: "user",
-        parts: [{ text: `[System]: ${opts.systemPrompt}` }],
-      });
-      geminiContents.push({ role: "model", parts: [{ text: "Understood." }] });
-    }
-    for (const m of messages) {
-      geminiContents.push({
-        role: m.role === "assistant" ? "model" : "user",
-        parts: [{ text: m.content }],
-      });
-    }
-    return geminiContents;
-  }
-
-  private async streamGemini(
-    messages: LlmMessage[],
-    opts: LlmOptions,
-    start: number,
-    maxTokens: number,
-    onDelta: (text: string) => void,
-  ): Promise<LlmResult | null> {
-    const key = this.config.get<string>("GOOGLE_GENERATIVE_AI_API_KEY");
-    const model = String(this.config.get("GOOGLE_MODEL") ?? "gemini-2.0-flash");
-    if (!key || this.breakerOpen("google")) return null;
-    try {
-      const res = await axios.post(
-        `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent`,
-        {
-          contents: this.geminiContents(messages, opts),
-          generationConfig: { maxOutputTokens: maxTokens, temperature: 0.6 },
-        },
-        {
-          params: { key, alt: "sse" },
-          responseType: "stream",
-          timeout: this.llmTimeoutMs(),
-          signal: opts.signal,
-        },
-      );
-      let text = "";
-      let promptTokens: number | null = null;
-      let completionTokens: number | null = null;
-      await this.consumeSse(res.data, (data) => {
-        try {
-          const event = JSON.parse(data);
-          const delta: string = event.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
-          if (delta) {
-            text += delta;
-            onDelta(delta);
-          }
-          if (event.usageMetadata) {
-            promptTokens = event.usageMetadata.promptTokenCount ?? promptTokens;
-            completionTokens = event.usageMetadata.candidatesTokenCount ?? completionTokens;
-          }
-        } catch {
-          // ignore non-JSON SSE payloads
-        }
-      });
-      const ms = Date.now() - start;
-      this.logger.log(`LLM-stream(google/${model}) ${ms}ms completion=${completionTokens ?? "?"}`);
-      this.recordSuccess("google");
-      return { text, llmMs: ms, model, promptTokens, completionTokens };
-    } catch (err) {
-      this.recordFailure("google");
-      this.logger.warn(
-        this.providerFailureMessage("Google Gemini (stream)", err),
-        err instanceof Error ? err.stack : String(err),
-      );
-      throw err;
-    }
-  }
-
   private async streamOpenRouter(
     messages: LlmMessage[],
     opts: LlmOptions,
     start: number,
     maxTokens: number,
     onDelta: (text: string) => void,
+    modelOverride?: string,
   ): Promise<LlmResult | null> {
     const key = this.config.get<string>("OPENROUTER_API_KEY");
     if (!key || this.breakerOpen("openrouter")) return null;
-    const model = String(this.config.get("OPENROUTER_MODEL") ?? "anthropic/claude-haiku-4.5");
+    const model = modelOverride ?? String(this.config.get("OPENROUTER_MODEL") ?? "anthropic/claude-haiku-4-5");
     try {
       const orMessages: Array<{ role: string; content: string }> = [];
       if (opts.systemPrompt) orMessages.push({ role: "system", content: opts.systemPrompt });

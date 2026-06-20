@@ -15,7 +15,7 @@ export class DemoController {
 
   @Get("session")
   async createSession() {
-    const locale = this.config.get<string>("GEMINI_LANGUAGE_DEFAULT") ?? "hi-IN";
+    const locale = this.config.get<string>("CALL_LOCALE_DEFAULT") ?? "hi-IN";
     const token = this.config.get<string>("API_AUTH_TOKEN") ?? "";
 
     const campaign = await this.campaigns.create({

@@ -8,7 +8,7 @@ import {
 import type { Redis } from "ioredis";
 import { DeepgramService } from "../stt/deepgram.service";
 import { DeepgramRealtimeService } from "../stt/deepgram-realtime.service";
-import { LlmService, type LlmMessage } from "../llm/llm.service";
+import { LlmService, type LlmMessage, type LlmResult } from "../llm/llm.service";
 import { ElevenlabsService } from "../tts/elevenlabs.service";
 import { GuardrailService, type GuardrailResult } from "../llm/guardrail.service";
 import { LlmResponseSchema } from "../llm/llm-response.schema";
@@ -116,6 +116,13 @@ export type TurnResult = {
   waitForMore: boolean;
 };
 
+// Carries the output of a speculative LLM run so processUtteranceStream can
+// replay it without calling the LLM again.
+export type PreStreamedData = {
+  deltas: string[];
+  result: LlmResult;
+};
+
 // End the call after this many consecutive silence turns within SILENCE_WINDOW_MS.
 const SILENCE_END_THRESHOLD = 2;
 const SILENCE_WINDOW_MS = 45_000;
@@ -218,26 +225,26 @@ export class CallRuntimeService implements OnApplicationShutdown {
   // Short clips played instantly on utterance-end to mask turn latency.
   fillerTexts(locale: string): string[] {
     return this.isHinglishLocale(locale)
-      ? ["Hmm...", "जी..."]
-      : ["Yeah...", "Okay..."];
+      ? ["जी...", "जी, बिल्कुल...", "बिल्कुल...", "हाँ जी..."]
+      : ["Right...", "Of course...", "Certainly...", "Absolutely...", "Indeed..."];
   }
 
   // Rotating fallback lines used when the LLM fails. Varied so the caller
   // doesn't hear the same phrase on every provider blip. Pre-warmed as clips.
   private readonly FALLBACK_LINES_HI = [
-    "ज़रा एक second — connection थोड़ी slow है, फिर से बोलिए?",
-    "माफ़ करें, आपकी बात पूरी नहीं सुन पाई — क्या आप दोबारा बोल सकते हैं?",
-    "Hmm, थोड़ी आवाज़ नहीं आई — एक बार फिर बताइए?",
-    "Sorry, last part miss हो गया — please फिर से कहिए?",
-    "एक second, network issue लग रहा है — आप क्या कह रहे थे?",
+    "माफ़ करें, आवाज़ थोड़ी unclear आई — एक बार फिर बताइए?",
+    "Sorry, last bit ठीक से नहीं आया — please फिर से बोलिए?",
+    "ज़रा connection issue लग रहा है — आप क्या कह रहे थे?",
+    "माफ़ करें, आपकी बात properly नहीं सुन पाई — दोबारा बोलिए?",
+    "Hmm, आवाज़ बीच में cut हुई — फिर से बता सकते हैं?",
   ];
 
   private readonly FALLBACK_LINES_EN = [
-    "Sorry, I didn't quite catch that — could you say it again?",
-    "Hmm, I missed the last bit — could you repeat that?",
-    "Apologies, there was a small hiccup — what were you saying?",
-    "I'm sorry, I didn't get that clearly — could you say it once more?",
-    "Just a moment — I missed that, could you repeat please?",
+    "Apologies, I didn't quite catch that — could you say it again?",
+    "Sorry, the last part wasn't clear — would you mind repeating?",
+    "I missed that — could you say it once more please?",
+    "Apologies, there was a brief interruption — what were you saying?",
+    "I'm sorry, I didn't get that clearly — could you repeat?",
   ];
 
   apologyText(locale: string): string {
@@ -270,8 +277,10 @@ export class CallRuntimeService implements OnApplicationShutdown {
     locale: string,
   ): Promise<{
     text: string;
-    adopt: (sink: TurnStreamSink, turnIndex: number) => Promise<void>;
     cancel: () => void;
+    // Returns the pre-collected LLM result if the stream completed within the
+    // timeout, or null on failure/timeout — gateway falls back to a fresh turn.
+    getPreStreamed: () => Promise<PreStreamedData | null>;
   }> {
     const state = await this.getOrCreateState(callId, locale);
     const controller = new AbortController();
@@ -280,11 +289,10 @@ export class CallRuntimeService implements OnApplicationShutdown {
       ...state.history,
       { role: "user", content: partialText },
     ];
-    // Collect deltas and sentences as they arrive so adopt() can replay them.
+    // Collect deltas and the final result as they arrive.
     const collectedDeltas: string[] = [];
-    let streamResult: Awaited<ReturnType<typeof this.llm.generateStream>> | null = null;
+    let streamResult: LlmResult | null = null;
     let streamError: unknown = null;
-    let done = false;
 
     const streamPromise = this.llm
       .generateStream(
@@ -297,36 +305,25 @@ export class CallRuntimeService implements OnApplicationShutdown {
         },
         (delta) => collectedDeltas.push(delta),
       )
-      .then((r) => {
-        streamResult = r;
-        done = true;
-      })
-      .catch((err) => {
-        streamError = err;
-        done = true;
-      });
+      .then((r) => { streamResult = r; })
+      .catch((err) => { streamError = err; });
 
     return {
       text: partialText,
       cancel: () => controller.abort(),
-      adopt: async (sink: TurnStreamSink, turnIndex: number) => {
-        // Replay already-collected deltas into the real pipeline, then hand
-        // off the live stream. processUtteranceStream will handle everything
-        // from sentence-splitting onwards normally.
-        if (controller.signal.aborted) return;
-        // Wait for the stream to finish if it hasn't yet, then rerun normally
-        // but with the pre-warmed LLM result injected via the normal path.
-        // Simplest correct approach: just run the full streaming turn; the
-        // LLM start is already ~200-400ms ahead, so the speculative gain is
-        // the reduced wait time before processUtteranceStream's own LLM call.
-        // For a clean implementation without duplicating the pipeline, we
-        // cancel the speculative stream and let processUtteranceStream win
-        // when the transcripts match — the real gain is already in flight.
-        void streamPromise; // suppress unhandled
-        void streamResult;
-        void streamError;
-        void done;
-        controller.abort();
+      getPreStreamed: async () => {
+        if (controller.signal.aborted) return null;
+        // Wait up to 500 ms for the LLM to finish. By the time the utterance
+        // ends and the turn is dequeued, the stream is usually already complete.
+        const timedOut = await Promise.race([
+          streamPromise.then(() => false),
+          new Promise<true>((r) => setTimeout(() => r(true), 500)),
+        ]);
+        if (timedOut || streamError || !streamResult) {
+          controller.abort();
+          return null;
+        }
+        return { deltas: collectedDeltas, result: streamResult };
       },
     };
   }
@@ -507,11 +504,29 @@ export class CallRuntimeService implements OnApplicationShutdown {
     return this.isHinglishLocale(locale) ? this.FALLBACK_LINES_HI : this.FALLBACK_LINES_EN;
   }
 
+  // Short acknowledgment phrases that commonly open a reply. Pre-synthesizing
+  // them means the first sentence of every turn is served from cache with zero
+  // TTS round-trip latency.
+  private readonly ACK_CLIPS_HI = [
+    "Perfect.", "Noted.", "Certainly.", "हाँ, बिल्कुल.", "समझ गई.", "Absolutely.",
+  ];
+  private readonly ACK_CLIPS_EN = [
+    "Perfect.", "Noted.", "Certainly.", "Absolutely.", "Right.", "Of course.",
+  ];
+
+  private ackClips(locale: string): string[] {
+    return this.isHinglishLocale(locale) ? this.ACK_CLIPS_HI : this.ACK_CLIPS_EN;
+  }
+
   async warmCall(callId: string, locale?: string) {
     try {
       const state = await this.getOrCreateState(callId, locale);
       this.tts.prewarmClips(
-        [...this.fillerTexts(state.locale), ...this.allFallbackLines(state.locale)],
+        [
+          ...this.fillerTexts(state.locale),
+          ...this.allFallbackLines(state.locale),
+          ...this.ackClips(state.locale),
+        ],
         { languageCode: this.ttsLanguageCode(state.locale) },
       );
     } catch (err) {
@@ -618,8 +633,8 @@ CALL FLOW — move through these stages in order, naturally, ONE question per tu
 1. OPENING: Introduce yourself — Maya from पिकोरा GROUP. You're calling to invite them for a private preview of an ultra-luxury project in Ahmedabad. Their enquiry came from Facebook/Instagram — "aapne shayad hamare ads social media ya WhatsApp pe dekhe honge". Then ask: "आप 4BHK देख रहे हैं या 5BHK." (end with a period, not a question mark — the voice engine delivers it more naturally that way) (If they mention a bungalow or plot, pivot naturally: "हाँ जी, हमारे पास कुछ exceptional bungalow और plot addresses हैं — आप किस budget में comfortable हैं?") (If they give a carpet/sqft size instead of BHK, accept it: "Certainly — और आप किस budget में comfortable हैं?")
 2. BUDGET: "आप किस budget में comfortable हैं?" Once they give ANY answer — acknowledge with one brief natural phrase that reacts to what they actually said, then move directly to step 3. Do NOT explain why you asked. Do NOT say "इसलिए पूछ रही थी". Do NOT say "multiple sizes हैं". Do NOT say "roughly". Do NOT list price ladders.
 3. LOCATION: Ask which micro-market they prefer. For apartments: "आप Ahmedabad में किस area को prefer करेंगे — ऑफ सिंधु भवन रोड, इस्कॉन-अंबली रोड, ऑफ इस्कॉन-अंबली, थलतेज, नेहरूनगर, या वस्त्रापुर?" For bungalows/plots: "आप किस area को prefer करेंगे — शिलज, वैष्णोदेवी, थलतेज, या नंदोली?" Skip this step if they already named a location earlier.
-4. POSSESSION TIMELINE: Ask naturally — "और possession के बारे में — क्या आप Ready to Move In चाहेंगे, या Under Construction में भी comfortable हैं?" Use their answer to filter inventory before recommending: 'तुरंत'/'ready' → prioritise Ready to Move In; 'जल्दी'/'6-12 महीने' → Near Possession is ideal; '1-2 साल'/'flexible' → Under Construction works well; 'बाद में'/'early stage'/'3+ साल' → Pre-Launch is an option. Skip this step if they already expressed a possession preference earlier in the conversation.
-5. RECOMMEND + INVITE (do BOTH in the same reply — never split into two turns): Using their BHK preference, budget, location, AND possession timeline — consult your PROPERTY INVENTORY and pick the 1-2 best-matching options. Describe each naturally: location, configuration, approx size, and possession stage — like a consultant, not a database entry. Include one lifestyle highlight if it fits. Then in the same reply, invite for site visit: "बस 30 minute लगेंगे — आज 5 बजे या 6 बजे family के साथ आ सकते हैं?" Follow RECOMMENDATION RULES in the inventory section.
+4. POSSESSION TIMELINE: Ask naturally — "और possession के बारे में — क्या अभी possession चाहिए, या थोड़ा wait कर सकते हैं?" CRITICAL: this question uses exactly ONE 'या' — a binary question. NEVER list all four possession stages ('Ready to Move In, Near Possession, या Under Construction') with multiple 'या' in the same sentence. Use their answer to filter inventory before recommending: 'तुरंत'/'ready' → prioritise Ready to Move In; 'जल्दी'/'6-12 महीने' → Near Possession is ideal; '1-2 साल'/'flexible' → Under Construction works well; 'बाद में'/'early stage'/'3+ साल' → Pre-Launch is an option. Skip this step if they already expressed a possession preference earlier in the conversation.
+5. RECOMMEND + INVITE (do BOTH in the same reply — never split into two turns): Using their BHK preference, budget, location, AND possession timeline — consult your PROPERTY INVENTORY and pick the 1-2 best-matching options. Describe each naturally: location, configuration, approx size, and possession stage — like a consultant, not a database entry. Include one lifestyle highlight if it fits. You may open with a brief consultative lead-in before the pitch — "हाँ, उस area में..." or "Actually, ऑफ सिंधु भवन रोड पर एक..." — this sounds like genuine recall. Then in the same reply, invite for site visit: "बस 30 minute लगेंगे — आज 5 बजे या 6 बजे family के साथ आ सकते हैं?" Follow RECOMMENDATION RULES in the inventory section.
    SCHEDULING: Site visits are available 9 AM to 6 PM only. Always pitch 5 बजे और 6 बजे as the default slots. If today doesn't work, offer tomorrow — same two slots. If tomorrow doesn't work, offer the day after — same two slots. Never ask "क्या बिल्कुल time नहीं?" — accept gracefully and pivot: "कोई बात नहीं — परसों कौन-सा time convenient रहेगा?" If the caller names a specific time between 9 AM and 6 PM, confirm it directly without hesitation. If they name a time before 9 AM or after 6 PM, gently redirect: "हमारा office 9 बजे से 6 बजे तक open रहता है — उस timeframe में कौन-सा time आपके लिए convenient रहेगा?"
 6. NAME: Once they confirm a time, immediately ask for their name — "और Sir, आपका नाम क्या है?" (if they already gave their name earlier, skip this step).
 7. CONFIRM: After getting their name, confirm the booking: "Perfect, [Name] Sir. उस slot पर कोई और appointment नहीं रखती — आप directly आ सकते हैं। आपको confirmation और Google Maps location WhatsApp पे मिल जाएगी।"
@@ -631,11 +646,11 @@ If they deflect scheduling ("WhatsApp pe bhejo", "main baad mein call karunga/ka
 
 HOW YOU TALK:
 - Match the customer's language. Hindi → natural Hinglish. English → natural Indian English. Never switch abruptly, never force Hinglish.
-- BREVITY: Short spoken sentences only. Every reply ends with a question — never a statement with no prompt. Max 2–3 sentences total. Never a paragraph, never a brochure.
+- BREVITY: Short spoken sentences only. Every reply ends with a question — never a statement with no prompt. Sometimes one sentence is the whole reply — a crisp acknowledgment + question. Sometimes two. Rarely three. Match the weight of what was said. Never a paragraph, never a brochure.
 - TONE: Calm, composed, confident throughout — the quiet authority of someone who represents Ahmedabad's finest addresses. No sudden spikes in energy. NEVER use an exclamation mark in the first sentence; period only. At most one "!" per reply, mid-reply or end only.
 - FILLER WORDS — CRITICAL: NEVER start a reply with stall words like "ek second", "ek minute", "just a second", "hold on". Respond directly. If you need a moment, the silence is enough — do not narrate it.
 - NAMES — CRITICAL: NEVER append "जी" or "ji" to a name. "Rahul जी" and "Sharma ji" are WRONG. Say "Rahul Sir" or just "Rahul". "जी" is only used standalone ("हाँ जी") or at the start of a reply ("जी, बिल्कुल") — never after a name.
-- ACKNOWLEDGMENTS: One brief phrase that feels genuinely responsive — sometimes just the acknowledgment word, sometimes a micro-reaction to what they actually said. "5BHK — perfect.", "ऑफ सिंधु भवन रोड — excellent choice.", "Ready to Move In — certainly.", "बिल्कुल.", "Noted.", "जी, perfect." — then immediately move forward. Rotate so no two consecutive replies open the same way. Never repeat the exact same phrase twice in a row.
+- ACKNOWLEDGMENTS: One brief phrase that feels genuinely responsive — sometimes just the acknowledgment word, sometimes a micro-reaction to what they actually said. Draw from this pool and rotate — never repeat the same opener twice in a row: "5BHK — perfect.", "ऑफ सिंधु भवन रोड — excellent choice.", "Ready to Move In — certainly.", "बिल्कुल.", "Noted.", "जी, perfect.", "हाँ, बिल्कुल.", "समझ गई.", "Certainly.", "Wonderful.", "Excellent.", "Right.", "हाँ, noted.", "Of course.", "Absolutely." — then immediately move forward.
 - REACTIONS: Brief and composed, not excitable. "Oh, a doctor." / "Bodakdev — excellent choice." / "Fantastic." — then continue. Never "Nice!", "Wow".
 - Natural Hinglish like: "आप family के साथ आ सकते हैं।", "Private preview के बाद सब clear हो जाएगा।", "मैं details WhatsApp पर भेज देती हूँ।"
 - Use ONLY real, common Hindi words. NEVER invent or mash up words — if unsure, use the English word.
@@ -745,8 +760,8 @@ CALL FLOW — move through these stages in order, naturally, ONE question per tu
 1. OPENING: Introduce yourself — Maya from PIKORA Group. (The brand is spelled PIKORUA but the U is silent — always say and write "PIKORA Group" so the voice engine pronounces it correctly.) You're calling to invite them for a private preview of an ultra-luxury project in Ahmedabad. Their enquiry came through Facebook/Instagram — "you might have seen our ads on social media or WhatsApp". Then ask: "Are you looking at a 4BHK or a 5BHK." (end with a period, not a question mark — the voice engine delivers it more naturally that way) (If they mention a bungalow or plot, pivot naturally: "Yes, we have some exceptional bungalow and plot addresses — what budget are you comfortable with?") (If they give a carpet/sqft size instead of BHK, accept it: "Certainly — and what budget are you comfortable with?")
 2. BUDGET: "And what approximate budget are you comfortable with?" Once they give ANY answer — acknowledge with one brief natural phrase that reacts to what they actually said, then move directly to step 3. Do NOT explain why you asked. Do NOT list price ladders.
 3. LOCATION: Ask which micro-market they prefer. For apartments: "Which area of Ahmedabad are you considering — Off Sindhu Bhavan Road, ISKCON-Ambli Road, Off ISKCON-Ambli, Thaltej, Nehrunagar, or Vastrapur?" For bungalows/plots: "Which area are you considering — Shilaj, Vaishnodevi, Thaltej, or Nandoli?" Skip this step if they already named a location.
-4. POSSESSION TIMELINE: Ask naturally — "And in terms of timing — are you looking for something Ready to Move In, or are you comfortable with Under Construction as well?" Use their answer to filter inventory before recommending: 'immediately'/'ready' → prioritise Ready to Move In; 'soon'/'6-12 months' → Near Possession is ideal; '1-2 years'/'flexible' → Under Construction works well; 'early stage'/'3+ years' → Pre-Launch is an option. Skip this step if they already expressed a possession preference earlier in the conversation.
-5. RECOMMEND + INVITE (do BOTH in the same reply — never split into two turns): Using their BHK preference, budget, location, AND possession timeline — consult your PROPERTY INVENTORY and pick the 1-2 best-matching options. Describe each naturally: location, configuration, approx size range, and possession stage — like a consultant, not a database. Include one lifestyle highlight if relevant. Then in the same reply, invite for site visit: "It just takes 30 minutes — you can come with your family. Would today 5 PM or 6 PM work?" Follow RECOMMENDATION RULES in the inventory section.
+4. POSSESSION TIMELINE: Ask naturally — "And in terms of timing — do you need possession soon, or are you comfortable waiting?" CRITICAL: use exactly ONE 'or' — a binary question. NEVER list all four possession stages ('Ready to Move In, Near Possession, or Under Construction') with multiple 'or' in the same sentence. Use their answer to filter inventory before recommending: 'immediately'/'ready' → prioritise Ready to Move In; 'soon'/'6-12 months' → Near Possession is ideal; '1-2 years'/'flexible' → Under Construction works well; 'early stage'/'3+ years' → Pre-Launch is an option. Skip this step if they already expressed a possession preference earlier in the conversation.
+5. RECOMMEND + INVITE (do BOTH in the same reply — never split into two turns): Using their BHK preference, budget, location, AND possession timeline — consult your PROPERTY INVENTORY and pick the 1-2 best-matching options. Describe each naturally: location, configuration, approx size range, and possession stage — like a consultant, not a database. Include one lifestyle highlight if relevant. You may open with a brief consultative lead-in before the pitch — "Let me think — Off Sindhu Bhavan Road..." or "Actually, at Thaltej we have..." — this sounds like genuine recall, not a database lookup. Then in the same reply, invite for site visit: "It just takes 30 minutes — you can come with your family. Would today 5 PM or 6 PM work?" Follow RECOMMENDATION RULES in the inventory section.
    SCHEDULING: Site visits are available 9 AM to 6 PM only. Always pitch 5 PM and 6 PM as the default slots. If today doesn't work, offer tomorrow — same two slots. If tomorrow doesn't work, offer the day after — same two slots. Never ask "Can't you find any time at all?" — accept gracefully and pivot: "No worries — which time works the day after tomorrow?" If the caller names a specific time between 9 AM and 6 PM, confirm it directly without hesitation. If they name a time before 9 AM or after 6 PM, gently redirect: "Our office is open from 9 AM to 6 PM — which time in that window works for you?"
 6. NAME: Once they confirm a time, immediately ask for their name — "And may I know your good name, Sir?" (skip if they already gave it).
 7. CONFIRM: After getting their name, confirm: "Perfect, [Name]. I won't schedule anyone else in that slot — you'll have the floor. You'll receive the confirmation and Google Maps location on WhatsApp shortly."
@@ -759,11 +774,11 @@ If they deflect scheduling ("send it on WhatsApp", "I'll call you back", or go s
 HOW YOU TALK:
 - Natural Indian English — the way an educated, senior professional speaks in Mumbai or Delhi. NEVER British idioms: no "brilliant", "cheers", "lovely", "quid", "whilst", "shall I", "fortnight".
 - If they switch to Hindi, follow them into natural Hinglish. Never switch abruptly.
-- BREVITY: Max 2–3 short sentences per reply. One question per turn. Never a paragraph, never a brochure.
+- BREVITY: Short spoken sentences only. One question per turn. Sometimes one sentence is the whole reply — a crisp acknowledgment + question. Sometimes two. Rarely three. Match the weight of what was said. Never a paragraph, never a brochure.
 - TONE: Calm, composed, confident throughout. No sudden spikes in energy. NEVER use an exclamation mark in the first sentence; period only. At most one "!" per reply, mid-reply or end only.
 - FILLER WORDS — CRITICAL: NEVER start a reply with "one second", "just a moment", "hold on", or any stall phrase. Respond directly.
 - NAMES — CRITICAL: NEVER use "ji" or "Ji" in any form — not after a name, not standalone. Say "[Name] Sir" or just "[Name]".
-- ACKNOWLEDGMENTS: One brief phrase that feels genuinely responsive — sometimes just the acknowledgment word, sometimes a micro-reaction to what they actually said. "5BHK — perfect.", "Off Sindhu Bhavan Road — excellent choice.", "Ready to Move In — certainly.", "Noted.", "Wonderful.", "Understood." — then immediately move forward. Rotate so no two consecutive replies open the same way. Never "Okay nice!", "Got it!", "Nice!".
+- ACKNOWLEDGMENTS: One brief phrase that feels genuinely responsive — sometimes just the acknowledgment word, sometimes a micro-reaction to what they actually said. Draw from this pool and rotate — never repeat the same opener twice in a row: "5BHK — perfect.", "Off Sindhu Bhavan Road — excellent choice.", "Ready to Move In — certainly.", "Noted.", "Wonderful.", "Understood.", "Certainly.", "Absolutely.", "Right.", "Of course.", "Excellent.", "Fantastic.", "Perfect.", "Got it." — then immediately move forward. Never "Okay nice!", "Nice!".
 - REACTIONS: Brief and composed, not excitable. "Oh, a doctor." / "Bodakdev — excellent choice." / "Fantastic." — then continue. Never "Wow!", "That's great!".
 - If their sentence seems cut off, do NOT guess — say "Please go on." and let them finish.
 - If their input is noise or completely unclear — say ONLY "Please go on." or "I'm listening." NEVER mention call quality or audio.
@@ -919,10 +934,16 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
     return Number(this.config.get("TURN_TIMEOUT_MS") ?? 12_000);
   }
 
+  private guardrailFallbackText(locale: string): string {
+    return this.isHinglishLocale(locale)
+      ? "यह जानकारी मैं share नहीं कर सकती — हमारे consultant आपको personally assist करेंगे."
+      : "I'm not able to share that — our consultant will walk you through it in person.";
+  }
+
   private wrapUpText(locale: string): string {
     return this.isHinglishLocale(locale)
-      ? "Sir, हमें अभी call wrap up करनी होगी — हमारी team आपको WhatsApp पे details भेज देगी। Thank you."
-      : "Sir, we'll have to wrap up the call now — our team will send you the details on WhatsApp. Thank you.";
+      ? "Sir, हमारी team आपको WhatsApp पे saari details bhej degi. Thank you."
+      : "Sir, our team will send you all the details on WhatsApp. Thank you.";
   }
 
   // TTS with outage fallback: a transient ElevenLabs failure must not drop a
@@ -1204,7 +1225,7 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
           guardrailRule = semantic.rule;
           spokenReply =
             semantic.replacement?.trim() ||
-            "I'm not able to provide that information. Our consultant will be happy to help.";
+            this.guardrailFallbackText(locale);
           const replacementTts = await this.synthesizeWithFallback(spokenReply, locale, callId);
           audio = replacementTts.audio;
           ttsMs = replacementTts.ttsMs;
@@ -1296,7 +1317,14 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
     callId: string,
     turnIndex: number,
     utteranceText: string,
-    opts: { locale?: string; sttMs?: number; outputFormat?: string },
+    opts: {
+      locale?: string;
+      sttMs?: number;
+      outputFormat?: string;
+      // When set, the LLM call is skipped and these pre-collected deltas are
+      // replayed instead. Used by speculative turn adoption.
+      preStreamed?: PreStreamedData;
+    },
     sink: TurnStreamSink,
   ): Promise<{
     transcript: string;
@@ -1374,34 +1402,75 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
     let pendingText = "";
     let endCallDetected = false;
 
+    // WS streaming path: one persistent ElevenLabs WS session per turn instead
+    // of one HTTP call per sentence. Sentences are dispatched as text frames;
+    // ElevenLabs pipelines them so the next sentence starts generating while the
+    // previous is still playing. Controlled by TTS_WS_STREAMING_ENABLED env var.
+    const useWsStreaming =
+      String(this.config.get("TTS_WS_STREAMING_ENABLED") ?? "false") === "true";
+    let wsSession: ReturnType<typeof this.tts.openWsSession> | null = null;
+    let resolveWsDone: () => void = () => {};
+    const wsAudioDone: Promise<void> | null = useWsStreaming
+      ? new Promise<void>((r) => { resolveWsDone = r; })
+      : null;
+
+    if (useWsStreaming && !turnController.signal.aborted) {
+      wsSession = this.tts.openWsSession({
+        languageCode: this.ttsLanguageCode(locale) ?? "hi",
+        outputFormat: opts.outputFormat,
+        signal: turnController.signal,
+        onChunk: (chunk) => {
+          if (ttfaMs === null) ttfaMs = Date.now() - turnStart;
+          sink.onAudioChunk(chunk, { sentenceIndex: 0, last: false });
+        },
+        onDone: () => {
+          sink.onAudioChunk(Buffer.alloc(0), { sentenceIndex: 0, last: true });
+          resolveWsDone();
+        },
+        onError: (err) => {
+          this.logger.warn(`WS TTS error call=${callId}: ${err}`);
+          resolveWsDone();
+        },
+      });
+    }
+
     const dispatchSentence = (sentence: string) => {
       const text = sentence.trim();
       if (!text || hardTrigger || turnController.signal.aborted) return;
       const hard = this.guardrail.checkHard(text);
       if (hard.triggered) {
         hardTrigger = hard;
+        wsSession?.close(); // stop WS generation immediately on a hard rule hit
         return;
       }
       const idx = sentenceIndex;
       sentenceIndex += 1;
       dispatchedText = dispatchedText ? `${dispatchedText} ${text}` : text;
       sink.onReplyDelta?.(text);
-      ttsQueue = ttsQueue
-        .then(async () => {
-          if (turnController.signal.aborted) return;
-          const res = await streamSentence(text, idx, turnController.signal, () => {
-            if (ttfaMs === null) ttfaMs = Date.now() - turnStart;
+      if (wsSession) {
+        // WS mode: send the sentence to the open session as a text frame.
+        // ElevenLabs pipelines sentences so audio for N+1 starts before N finishes.
+        // sendText normalises for TTS internally.
+        wsSession.sendText(text);
+      } else {
+        // HTTP mode: one streaming call per sentence, serialised through ttsQueue.
+        ttsQueue = ttsQueue
+          .then(async () => {
+            if (turnController.signal.aborted) return;
+            const res = await streamSentence(text, idx, turnController.signal, () => {
+              if (ttfaMs === null) ttfaMs = Date.now() - turnStart;
+            });
+            ttsMsTotal += res.ttsMs;
+          })
+          .catch((err) => {
+            if (!turnController.signal.aborted) {
+              this.logger.warn(
+                `TTS stream failed mid-turn call=${callId}`,
+                err instanceof Error ? err.message : String(err),
+              );
+            }
           });
-          ttsMsTotal += res.ttsMs;
-        })
-        .catch((err) => {
-          if (!turnController.signal.aborted) {
-            this.logger.warn(
-              `TTS stream failed mid-turn call=${callId}`,
-              err instanceof Error ? err.message : String(err),
-            );
-          }
-        });
+      }
     };
 
     const feedDelta = (delta: string) => {
@@ -1439,16 +1508,23 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
       const llmStart = Date.now();
       let llmResolved: Awaited<ReturnType<typeof this.llm.generate>>;
       try {
-        llmResolved = await this.llm.generateStream(
-          state.history,
-          {
-            provider: state.provider,
-            systemPrompt: state.systemPrompt,
-            maxTokens: 1000,
-            signal: turnController.signal,
-          },
-          feedDelta,
-        );
+        if (opts.preStreamed) {
+          // Speculative turn already ran the LLM — replay collected deltas so
+          // the TTS pipeline runs without a second provider call.
+          for (const delta of opts.preStreamed.deltas) feedDelta(delta);
+          llmResolved = opts.preStreamed.result;
+        } else {
+          llmResolved = await this.llm.generateStream(
+            state.history,
+            {
+              provider: state.provider,
+              systemPrompt: state.systemPrompt,
+              maxTokens: 1000,
+              signal: turnController.signal,
+            },
+            feedDelta,
+          );
+        }
       } catch (err) {
         if (sink.signal.aborted || turnController.signal.aborted) {
           return this.finishCanceledTurn(state, dispatchedText, utterance);
@@ -1471,8 +1547,9 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
         if (!dispatchedText) {
           return { transcript: utterance, reply: "", endCall: false, waitForMore: false, canceled: false };
         }
-        // Some sentences were already spoken — end the turn with what was said.
-        await ttsQueue;
+        // Some sentences were already spoken — drain audio then end the turn.
+        wsSession?.flush();
+        await (wsAudioDone ?? ttsQueue);
         state.history.push({ role: "assistant", content: dispatchedText });
         return { transcript: utterance, reply: dispatchedText, endCall: false, waitForMore: false, canceled: false };
       }
@@ -1518,13 +1595,16 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
       // what's spoken.
       state.history.push({ role: "assistant", content: reply });
 
-      // Semantic guardrail runs concurrently with the remaining TTS work.
+      // Tell ElevenLabs no more text is coming so it flushes its audio buffer.
+      wsSession?.flush();
+
+      // Semantic guardrail runs concurrently with the remaining TTS/WS drain.
       const semanticPromise = hardTrigger
         ? Promise.resolve<GuardrailResult>({ triggered: false, rule: null, replacement: null })
         : this.guardrail.checkSemantic(reply).catch((): GuardrailResult => {
             return { triggered: false, rule: null, replacement: null };
           });
-      const [, semantic] = await Promise.all([ttsQueue, semanticPromise]);
+      const [, semantic] = await Promise.all([wsAudioDone ?? ttsQueue, semanticPromise]);
 
       if (sink.signal.aborted) {
         return this.finishCanceledTurn(state, dispatchedText, utterance, /* alreadyPushed */ true);
@@ -1540,8 +1620,9 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
         guardrailRule = replacement.rule;
         spokenReply =
           replacement.replacement?.trim() ||
-          "I'm not able to provide that information. Our consultant will be happy to help.";
+          this.guardrailFallbackText(locale);
         // Drop queued/playing audio on the transport, then speak the safe text.
+        wsSession?.close();
         turnController.abort();
         sink.onCancel?.();
         const replacementController = new AbortController();

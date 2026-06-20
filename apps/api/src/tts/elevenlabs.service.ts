@@ -54,7 +54,6 @@ const ROMAN_HINDI_WORDS: Array<[RegExp, string]> = [
   [/\babhi\b/gi, "अभी"],
   [/\bthoda\b/gi, "थोड़ा"],
   [/\bthodi\b/gi, "थोड़ी"],
-  [/\bzaroor\b/gi, "ज़रूर"],
   [/\bshukriya\b/gi, "शुक्रिया"],
   [/\bdhanyavad\b/gi, "धन्यवाद"],
   [/\bnamaste\b/gi, "नमस्ते"],
@@ -258,9 +257,9 @@ export class ElevenlabsService {
     // moderate stability keeps it steady without monotone; lower style avoids
     // the exaggerated/synthetic feel; high similarity keeps the voice's warmth.
     // All overridable via env so you can tune without a redeploy.
-    const stability = Number(this.config.get("ELEVENLABS_STABILITY") ?? 0.75);
+    const stability = Number(this.config.get("ELEVENLABS_STABILITY") ?? 0.58);
     const similarityBoost = Number(this.config.get("ELEVENLABS_SIMILARITY_BOOST") ?? 0.9);
-    const style = Number(this.config.get("ELEVENLABS_STYLE") ?? 0.1);
+    const style = Number(this.config.get("ELEVENLABS_STYLE") ?? 0.15);
     const modelId = String(this.config.get("ELEVENLABS_MODEL") ?? "eleven_turbo_v2_5");
     // Forcing the language makes the model read romanized Hindi correctly
     // ("aapko", "kya") instead of mangling it with English phonemes. English

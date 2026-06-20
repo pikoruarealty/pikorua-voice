@@ -241,10 +241,12 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
     const controller = new AbortController();
     const active: ActiveTurn = { controller };
     state.active = active;
+    // Reset per-turn speaking flag so the filler fires correctly on every turn.
+    state.speaking = false;
 
     // Filler audio masks LLM latency. Pre-synthesised clips are already cached
     // in ulaw format from the prewarm; first-turn synthesis is instant.
-    const fillerDelay = Number(this.config.get("FILLER_DELAY_MS") ?? 900);
+    const fillerDelay = Number(this.config.get("FILLER_DELAY_MS") ?? 700);
     const fillerTimer =
       fillerDelay > 0
         ? setTimeout(() => void this.sendFiller(client, state, active), fillerDelay)

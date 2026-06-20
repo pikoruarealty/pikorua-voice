@@ -9,7 +9,7 @@ import type { IncomingMessage } from "http";
 import { ConfigService } from "@nestjs/config";
 import { DeepgramLiveService, type LiveSession } from "../stt/deepgram-live.service";
 import { ElevenlabsService } from "../tts/elevenlabs.service";
-import { CallRuntimeService } from "./call-runtime.service";
+import { CallRuntimeService, type PreStreamedData } from "./call-runtime.service";
 import { closeUnauthorized, isWebSocketAuthorized } from "../auth/ws-auth";
 
 type ActiveTurn = {
@@ -22,6 +22,7 @@ type ActiveTurn = {
 type SpeculativeHandle = {
   text: string;
   cancel: () => void;
+  getPreStreamed: () => Promise<PreStreamedData | null>;
 };
 
 // Minimum partial length and confidence threshold for speculative generation.
@@ -46,6 +47,10 @@ type ClientState = {
   fillerIdx: number;
   // In-flight speculative LLM started on a confident partial transcript.
   speculative: SpeculativeHandle | null;
+  // True while a speculateTurn() promise is still resolving. Prevents multiple
+  // concurrent speculative LLM calls from consecutive Deepgram partial events,
+  // which would race on OpenRouter and inflate turn latency.
+  speculativePending: boolean;
 };
 
 // Streaming voice channel: the browser sends 16 kHz PCM16 audio continuously;
@@ -85,6 +90,7 @@ export class DemoVoiceGateway implements OnGatewayConnection, OnGatewayDisconnec
       speaking: false,
       fillerIdx: 0,
       speculative: null,
+      speculativePending: false,
     };
     this.clients.set(client, state);
     this.logger.log("Demo voice client connected");
@@ -126,6 +132,7 @@ export class DemoVoiceGateway implements OnGatewayConnection, OnGatewayDisconnec
     const state = this.clients.get(client);
     state?.active?.controller.abort();
     state?.speculative?.cancel();
+    if (state) state.speculativePending = false;
     state?.stt?.close();
     this.clients.delete(client);
     this.logger.log("Demo voice client disconnected");
@@ -187,19 +194,25 @@ export class DemoVoiceGateway implements OnGatewayConnection, OnGatewayDisconnec
       if (state.speculative && state.speculative.text.toLowerCase() !== normalised) {
         state.speculative.cancel();
         state.speculative = null;
+        state.speculativePending = false;
       }
-      if (!state.speculative) {
+      // Only one speculative LLM call in flight at a time. Without this guard,
+      // consecutive Deepgram partial events (arriving every ~300ms) would each
+      // start a new OpenRouter stream before the previous resolves, racing on
+      // API capacity and adding latency to every real turn that follows.
+      if (!state.speculative && !state.speculativePending) {
+        state.speculativePending = true;
         void this.runtime
           .speculateTurn(state.callId, text.trim(), state.locale)
           .then((handle) => {
-            // Only keep if state hasn't moved on (barge-in / turn already started).
+            state.speculativePending = false;
             if (!state.active && !state.speaking) {
               state.speculative = handle;
             } else {
               handle.cancel();
             }
           })
-          .catch(() => undefined);
+          .catch(() => { state.speculativePending = false; });
       }
     }
 
@@ -207,17 +220,29 @@ export class DemoVoiceGateway implements OnGatewayConnection, OnGatewayDisconnec
   }
 
   private enqueueTurn(client: WebSocket, state: ClientState, utterance: string) {
-    // Cancel any speculative LLM — either it matched (processUtteranceStream
-    // will run normally and is already ~200-400ms ahead in the LLM provider),
-    // or it didn't match (definitely wrong, must discard).
-    if (state.speculative) {
-      state.speculative.cancel();
-      state.speculative = null;
-    }
+    // Capture and clear the speculative handle before queueing so it can't be
+    // mutated by a concurrent partial that arrives while we're awaiting.
+    const specHandle = state.speculative;
+    state.speculative = null;
+
     state.queue = state.queue.then(async () => {
-      if (!state.callId || client.readyState !== WebSocket.OPEN) return;
+      if (!state.callId || client.readyState !== WebSocket.OPEN) {
+        specHandle?.cancel();
+        return;
+      }
       if (state.streaming) {
-        await this.runStreamingTurn(client, state, utterance);
+        // If the final utterance matches the partial the LLM was pre-warming on,
+        // collect the already-finished LLM result so processUtteranceStream can
+        // skip the LLM call entirely.
+        let preStreamed: PreStreamedData | undefined;
+        if (specHandle) {
+          const normalise = (s: string) => s.toLowerCase().trim().replace(/\s+/g, " ");
+          if (normalise(utterance) === normalise(specHandle.text)) {
+            preStreamed = (await specHandle.getPreStreamed()) ?? undefined;
+          }
+          if (!preStreamed) specHandle.cancel();
+        }
+        await this.runStreamingTurn(client, state, utterance, preStreamed);
         return;
       }
       try {
@@ -251,7 +276,12 @@ export class DemoVoiceGateway implements OnGatewayConnection, OnGatewayDisconnec
     });
   }
 
-  private async runStreamingTurn(client: WebSocket, state: ClientState, utterance: string) {
+  private async runStreamingTurn(
+    client: WebSocket,
+    state: ClientState,
+    utterance: string,
+    preStreamed?: PreStreamedData,
+  ) {
     const controller = new AbortController();
     const active: ActiveTurn = { controller, audioSent: false };
     state.active = active;
@@ -259,7 +289,7 @@ export class DemoVoiceGateway implements OnGatewayConnection, OnGatewayDisconnec
 
     // Filler: if no real audio has reached the client shortly after the
     // utterance ended, play a cached "hmm, one second" clip to mask latency.
-    const fillerDelay = Number(this.config.get("FILLER_DELAY_MS") ?? 900);
+    const fillerDelay = Number(this.config.get("FILLER_DELAY_MS") ?? 700);
     const fillerTimer =
       fillerDelay > 0
         ? setTimeout(() => void this.sendFiller(client, state, active), fillerDelay)
@@ -270,7 +300,7 @@ export class DemoVoiceGateway implements OnGatewayConnection, OnGatewayDisconnec
         state.callId as string,
         state.turnIndex,
         utterance,
-        { locale: state.locale },
+        { locale: state.locale, preStreamed },
         {
           signal: controller.signal,
           onReplyDelta: (text) => this.send(client, { type: "reply-chunk", text }),
@@ -328,7 +358,7 @@ export class DemoVoiceGateway implements OnGatewayConnection, OnGatewayDisconnec
     // Signal to the UI that Maya is about to speak before the LLM responds.
     this.send(client, { type: "turn-start", transcript: "" });
 
-    const fillerDelay = Number(this.config.get("FILLER_DELAY_MS") ?? 900);
+    const fillerDelay = Number(this.config.get("FILLER_DELAY_MS") ?? 700);
     const fillerTimer =
       fillerDelay > 0
         ? setTimeout(() => void this.sendFiller(client, state, active), fillerDelay)

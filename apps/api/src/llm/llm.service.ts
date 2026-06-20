@@ -23,7 +23,7 @@ export type LlmOptions = {
 
 // Circuit breaker: after this many consecutive failures a provider is skipped
 // for OPEN_MS so a down provider doesn't add its full timeout to every turn.
-const BREAKER_THRESHOLD = 2;
+const BREAKER_THRESHOLD = 3;
 const BREAKER_OPEN_MS = 30_000;
 
 type ProviderHealth = { consecutiveFailures: number; openUntil: number };
@@ -101,8 +101,10 @@ export class LlmService {
 
     const attempts: Array<() => Promise<LlmResult | null>> = [];
 
-    // OpenRouter primary, then OpenRouter fallback model
+    // OpenRouter primary (up to 3 attempts), then OpenRouter fallback model
     if (provider === "openrouter" || provider === "auto") {
+      attempts.push(() => this.streamOpenRouter(messages, opts, start, maxTokens, guardedDelta));
+      attempts.push(() => this.streamOpenRouter(messages, opts, start, maxTokens, guardedDelta));
       attempts.push(() => this.streamOpenRouter(messages, opts, start, maxTokens, guardedDelta));
       const fallbackModel = this.config.get<string>("OPENROUTER_FALLBACK_MODEL");
       if (fallbackModel) {
@@ -136,7 +138,8 @@ export class LlmService {
     modelOverride?: string,
   ): Promise<LlmResult | null> {
     const key = this.config.get<string>("OPENROUTER_API_KEY");
-    if (!key || this.breakerOpen("openrouter")) return null;
+    const breakerKey = modelOverride ? `openrouter-fallback` : "openrouter";
+    if (!key || this.breakerOpen(breakerKey)) return null;
     const model = modelOverride ?? String(this.config.get("OPENROUTER_MODEL") ?? "anthropic/claude-haiku-4-5");
     try {
       const orMessages: Array<{ role: string; content: string }> = [];
@@ -174,10 +177,10 @@ export class LlmService {
       });
       const ms = Date.now() - start;
       this.logger.log(`LLM-stream(openrouter/${model}) ${ms}ms`);
-      this.recordSuccess("openrouter");
+      this.recordSuccess(breakerKey);
       return { text, llmMs: ms, model, promptTokens: null, completionTokens: null };
     } catch (err) {
-      this.recordFailure("openrouter");
+      this.recordFailure(breakerKey);
       this.logger.warn(
         "OpenRouter stream failed",
         err instanceof Error ? err.stack : String(err),

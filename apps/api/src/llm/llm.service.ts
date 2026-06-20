@@ -67,7 +67,7 @@ export class LlmService {
   async generate(messages: LlmMessage[], opts?: LlmOptions): Promise<LlmResult> {
     const start = Date.now();
     const provider = opts?.provider ?? "auto";
-    const maxTokens = opts?.maxTokens ?? 300;
+    const maxTokens = opts?.maxTokens ?? 400;
 
     // OpenRouter primary
     if ((provider === "openrouter" || provider === "auto") && !this.breakerOpen("openrouter")) {
@@ -90,7 +90,7 @@ export class LlmService {
   ): Promise<LlmResult> {
     const start = Date.now();
     const provider = opts.provider ?? "auto";
-    const maxTokens = opts.maxTokens ?? 300;
+    const maxTokens = opts.maxTokens ?? 400;
     let emitted = false;
     const guardedDelta = (t: string) => {
       if (t) {

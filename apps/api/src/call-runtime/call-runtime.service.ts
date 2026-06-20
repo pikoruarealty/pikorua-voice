@@ -292,7 +292,7 @@ export class CallRuntimeService implements OnApplicationShutdown {
         {
           provider: state.provider,
           systemPrompt: state.systemPrompt,
-          maxTokens: 700,
+          maxTokens: 1000,
           signal: controller.signal,
         },
         (delta) => collectedDeltas.push(delta),
@@ -432,7 +432,7 @@ export class CallRuntimeService implements OnApplicationShutdown {
           {
             provider: state.provider,
             systemPrompt: state.systemPrompt,
-            maxTokens: 700,
+            maxTokens: 1000,
             signal: turnController.signal,
           },
           feedDelta,
@@ -1132,7 +1132,7 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
           provider,
           systemPrompt: state.systemPrompt,
           // Enough headroom for a 2-sentence reply plus the end-call sentinel.
-          maxTokens: 600,
+          maxTokens: 1000,
           signal: turnController.signal,
         });
       } catch (err) {
@@ -1444,7 +1444,7 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
           {
             provider: state.provider,
             systemPrompt: state.systemPrompt,
-            maxTokens: 600,
+            maxTokens: 1000,
             signal: turnController.signal,
           },
           feedDelta,

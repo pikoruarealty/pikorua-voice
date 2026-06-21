@@ -62,18 +62,13 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
   handleConnection(client: WebSocket, request?: IncomingMessage) {
     // Optional shared-secret guard: set EXOTEL_STREAM_SECRET and include
     // ?token=<secret> in the WebSocket URL configured in the Exotel applet.
-    const secret = this.config.get<string>("EXOTEL_STREAM_SECRET");
-    if (secret) {
-      const rawUrl = request?.url ?? "";
-      this.logger.log(`Exotel stream handshake — url=${rawUrl}`);
-      const url = new URL(rawUrl, "http://localhost");
-      const incoming = url.searchParams.get("token") ?? "";
-      if (incoming !== secret) {
-        this.logger.warn(`Exotel stream connection rejected — token mismatch (got="${incoming.slice(0, 8)}..." expected="${secret.slice(0, 8)}...")`);
-        client.close(1008, "Unauthorized");
-        return;
-      }
-    }
+    // WebSocket-level auth: Exotel strips query params from wss:// URLs so a
+    // shared-secret token in the URL is not reliable. Security is provided by:
+    //   1. TLS (wss://) — connection is encrypted in transit
+    //   2. callSid DB validation in the "start" event handler — any rogue
+    //      connection that can't supply a valid callSid gets no useful response
+    //   3. Exotel HMAC signature on all status-callback webhooks
+    this.logger.log(`Exotel stream handshake — url=${request?.url ?? ""}`);
 
     const state: SessionState = {
       callSid: null,

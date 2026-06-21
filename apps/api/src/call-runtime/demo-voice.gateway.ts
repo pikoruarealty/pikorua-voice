@@ -44,7 +44,6 @@ type ClientState = {
   active: ActiveTurn | null;
   // True while the client is (probably) playing assistant audio.
   speaking: boolean;
-  fillerIdx: number;
   // In-flight speculative LLM started on a confident partial transcript.
   speculative: SpeculativeHandle | null;
   // True while a speculateTurn() promise is still resolving. Prevents multiple
@@ -88,7 +87,6 @@ export class DemoVoiceGateway implements OnGatewayConnection, OnGatewayDisconnec
       streaming: false,
       active: null,
       speaking: false,
-      fillerIdx: 0,
       speculative: null,
       speculativePending: false,
     };
@@ -107,7 +105,6 @@ export class DemoVoiceGateway implements OnGatewayConnection, OnGatewayDisconnec
           state.locale = String(msg.language ?? "hi-IN");
           state.streaming = msg.streaming === true;
           const sampleRate = Number(msg.sampleRate ?? 16000);
-          // Warm call state + filler clips so the first turn is fast.
           if (state.callId) void this.runtime.warmCall(state.callId, state.locale);
           state.stt = this.openSttSession(client, state, sampleRate, false);
           // Play Maya's opening greeting immediately — she speaks first.
@@ -287,14 +284,6 @@ export class DemoVoiceGateway implements OnGatewayConnection, OnGatewayDisconnec
     state.active = active;
     this.send(client, { type: "turn-start", transcript: utterance });
 
-    // Filler: if no real audio has reached the client shortly after the
-    // utterance ended, play a cached "hmm, one second" clip to mask latency.
-    const fillerDelay = Number(this.config.get("FILLER_DELAY_MS") ?? 700);
-    const fillerTimer =
-      fillerDelay > 0
-        ? setTimeout(() => void this.sendFiller(client, state, active), fillerDelay)
-        : null;
-
     try {
       const result = await this.runtime.processUtteranceStream(
         state.callId as string,
@@ -343,7 +332,6 @@ export class DemoVoiceGateway implements OnGatewayConnection, OnGatewayDisconnec
         message: err instanceof Error ? err.message : "Turn processing failed",
       });
     } finally {
-      if (fillerTimer) clearTimeout(fillerTimer);
       if (state.active === active) state.active = null;
     }
   }
@@ -357,12 +345,6 @@ export class DemoVoiceGateway implements OnGatewayConnection, OnGatewayDisconnec
 
     // Signal to the UI that Maya is about to speak before the LLM responds.
     this.send(client, { type: "turn-start", transcript: "" });
-
-    const fillerDelay = Number(this.config.get("FILLER_DELAY_MS") ?? 700);
-    const fillerTimer =
-      fillerDelay > 0
-        ? setTimeout(() => void this.sendFiller(client, state, active), fillerDelay)
-        : null;
 
     try {
       const result = await this.runtime.generateGreetingStream(
@@ -401,26 +383,11 @@ export class DemoVoiceGateway implements OnGatewayConnection, OnGatewayDisconnec
         err instanceof Error ? err.message : String(err),
       );
     } finally {
-      if (fillerTimer) clearTimeout(fillerTimer);
       if (state.active === active) {
         state.active = null;
         state.speaking = false;
       }
     }
-  }
-
-  private async sendFiller(client: WebSocket, state: ClientState, active: ActiveTurn) {
-    if (active.audioSent || active.controller.signal.aborted) return;
-    const texts = this.runtime.fillerTexts(state.locale);
-    const text = texts[state.fillerIdx % texts.length];
-    state.fillerIdx += 1;
-    const clip = await this.tts.getClip(text, {
-      languageCode: state.locale.toLowerCase().startsWith("en") ? "en" : undefined,
-    });
-    // Re-check: real audio may have arrived while the clip synthesized.
-    if (!clip || active.audioSent || active.controller.signal.aborted) return;
-    state.speaking = true;
-    this.send(client, { type: "filler", audioBase64: clip.toString("base64") });
   }
 
   private send(client: WebSocket, payload: Record<string, unknown>) {

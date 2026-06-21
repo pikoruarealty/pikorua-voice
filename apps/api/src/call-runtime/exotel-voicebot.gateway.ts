@@ -6,7 +6,6 @@ import {
 import { WebSocket, RawData } from "ws";
 import { Injectable, Inject, Logger } from "@nestjs/common";
 import type { IncomingMessage } from "http";
-import { ConfigService } from "@nestjs/config";
 import { DeepgramLiveService, type LiveSession } from "../stt/deepgram-live.service";
 import { ElevenlabsService } from "../tts/elevenlabs.service";
 import { CallRuntimeService } from "./call-runtime.service";
@@ -29,7 +28,6 @@ type SessionState = {
   queue: Promise<void>;
   speaking: boolean;
   active: ActiveTurn | null;
-  fillerIdx: number;
 };
 
 // Exotel Voicebot WebSocket gateway.
@@ -55,7 +53,6 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
     private readonly deepgramLive: DeepgramLiveService,
     private readonly tts: ElevenlabsService,
     private readonly runtime: CallRuntimeService,
-    private readonly config: ConfigService,
     @Inject(CallRepository) private readonly callRepo: CallRepository,
   ) {}
 
@@ -79,7 +76,6 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
       queue: Promise.resolve(),
       speaking: false,
       active: null,
-      fillerIdx: 0,
     };
     this.sessions.set(client, state);
     this.logger.log("Exotel voicebot connection opened");
@@ -160,13 +156,8 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
           `Exotel stream start: callSid=${callSid} callId=${state.callId} locale=${state.locale}`,
         );
 
-        // Warm conversation state and prewarm filler clips in telephony format
-        // while the first utterance is still being spoken.
+        // Warm conversation state while the first utterance is still being spoken.
         void this.runtime.warmCall(state.callId, state.locale);
-        this.tts.prewarmClips(this.runtime.fillerTexts(state.locale), {
-          outputFormat: EXOTEL_OUTPUT_FORMAT,
-          languageCode: state.locale.toLowerCase().startsWith("en") ? "en" : undefined,
-        });
 
         state.stt = this.openSttSession(client, state);
         break;
@@ -239,16 +230,7 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
     const controller = new AbortController();
     const active: ActiveTurn = { controller };
     state.active = active;
-    // Reset per-turn speaking flag so the filler fires correctly on every turn.
     state.speaking = false;
-
-    // Filler audio masks LLM latency. Pre-synthesised clips are already cached
-    // in ulaw format from the prewarm; first-turn synthesis is instant.
-    const fillerDelay = Number(this.config.get("FILLER_DELAY_MS") ?? 700);
-    const fillerTimer =
-      fillerDelay > 0
-        ? setTimeout(() => void this.sendFiller(client, state, active), fillerDelay)
-        : null;
 
     try {
       const result = await this.runtime.processUtteranceStream(
@@ -299,27 +281,8 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
         err instanceof Error ? err.stack : String(err),
       );
     } finally {
-      if (fillerTimer) clearTimeout(fillerTimer);
       if (state.active === active) state.active = null;
     }
-  }
-
-  private async sendFiller(
-    client: WebSocket,
-    state: SessionState,
-    active: ActiveTurn,
-  ) {
-    if (state.speaking || active.controller.signal.aborted) return;
-    const texts = this.runtime.fillerTexts(state.locale);
-    const text = texts[state.fillerIdx % texts.length];
-    state.fillerIdx += 1;
-    const clip = await this.tts.getClip(text, {
-      outputFormat: EXOTEL_OUTPUT_FORMAT,
-      languageCode: state.locale.toLowerCase().startsWith("en") ? "en" : undefined,
-    });
-    if (!clip || state.speaking || active.controller.signal.aborted) return;
-    state.speaking = true;
-    this.send(client, { event: "media", media: { payload: clip.toString("base64") } });
   }
 
   private send(client: WebSocket, payload: Record<string, unknown>) {

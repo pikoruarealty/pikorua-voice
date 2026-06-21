@@ -7,7 +7,11 @@ import { SERVICE } from "@pikorua/shared";
 import { WorkerModule } from "./worker.module";
 
 async function bootstrap() {
-  const app = await NestFactory.createApplicationContext(WorkerModule);
+  // Render's free tier only offers "web service" hosting (no Background
+  // Worker on the free plan). A bare HTTP listener on PORT lets this run as
+  // a free web service — Render's health check just needs something to hit.
+  // Switch back to createApplicationContext once on a paid Background Worker.
+  const app = await NestFactory.create(WorkerModule, { logger: ["log", "warn", "error"] });
   app.enableShutdownHooks();
 
   const logger = new Logger(SERVICE.WORKER);
@@ -30,7 +34,9 @@ async function bootstrap() {
     process.exit(1);
   }
 
-  logger.log(`${SERVICE.WORKER} ready — dial, postcall, and CRM-retry workers running`);
+  const port = Number(process.env.PORT ?? 10000);
+  await app.listen(port, "0.0.0.0");
+  logger.log(`${SERVICE.WORKER} ready — dial, postcall, and CRM-retry workers running (health on :${port})`);
 
   const shutdown = async (signal: string) => {
     logger.log(`Received ${signal} — shutting down`);

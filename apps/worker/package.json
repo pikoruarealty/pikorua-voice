@@ -12,6 +12,7 @@
     "@nestjs/common": "^10.4.15",
     "@nestjs/config": "^3.3.0",
     "@nestjs/core": "^10.4.15",
+    "@nestjs/platform-express": "^10.4.15",
     "@pikorua/db": "workspace:*",
     "@pikorua/shared": "workspace:*",
     "ioredis": "^5.4.1",

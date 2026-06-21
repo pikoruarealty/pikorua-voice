@@ -93,13 +93,18 @@ services:
       - key: CRM_API_TOKEN
         sync: false
 
-  # ── Worker (BullMQ dial queue + Exotel outbound dialing — no public HTTP) ──
-  - type: worker
+  # ── Worker (BullMQ dial queue + Exotel outbound dialing) ───────────────────
+  # NOTE: deployed as `type: web` (not `worker`) because Render's free tier
+  # has no Background Worker plan. A bare /health endpoint satisfies Render's
+  # web-service health check. Switch to `type: worker` once on a paid plan —
+  # it spins down on idle and the first dial after idle pays a ~30s cold start.
+  - type: web
     name: pikorua-voice-worker
     plan: free
     env: docker
     dockerfilePath: ./apps/worker/Dockerfile
     dockerContext: .
+    healthCheckPath: /health
     envVars:
       - key: NODE_ENV
         value: production

@@ -416,8 +416,19 @@ export class ElevenlabsService {
 
     let ws: WebSocket | null = null;
     let closed = false;
+    // Separate from `closed`: guarantees onDone fires exactly once whenever the
+    // session ends, including when WE forced the close (guardrail hit, abort,
+    // barge-in) — those are exactly the cases where the caller most needs to be
+    // unblocked, not suppressed.
+    let finished = false;
     const pendingTexts: string[] = [];
     let wsOpen = false;
+
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      opts.onDone();
+    };
 
     const flushPending = () => {
       for (const t of pendingTexts) {
@@ -450,22 +461,24 @@ export class ElevenlabsService {
     });
 
     socket.on("message", (data) => {
+      if (closed) return; // drop stale audio after a guardrail/abort-triggered close
       try {
         const msg = JSON.parse(data.toString());
         if (msg.audio) {
           const chunk = Buffer.from(msg.audio, "base64");
           if (chunk.length > 0) opts.onChunk(chunk);
         }
-        if (msg.isFinal) opts.onDone();
+        if (msg.isFinal) finish();
       } catch {}
     });
 
     socket.on("error", (err) => {
       if (!closed) opts.onError(err.message);
+      finish();
     });
 
     socket.on("close", () => {
-      if (!closed) opts.onDone();
+      finish();
     });
 
     opts.signal?.addEventListener("abort", () => {

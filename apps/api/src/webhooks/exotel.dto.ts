@@ -13,9 +13,9 @@ export const exotelWebhookSchema = z
     Digits: z.string().optional(),
     Direction: z.string().optional(),
     Event: z.string().optional(),
-    RecordingUrl: z.string().optional(),
-    HangupCause: z.string().optional(),
-    ConversationDuration: z.union([z.string(), z.number()]).optional(),
+    RecordingUrl: z.string().nullable().optional(),
+    HangupCause: z.string().nullable().optional(),
+    ConversationDuration: z.union([z.string(), z.number()]).nullable().optional(),
     Sid: z.string().optional(),
   })
   .passthrough();

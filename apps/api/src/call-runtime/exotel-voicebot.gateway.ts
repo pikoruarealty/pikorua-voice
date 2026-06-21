@@ -64,9 +64,12 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
     // ?token=<secret> in the WebSocket URL configured in the Exotel applet.
     const secret = this.config.get<string>("EXOTEL_STREAM_SECRET");
     if (secret) {
-      const url = new URL(request?.url ?? "", "http://localhost");
-      if (url.searchParams.get("token") !== secret) {
-        this.logger.warn("Exotel stream connection rejected — invalid token");
+      const rawUrl = request?.url ?? "";
+      this.logger.log(`Exotel stream handshake — url=${rawUrl}`);
+      const url = new URL(rawUrl, "http://localhost");
+      const incoming = url.searchParams.get("token") ?? "";
+      if (incoming !== secret) {
+        this.logger.warn(`Exotel stream connection rejected — token mismatch (got="${incoming.slice(0, 8)}..." expected="${secret.slice(0, 8)}...")`);
         client.close(1008, "Unauthorized");
         return;
       }

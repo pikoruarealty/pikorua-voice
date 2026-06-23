@@ -330,6 +330,7 @@ export class CallRuntimeService implements OnApplicationShutdown {
     callId: string,
     locale: string,
     sink: TurnStreamSink,
+    opts?: { outputFormat?: string },
   ): Promise<{ reply: string; canceled: boolean; skipped: boolean }> {
     const state = await this.getOrCreateState(callId, locale);
 
@@ -357,6 +358,7 @@ export class CallRuntimeService implements OnApplicationShutdown {
       let first = true;
       const res = await this.tts.synthesizeStream(text, {
         languageCode: this.replyLanguageCode(text, state.locale),
+        outputFormat: opts?.outputFormat,
         signal: turnController.signal,
         onChunk: (chunk) => {
           if (first) {

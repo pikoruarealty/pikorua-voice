@@ -221,6 +221,7 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
             this.send(client, { event: "clear" });
           },
         },
+        { outputFormat: EXOTEL_OUTPUT_FORMAT },
       );
 
       if (!result.skipped && !result.canceled) {

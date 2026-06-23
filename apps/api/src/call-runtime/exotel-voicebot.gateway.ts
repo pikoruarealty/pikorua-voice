@@ -11,34 +11,49 @@ import { ElevenlabsService } from "../tts/elevenlabs.service";
 import { CallRuntimeService } from "./call-runtime.service";
 import { CallRepository } from "@pikorua/db";
 
-// Exotel sends 16-bit linear PCM at 8 kHz over the WebSocket.
-// ElevenLabs ulaw_8000 matches G.711 telephony — Exotel plays it directly.
-const EXOTEL_OUTPUT_FORMAT = "ulaw_8000";
+// Exotel's Voicebot WebSocket carries raw 16-bit linear PCM, 8 kHz, mono,
+// little-endian (slin/s16le) in BOTH directions — confirmed against Exotel's
+// streaming docs. ElevenLabs "pcm_8000" returns exactly this (headerless raw
+// PCM), so Exotel plays it back without transcoding. (ulaw_8000 was wrong:
+// µ-law bytes read as linear PCM is structured noise — the crackling.)
+const EXOTEL_OUTPUT_FORMAT = "pcm_8000";
 const EXOTEL_SAMPLE_RATE = 8000;
 
-// Buffer ulaw chunks per sentence; return a callback compatible with onAudioChunk.
-// Exotel requires complete, frame-aligned audio payloads — streaming HTTP chunks
-// are not frame-aligned and cause crackling. Accumulate and flush on info.last.
-function makeAudioSink(
-  onSentence: (buf: Buffer, sentenceIndex: number) => void,
-  onMark: (sentenceIndex: number) => void,
-): (chunk: Buffer, info: { sentenceIndex: number; last: boolean }) => void {
-  const buffers = new Map<number, Buffer[]>();
-  return (chunk, info) => {
-    if (chunk.length > 0) {
-      const acc = buffers.get(info.sentenceIndex) ?? [];
-      acc.push(chunk);
-      buffers.set(info.sentenceIndex, acc);
+// Exotel requires media frames to be a multiple of 320 bytes (20 ms @ 8 kHz,
+// 16-bit mono); the recommended frame is ~100 ms (3200 bytes) and a single
+// frame must stay ≤ 100 KB. ElevenLabs streams PCM in arbitrary HTTP chunk
+// sizes, so we re-frame: accumulate bytes and emit fixed 3200-byte frames,
+// padding the final flush with silence (zeros) up to a 320-byte boundary.
+const EXOTEL_FRAME_BYTES = 3200; // 100 ms
+const EXOTEL_FRAME_ALIGN = 320; // 20 ms — Exotel's required multiple
+
+class PcmReframer {
+  private buf: Buffer = Buffer.alloc(0);
+
+  constructor(private readonly emit: (frame: Buffer) => void) {}
+
+  push(chunk: Buffer) {
+    if (chunk.length === 0) return;
+    this.buf = this.buf.length ? Buffer.concat([this.buf, chunk]) : chunk;
+    while (this.buf.length >= EXOTEL_FRAME_BYTES) {
+      this.emit(this.buf.subarray(0, EXOTEL_FRAME_BYTES));
+      this.buf = this.buf.subarray(EXOTEL_FRAME_BYTES);
     }
-    if (info.last) {
-      const acc = buffers.get(info.sentenceIndex);
-      if (acc && acc.length > 0) {
-        onSentence(Buffer.concat(acc), info.sentenceIndex);
-        buffers.delete(info.sentenceIndex);
-      }
-      onMark(info.sentenceIndex);
-    }
-  };
+  }
+
+  // Emit the remaining bytes, padded with PCM silence (0x00) to a 320-byte
+  // multiple so Exotel accepts the final partial frame. Called once at the end
+  // of a turn; on barge-in/cancel we drop the remainder instead.
+  flush() {
+    if (this.buf.length === 0) return;
+    const remainder = this.buf.length % EXOTEL_FRAME_ALIGN;
+    const frame =
+      remainder === 0
+        ? this.buf
+        : Buffer.concat([this.buf, Buffer.alloc(EXOTEL_FRAME_ALIGN - remainder)]);
+    this.emit(frame);
+    this.buf = Buffer.alloc(0);
+  }
 }
 
 type ActiveTurn = { controller: AbortController };
@@ -65,7 +80,7 @@ type SessionState = {
 //   stop       → caller hung up / stream ended
 //
 // This gateway sends back:
-//   media      → base64 ulaw_8000 audio for the bot's reply
+//   media      → base64 pcm_8000 (raw 16-bit linear PCM) audio for the reply
 //   mark       → logical milestone (sentence boundary)
 //   clear      → discard queued bot audio (barge-in)
 @Injectable()
@@ -221,23 +236,27 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
     const controller = new AbortController();
     state.active = { controller };
 
+    const reframer = new PcmReframer((frame) => {
+      state.speaking = true;
+      this.send(client, {
+        event: "media",
+        media: { payload: frame.toString("base64") },
+      });
+    });
+
     try {
       const result = await this.runtime.generateGreetingStream(
         state.callId,
         state.locale,
         {
           signal: controller.signal,
-          onAudioChunk: makeAudioSink(
-            (buf, idx) => {
-              state.speaking = true;
-              this.send(client, {
-                event: "media",
-                media: { payload: buf.toString("base64") },
-              });
-              this.send(client, { event: "mark", mark: { name: `g${idx}` } });
-            },
-            (_idx) => { /* mark already sent with the audio above */ },
-          ),
+          onAudioChunk: (chunk, info) => {
+            if (chunk.length > 0) {
+              reframer.push(chunk);
+            } else if (info.last) {
+              this.send(client, { event: "mark", mark: { name: `g${info.sentenceIndex}` } });
+            }
+          },
           onCancel: () => {
             state.speaking = false;
             this.send(client, { event: "clear" });
@@ -246,6 +265,11 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
         { outputFormat: EXOTEL_OUTPUT_FORMAT },
       );
 
+      // Drain the final partial frame only on a clean finish; on barge-in the
+      // remainder is intentionally dropped (we already sent "clear").
+      if (!result.canceled && !controller.signal.aborted) {
+        reframer.flush();
+      }
       if (!result.skipped && !result.canceled) {
         state.speaking = false;
       }
@@ -302,6 +326,14 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
     state.active = active;
     state.speaking = false;
 
+    const reframer = new PcmReframer((frame) => {
+      state.speaking = true;
+      this.send(client, {
+        event: "media",
+        media: { payload: frame.toString("base64") },
+      });
+    });
+
     try {
       const result = await this.runtime.processUtteranceStream(
         state.callId!,
@@ -310,23 +342,26 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
         { locale: state.locale, outputFormat: EXOTEL_OUTPUT_FORMAT },
         {
           signal: controller.signal,
-          onAudioChunk: makeAudioSink(
-            (buf, idx) => {
-              state.speaking = true;
-              this.send(client, {
-                event: "media",
-                media: { payload: buf.toString("base64") },
-              });
-              this.send(client, { event: "mark", mark: { name: `s${idx}` } });
-            },
-            (_idx) => { /* mark already sent with the audio above */ },
-          ),
+          onAudioChunk: (chunk, info) => {
+            if (chunk.length > 0) {
+              reframer.push(chunk);
+            } else if (info.last) {
+              // Sentence boundary — let Exotel track playback progress.
+              this.send(client, { event: "mark", mark: { name: `s${info.sentenceIndex}` } });
+            }
+          },
           onCancel: () => {
             state.speaking = false;
             this.send(client, { event: "clear" });
           },
         },
       );
+
+      // Drain the final partial frame only on a clean finish; on barge-in the
+      // remainder is intentionally dropped (we already sent "clear").
+      if (!result.canceled && !controller.signal.aborted) {
+        reframer.flush();
+      }
 
       if (!result.waitForMore && !result.canceled) {
         state.stt?.clearBuffer();

@@ -221,7 +221,8 @@ export type SynthesizeOptions = {
   // Overrides ELEVENLABS_LANGUAGE_CODE for this request (e.g. "en" for
   // English-locale calls so number words come out in English).
   languageCode?: string;
-  // Telephony output (e.g. "ulaw_8000" for Exotel/Twilio media streams).
+  // Telephony output: "pcm_8000" for Exotel (raw 16-bit linear PCM, 8 kHz),
+  // "ulaw_8000" for Twilio (G.711 µ-law) media streams.
   outputFormat?: string;
 };
 

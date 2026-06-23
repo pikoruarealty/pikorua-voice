@@ -16,6 +16,31 @@ import { CallRepository } from "@pikorua/db";
 const EXOTEL_OUTPUT_FORMAT = "ulaw_8000";
 const EXOTEL_SAMPLE_RATE = 8000;
 
+// Buffer ulaw chunks per sentence; return a callback compatible with onAudioChunk.
+// Exotel requires complete, frame-aligned audio payloads — streaming HTTP chunks
+// are not frame-aligned and cause crackling. Accumulate and flush on info.last.
+function makeAudioSink(
+  onSentence: (buf: Buffer, sentenceIndex: number) => void,
+  onMark: (sentenceIndex: number) => void,
+): (chunk: Buffer, info: { sentenceIndex: number; last: boolean }) => void {
+  const buffers = new Map<number, Buffer[]>();
+  return (chunk, info) => {
+    if (chunk.length > 0) {
+      const acc = buffers.get(info.sentenceIndex) ?? [];
+      acc.push(chunk);
+      buffers.set(info.sentenceIndex, acc);
+    }
+    if (info.last) {
+      const acc = buffers.get(info.sentenceIndex);
+      if (acc && acc.length > 0) {
+        onSentence(Buffer.concat(acc), info.sentenceIndex);
+        buffers.delete(info.sentenceIndex);
+      }
+      onMark(info.sentenceIndex);
+    }
+  };
+}
+
 type ActiveTurn = { controller: AbortController };
 
 type SessionState = {
@@ -202,20 +227,17 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
         state.locale,
         {
           signal: controller.signal,
-          onAudioChunk: (chunk, info) => {
-            if (chunk.length > 0) {
+          onAudioChunk: makeAudioSink(
+            (buf, idx) => {
               state.speaking = true;
               this.send(client, {
                 event: "media",
-                media: { payload: chunk.toString("base64") },
+                media: { payload: buf.toString("base64") },
               });
-            } else if (info.last) {
-              this.send(client, {
-                event: "mark",
-                mark: { name: `g${info.sentenceIndex}` },
-              });
-            }
-          },
+              this.send(client, { event: "mark", mark: { name: `g${idx}` } });
+            },
+            (_idx) => { /* mark already sent with the audio above */ },
+          ),
           onCancel: () => {
             state.speaking = false;
             this.send(client, { event: "clear" });
@@ -288,21 +310,17 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
         { locale: state.locale, outputFormat: EXOTEL_OUTPUT_FORMAT },
         {
           signal: controller.signal,
-          onAudioChunk: (chunk, info) => {
-            if (chunk.length > 0) {
+          onAudioChunk: makeAudioSink(
+            (buf, idx) => {
               state.speaking = true;
               this.send(client, {
                 event: "media",
-                media: { payload: chunk.toString("base64") },
+                media: { payload: buf.toString("base64") },
               });
-            } else if (info.last) {
-              // Sentence boundary — let Exotel know so it can track progress.
-              this.send(client, {
-                event: "mark",
-                mark: { name: `s${info.sentenceIndex}` },
-              });
-            }
-          },
+              this.send(client, { event: "mark", mark: { name: `s${idx}` } });
+            },
+            (_idx) => { /* mark already sent with the audio above */ },
+          ),
           onCancel: () => {
             state.speaking = false;
             this.send(client, { event: "clear" });

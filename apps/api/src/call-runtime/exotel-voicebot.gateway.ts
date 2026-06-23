@@ -156,8 +156,9 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
           `Exotel stream start: callSid=${callSid} callId=${state.callId} locale=${state.locale}`,
         );
 
-        // Warm conversation state while the first utterance is still being spoken.
+        // Warm clip cache and fire opening greeting concurrently.
         void this.runtime.warmCall(state.callId, state.locale);
+        void this.sendGreeting(client, state);
 
         state.stt = this.openSttSession(client, state);
         break;
@@ -186,6 +187,52 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
         state.stt?.close();
         state.stt = null;
         break;
+    }
+  }
+
+  private async sendGreeting(client: WebSocket, state: SessionState): Promise<void> {
+    if (!state.callId || client.readyState !== WebSocket.OPEN) return;
+
+    const controller = new AbortController();
+    state.active = { controller };
+
+    try {
+      const result = await this.runtime.generateGreetingStream(
+        state.callId,
+        state.locale,
+        {
+          signal: controller.signal,
+          onAudioChunk: (chunk, info) => {
+            if (chunk.length > 0) {
+              state.speaking = true;
+              this.send(client, {
+                event: "media",
+                media: { payload: chunk.toString("base64") },
+              });
+            } else if (info.last) {
+              this.send(client, {
+                event: "mark",
+                mark: { name: `g${info.sentenceIndex}` },
+              });
+            }
+          },
+          onCancel: () => {
+            state.speaking = false;
+            this.send(client, { event: "clear" });
+          },
+        },
+      );
+
+      if (!result.skipped && !result.canceled) {
+        state.speaking = false;
+      }
+    } catch (err) {
+      this.logger.error(
+        `Greeting failed callId=${state.callId}`,
+        err instanceof Error ? err.stack : String(err),
+      );
+    } finally {
+      if (state.active?.controller === controller) state.active = null;
     }
   }
 

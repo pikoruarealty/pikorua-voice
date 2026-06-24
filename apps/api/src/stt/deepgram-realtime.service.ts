@@ -26,7 +26,7 @@ export class DeepgramRealtimeService {
     const url = `wss://api.deepgram.com/v1/realtime?encoding=linear16&sample_rate=${sampleRate}&channels=1&language=${encodeURIComponent(language)}`;
     const ws = new WebSocket(url, {
       headers: {
-        Authorization: `Bearer ${apiKey}`,
+        Authorization: `Token ${apiKey}`,
       },
     });
 

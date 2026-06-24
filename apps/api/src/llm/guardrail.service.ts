@@ -87,10 +87,7 @@ export class GuardrailService {
   // Semantic guardrail via LLM — catches paraphrases and indirect violations.
   // Falls back gracefully to the hard check result if the LLM is unavailable.
   async checkSemantic(text: string): Promise<GuardrailResult> {
-    // Opt-in: env vars arrive as strings, so compare against "true" explicitly.
-    // The previous `=== false` check never matched a string, so the semantic
-    // LLM call (a full extra round-trip ~1s/turn) ran even when disabled.
-    if (String(this.config.get("GUARDRAIL_SEMANTIC_ENABLED") ?? "false") !== "true") {
+    if (this.config.get<boolean>("GUARDRAIL_SEMANTIC_ENABLED") !== true) {
       return { triggered: false, rule: null, replacement: null };
     }
 

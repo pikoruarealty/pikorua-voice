@@ -31,9 +31,13 @@ export function nextDialWindowAt(campaign: Campaign, now: Date): Date | null {
   }
 
   // Build the next window-open timestamp in UTC.
-  // Start from midnight IST of the current UTC day, add the appropriate offset.
+  // Start from midnight IST of the CURRENT IST date. We must derive the IST
+  // date independently — between 18:30 and 23:59 UTC the IST calendar date is
+  // one day ahead of the UTC date, so using getUTCDate() directly would yield
+  // yesterday's IST midnight and a nextAttemptAt in the past.
+  const istNowDate = new Date(now.getTime() + IST_OFFSET_MINUTES * 60_000);
   const istMidnightUtcMs =
-    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) -
+    Date.UTC(istNowDate.getUTCFullYear(), istNowDate.getUTCMonth(), istNowDate.getUTCDate()) -
     IST_OFFSET_MINUTES * 60_000;
 
   const targetDayOffset = currentMinutes < startMinutes ? 0 : 1;

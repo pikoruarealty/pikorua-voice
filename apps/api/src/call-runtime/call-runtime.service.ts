@@ -975,8 +975,8 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
     const locale = String(call?.locale ?? this.config.get("CALL_LOCALE_DEFAULT") ?? "hi-IN");
 
     const sttStart = Date.now();
-    const useRealtime = String(this.config.get("STT_REALTIME_ENABLED") ?? "false") === "true";
-    const useLowLatency = String(this.config.get("STT_STREAMING_ENABLED") ?? "false") === "true";
+    const useRealtime = this.config.get<boolean>("STT_REALTIME_ENABLED") === true;
+    const useLowLatency = this.config.get<boolean>("STT_STREAMING_ENABLED") === true;
     let sttResult: { text: string; sttMs?: number };
     if (useRealtime) {
       sttResult = await this.sttRealtime

@@ -333,6 +333,10 @@ export class DemoVoiceGateway implements OnGatewayConnection, OnGatewayDisconnec
       });
     } finally {
       if (state.active === active) state.active = null;
+      // If TTS emitted audio before throwing, the client never receives
+      // "playback-done" — reset speaking so barge-in detection doesn't
+      // stay permanently armed for this session.
+      if (active.audioSent) state.speaking = false;
     }
   }
 

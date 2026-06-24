@@ -382,7 +382,10 @@ export class ElevenlabsService {
     // All overridable via env so you can tune without a redeploy.
     const stability = Number(this.config.get("ELEVENLABS_STABILITY") ?? 0.58);
     const similarityBoost = Number(this.config.get("ELEVENLABS_SIMILARITY_BOOST") ?? 0.9);
-    const style = Number(this.config.get("ELEVENLABS_STYLE") ?? 0.15);
+    // Style controls expressiveness. Nudged to 0.30 for a warmer, smiling
+    // delivery (a friendly young woman) without going so high that stability
+    // drops and the voice starts to waver.
+    const style = Number(this.config.get("ELEVENLABS_STYLE") ?? 0.3);
     const modelId = String(this.config.get("ELEVENLABS_MODEL") ?? "eleven_turbo_v2_5");
     // Forcing the language makes the model read romanized Hindi correctly
     // ("aapko", "kya") instead of mangling it with English phonemes. English

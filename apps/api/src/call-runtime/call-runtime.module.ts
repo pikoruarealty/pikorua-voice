@@ -1,6 +1,5 @@
 import { Module } from "@nestjs/common";
 import { DeepgramService } from "../stt/deepgram.service";
-import { DeepgramRealtimeService } from "../stt/deepgram-realtime.service";
 import { DeepgramLiveService } from "../stt/deepgram-live.service";
 import { DemoVoiceGateway } from "./demo-voice.gateway";
 import { ExotelVoicebotGateway } from "./exotel-voicebot.gateway";
@@ -21,7 +20,6 @@ import { IvrService } from "../ivr/ivr.service";
 @Module({
   providers: [
     DeepgramService,
-    DeepgramRealtimeService,
     DeepgramLiveService,
     DemoVoiceGateway,
     ExotelVoicebotGateway,

@@ -49,7 +49,6 @@ export const envSchema = z
     CALL_LOCALE_DEFAULT: z.string().max(16).default("hi-IN"),
     LLM_PROVIDER_OVERRIDE: optionalLlmProvider,
     GUARDRAIL_SEMANTIC_ENABLED: booleanFlag.default(true),
-    STT_REALTIME_ENABLED: booleanFlag.default(false),
     STT_STREAMING_ENABLED: booleanFlag.default(false),
     TTS_WS_STREAMING_ENABLED: booleanFlag.default(false),
 

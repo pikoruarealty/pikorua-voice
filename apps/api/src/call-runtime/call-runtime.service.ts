@@ -7,7 +7,6 @@ import {
 } from "@nestjs/common";
 import type { Redis } from "ioredis";
 import { DeepgramService } from "../stt/deepgram.service";
-import { DeepgramRealtimeService } from "../stt/deepgram-realtime.service";
 import { LlmService, type LlmMessage, type LlmResult } from "../llm/llm.service";
 import { ElevenlabsService } from "../tts/elevenlabs.service";
 import { GuardrailService, type GuardrailResult } from "../llm/guardrail.service";
@@ -145,7 +144,6 @@ export class CallRuntimeService implements OnApplicationShutdown {
 
   constructor(
     private readonly stt: DeepgramService,
-    private readonly sttRealtime: DeepgramRealtimeService,
     private readonly llm: LlmService,
     private readonly tts: ElevenlabsService,
     private readonly guardrail: GuardrailService,
@@ -975,20 +973,9 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
     const locale = String(call?.locale ?? this.config.get("CALL_LOCALE_DEFAULT") ?? "hi-IN");
 
     const sttStart = Date.now();
-    const useRealtime = this.config.get<boolean>("STT_REALTIME_ENABLED") === true;
     const useLowLatency = this.config.get<boolean>("STT_STREAMING_ENABLED") === true;
     let sttResult: { text: string; sttMs?: number };
-    if (useRealtime) {
-      sttResult = await this.sttRealtime
-        .transcribeRealtime(audioBuffer, 16000, 5000, locale)
-        .catch(async (err) => {
-          this.logger.warn(
-            "Realtime STT failed, falling back to low-latency",
-            err instanceof Error ? err.stack : String(err),
-          );
-          return this.stt.transcribeLowLatency(audioBuffer, "audio/wav", 300, locale);
-        });
-    } else if (useLowLatency) {
+    if (useLowLatency) {
       sttResult = await this.stt.transcribeLowLatency(audioBuffer, "audio/wav", 300, locale);
     } else {
       sttResult = await this.stt.transcribeBuffer(audioBuffer, "audio/wav", locale);

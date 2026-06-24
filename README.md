@@ -1,112 +1,531 @@
 # Pikorua Voice
 
-Standalone outbound voice-concierge service for Pikorua Realty. It places campaign calls over Exotel, runs a Deepgram → LLM → ElevenLabs conversation loop, scores each lead, and syncs results back to the Pikorua CRM over REST.
+Outbound AI voice concierge for ultra-luxury real estate. The system places calls via Exotel, runs a real-time STT → LLM → TTS pipeline, and books site-visit appointments — without a human agent in the loop.
 
-> **Standalone repository.** This service owns its PostgreSQL database and Redis
-> instance and never touches the CRM database directly — all CRM communication
-> is over REST.
+> **Standalone repository.** This service owns its PostgreSQL and Redis instances. All CRM communication is over REST — it never touches the CRM database directly.
 
-## Stack
+---
 
-| Layer          | Technology                                            |
-| -------------- | ----------------------------------------------------- |
-| Runtime        | Node.js 20, TypeScript 5.7                            |
-| API            | NestJS 10 (`apps/api`)                                |
-| Worker         | NestJS standalone context + BullMQ (`apps/worker`)    |
-| Database       | PostgreSQL 16 + Drizzle ORM 0.44 (`packages/db`)      |
-| Queue / Cache  | Redis 7 + BullMQ                                      |
-| Validation     | Zod (`packages/shared`)                               |
-| Telephony      | Exotel                                                |
-| Speech-to-Text | Deepgram                                              |
-| Text-to-Speech | ElevenLabs                                            |
-| LLM            | OpenRouter/Claude Haiku 4.5 (primary) · Google Gemini (fallback) |
-| Monorepo       | pnpm workspaces + Turborepo                           |
+## Architecture
 
-## Language & Routing
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    apps/api  (port 4100)                        │
+│                                                                 │
+│  ExotelVoicebotGateway  ── WS  /exotel-stream                   │
+│  DemoVoiceGateway       ── WS  /demo-voice                      │
+│  CallRuntimeController  ── POST /api/calls/:id/turns            │
+│  CampaignController     ── POST /api/campaigns                  │
+│  WebhookController      ── POST /api/webhooks/exotel            │
+│  HealthController       ── GET  /api/health                     │
+│  MetricsController      ── GET  /api/metrics                    │
+│                                                                 │
+│  ┌─ CallRuntimeService ─────────────────────────────────────┐   │
+│  │  getOrCreateState → buildSystemPrompt (DB + inventory)   │   │
+│  │  processUtteranceStream → LLM stream → sentence split    │   │
+│  │            └→ TTS stream (per sentence or WS session)    │   │
+│  │  generateGreetingStream → Maya speaks first              │   │
+│  │  speculateTurn → pre-warm LLM on confident partials      │   │
+│  └──────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│  STT:   DeepgramLiveService  (WS, VAD endpointing, live path)   │
+│         DeepgramService      (HTTP buffer, REST path only)      │
+│  LLM:   LlmService → OpenRouter  (streaming SSE + CB)          │
+│  TTS:   ElevenlabsService    (HTTP stream per sentence / WS)    │
+│  Guard: GuardrailService     (hard regex + optional LLM check)  │
+└─────────────────────────────────────────────────────────────────┘
+         │ BullMQ (Redis)                    │ BullMQ (Redis)
+         │ postcall queue                    │ dial queue
+         ▼                                   ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                      apps/worker                                │
+│                                                                 │
+│  DialService          ── places outbound calls via Exotel API   │
+│  DialRepairScheduler  ── re-queues stuck pending targets/60 s   │
+│  PostCallWorker       ── scores leads, syncs to CRM             │
+│  CrmRetryWorker       ── retries failed CRM syncs (5 min cron)  │
+└─────────────────────────────────────────────────────────────────┘
+         │ Drizzle ORM
+         ▼
+┌─────────────┐   ┌───────────────────────────┐
+│  PostgreSQL  │   │  Redis (BullMQ + L2 state) │
+│  (Neon)      │   │  call_state:<id>  3h TTL   │
+└─────────────┘   └───────────────────────────┘
+```
 
-- Primary language mix: Hindi primary (~60%), English (~25%), Gujarati (~15%).
-- Current implemented voice stack:
-  - STT: Deepgram buffered or realtime helper.
-  - LLM: OpenRouter (Claude Haiku 4.5) primary, Google Gemini fallback.
-  - TTS: ElevenLabs.
-- IVR mapping: Press 1 = English, Press 2 = Hindi, Press 3 = Gujarati. Default/no press = Hindi.
+---
 
-## Call volume assumptions & billing
+## Tech stack
 
-- Expected total calls: 5,000/month = 1,000 inbound + 4,000 outbound.
-- Outbound answer rate ~50% → ~2,000 no-answers (no AI cost). Expected AI-billed connected calls ≈ 3,000.
-- Budget: ₹30,000/month (locked). Estimated monthly cost after language/traffic split ≈ ₹26,000–28,500.
+| Layer | Technology |
+|---|---|
+| Runtime | Node.js 20, TypeScript 5 |
+| Framework | NestJS 10 |
+| Monorepo | Turborepo + pnpm workspaces |
+| Database | PostgreSQL via Neon (serverless) |
+| ORM | Drizzle ORM |
+| Queue | BullMQ on Redis (Upstash) |
+| STT | Deepgram Nova-2 (WebSocket live streaming) |
+| LLM | OpenRouter → Claude Haiku 4-5 (streaming SSE) |
+| TTS | ElevenLabs Turbo v2.5 (HTTP stream or WebSocket) |
+| Telephony | Exotel Voicebot WebSocket |
 
-## Config / ENV additions
+---
 
-- `GEMINI_LANGUAGE_DEFAULT` — default language sent to Gemini when call locale absent (default `hi-IN`).
-- `LLM_PROVIDER_OVERRIDE` — optional `openrouter`, `google`, or `auto` override for local/provider testing.
-- `GUARDRAIL_SEMANTIC_ENABLED` — set `false` for low-quota local demos; hard keyword guardrails still run.
-
-## Production notes
-
-- Public HTTP routes are mounted under `/api`; for example Exotel posts to `/api/webhooks/exotel`.
-- Internal HTTP routes require `Authorization: Bearer API_AUTH_TOKEN` or `x-api-key` when `API_AUTH_TOKEN` is configured; production requires it.
-- WebSocket endpoints (`/media-ingress`, `/realtime-stt`) use the same token model via `Authorization`, `x-api-key`, or `?token=...`.
-- Exotel outbound calls include `StatusCallback` pointing at `PUBLIC_BASE_URL/api/webhooks/exotel`.
-- Webhooks, CRM syncs, and dial jobs use deterministic idempotency keys.
-- Dialing windows are enforced by the worker before provider calls are created; outside-window targets are deferred.
-- Health returns HTTP 503 when PostgreSQL or Redis is unhealthy.
-- `/api/metrics` exposes process and HTTP request counters and is protected by API auth.
-- In production, provider secrets required for the active voice path are validated at boot.
-- Post-call scoring prefers caller transcript turns and falls back to the full transcript only for legacy data.
-
-## Layout
+## Repository layout
 
 ```
 pikorua-voice/
-├─ apps/
-│  ├─ api/         NestJS HTTP service (webhooks, runtime, REST)   → :4100
-│  └─ worker/      BullMQ dial worker (outbound calling)
-├─ packages/
-│  ├─ db/          Drizzle schema + client + migrations
-│  └─ shared/      Zod schemas + shared TypeScript types
-├─ docker-compose.yml   postgres:16 (:5433) + redis:7 (:6380)
-├─ pnpm-workspace.yaml
-├─ turbo.json
-└─ .env.example
+├── apps/
+│   ├── api/                        # Voice API process
+│   │   └── src/
+│   │       ├── auth/               # API token guard + WS auth
+│   │       ├── call-runtime/       # Core turn pipeline + gateways
+│   │       │   ├── call-runtime.service.ts     # LLM/TTS orchestration
+│   │       │   ├── exotel-voicebot.gateway.ts  # Exotel WS handler
+│   │       │   └── demo-voice.gateway.ts       # Browser demo WS
+│   │       ├── campaign/           # Campaign CRUD + dial queue
+│   │       ├── config/             # Zod env schema
+│   │       ├── demo/               # Browser demo session endpoint
+│   │       ├── health/             # DB + Redis health probe
+│   │       ├── ivr/                # DTMF digit → locale mapping
+│   │       ├── llm/                # OpenRouter client + guardrails
+│   │       ├── metrics/            # In-process Prometheus metrics
+│   │       ├── postcall/           # BullMQ producer (postcall queue)
+│   │       ├── redis/              # Shared Redis client module
+│   │       ├── stt/                # Deepgram clients
+│   │       ├── tts/                # ElevenLabs client + TTS normalizer
+│   │       └── webhooks/           # Exotel status callbacks
+│   └── worker/                     # Async worker process
+│       └── src/
+│           ├── config/             # Worker Zod env schema
+│           ├── dial/               # Dial queue worker + window enforcement
+│           └── postcall/           # Lead scoring + CRM sync
+└── packages/
+    ├── db/                         # Drizzle schema + repositories
+    └── shared/                     # Shared constants (SERVICE names)
 ```
 
-## Ports (distinct from the CRM / ai-leads repos so all three run together)
+---
 
-| Service    | Host port |
-| ---------- | --------- |
-| API        | 4100      |
-| PostgreSQL | 5433      |
-| Redis      | 6380      |
-
-## Getting started
+## Local setup
 
 ```bash
-cp .env.example .env        # adjust values as needed
-docker compose up -d        # start PostgreSQL + Redis
-pnpm install                # install workspace dependencies
-pnpm build                  # build packages + apps in dependency order
-pnpm dev                    # run api + worker in watch mode
+# 1. Install dependencies
+pnpm install
+
+# 2. Copy env and fill in values
+cp .env.example .env
+
+# 3. Start local PostgreSQL + Redis (or use Neon + Upstash URLs in .env)
+docker compose up -d
+
+# 4. Apply DB migrations (also runs automatically on API start)
+pnpm db:migrate
+
+# 5. Start both processes
+pnpm dev
 ```
 
-Verify the API is up:
+`pnpm dev` starts the API on `:4100` and the worker in watch mode.
+The browser demo UI is served at `http://localhost:4100/`.
+
+Verify the API:
+```bash
+curl http://localhost:4100/api/health
+# → { "status": "ok", "details": { "uptimeMs": ..., "database": "ok", "redis": "ok" } }
+```
+
+---
+
+## Scripts
 
 ```bash
-curl http://localhost:4100/api
-# → { "status": "ok", "service": "pikorua-voice-api", "timestamp": "..." }
+pnpm dev              # run api + worker in watch mode (Turborepo)
+pnpm build            # build all packages + apps
+pnpm type-check       # typecheck the whole workspace
+pnpm format           # prettier --write
+pnpm db:generate      # generate Drizzle migration SQL
+pnpm db:migrate       # apply pending migrations
+pnpm db:studio        # open Drizzle Studio
 ```
 
-## Scripts (repo root)
+---
 
-```bash
-pnpm dev           # run all apps (turbo)
-pnpm build         # build all packages + apps
-pnpm type-check    # type-check the whole workspace
-pnpm test          # build + production hardening regression tests
-pnpm format        # prettier --write
-pnpm db:generate   # generate Drizzle migration SQL (from Step 3)
-pnpm db:migrate    # apply pending migrations
-pnpm staging:providers # validate provider credentials; set RUN_LIVE_PROVIDER_SMOKE=true for live auth checks
-pnpm db:studio     # open Drizzle Studio
+## Call flow
+
 ```
+1. Campaign created → POST /api/campaigns  (status: "active" enqueues targets)
+2. DialService places outbound call → Exotel API
+3. Exotel connects call, opens WebSocket to /exotel-stream
+4. Gateway generates Maya's opening greeting (LLM + TTS, streamed)
+5. Deepgram Live streams caller audio → onPartial / onUtterance callbacks
+6. onPartial  → barge-in detection: abort active turn + send Exotel "clear"
+7. onUtterance → enqueueTurn → runTurn
+     └→ processUtteranceStream:
+          ├── noise/filler guard (isNoisyTranscript)
+          ├── fragment-merge (mid-thought detection)
+          ├── LLM generateStream (OpenRouter, 3 retries + fallback)
+          ├── feedDelta: sentence boundary split → dispatchSentence
+          ├── dispatchSentence: hard guardrail check → TTS stream
+          ├── PcmReframer: pad to 320-byte Exotel frame boundary
+          └── semantic guardrail concurrent with TTS drain
+8. Exotel webhook → "completed" → PostCallWorker
+     └→ LLM lead scoring → CRM sync
+```
+
+---
+
+## Audio pipeline (Exotel ↔ ElevenLabs)
+
+Exotel speaks and listens in **raw 16-bit linear PCM, 8 kHz, mono, little-endian** in both directions. ElevenLabs `pcm_8000` output format produces exactly this — no transcoding step needed.
+
+Exotel requires frames to be a **multiple of 320 bytes** (20 ms per frame at 8 kHz). The `PcmReframer` class accumulates ElevenLabs HTTP chunks and emits 3200-byte frames (100 ms), zero-padding the final frame if needed.
+
+---
+
+## STT — Deepgram Live
+
+`DeepgramLiveService` opens a persistent WebSocket to Deepgram Nova-2 per call.
+
+| Parameter | Value | Purpose |
+|---|---|---|
+| `endpointing` | 300 ms | VAD sensitivity (silence threshold) — set once on connect, never changed |
+| `utterance_end_ms` | 1400 ms | Hard utterance boundary; 400 ms after short acks |
+
+After a short acknowledgment ("haan", "ok") `utterance_end_ms` is tightened to **400 ms** via a Deepgram `Configure` message, making the bot respond faster. It restores to 1400 ms on the next full utterance.
+
+The session reconnects up to 3 times with exponential backoff (300 → 600 → 1200 ms) on unexpected close. Audio buffers during reconnect (up to 200 chunks / ~20 s).
+
+---
+
+## LLM — OpenRouter
+
+`LlmService.generateStream` sends streaming SSE to OpenRouter:
+
+1. Up to **3 attempts** on the primary model (`OPENROUTER_MODEL`, default `anthropic/claude-haiku-4-5`)
+2. One attempt on `OPENROUTER_FALLBACK_MODEL` if configured
+3. Circuit breaker: after 3 consecutive failures a provider is skipped for 30 s
+
+A per-turn watchdog (`TURN_TIMEOUT_MS`, default 12 s) aborts in-flight provider calls if the whole turn overruns.
+
+**Speculative generation** (demo gateway only): the LLM is pre-warmed on a confident partial transcript (≥ 4 words) before VAD fires. If the final utterance matches, the pre-collected deltas are replayed — saving 200–400 ms of turn latency.
+
+---
+
+## TTS — ElevenLabs
+
+Two modes, controlled by `TTS_WS_STREAMING_ENABLED`:
+
+| Mode | How | Characteristic |
+|---|---|---|
+| HTTP (default) | One `/stream` request per sentence | ~200–400 ms to first byte per sentence |
+| WS streaming | One persistent WS session per turn; sentences sent as text frames | True pipelining — next sentence generates while previous plays |
+
+`normalizeForTts` runs on every reply before synthesis:
+- Devanagari respellings for Indian proper nouns (`crore` → `करोड़`, `ISKCON` → `इस्कॉन`)
+- Romanized Hindi → Devanagari (`aapko` → `आपको`, `bilkul` → `बिल्कुल`)
+- BHK expansion: `4BHK` → `चार BHK` (Hindi) / `four BHK` (English)
+- Number-to-words with Indian grouping (lakh/crore), skipping years/times/percentages
+- Hard-block: `"take care"` → `"Thank you."`
+
+---
+
+## Guardrails
+
+Two independent layers, both per sentence:
+
+**Hard rules** (synchronous, zero API cost — always on):
+
+| Rule | Pattern | Replacement |
+|---|---|---|
+| `pricing_claim` | "exact price", "costs ₹", "quote you" | Refer to consultant |
+| `roi_guarantee` | "guaranteed return", "will definitely appreciate" | No return promises |
+| `legal_advice` | "you should consult a lawyer", "your legal right" | Refer to legal professional |
+| `tax_advice` | "you can save tax", "under section 80" | Refer to tax advisor |
+| `fabricated_inventory` | "only N units left", "almost sold out" | Refer to consultant |
+
+**Semantic guardrail** (`GUARDRAIL_SEMANTIC_ENABLED=true`, default): concurrent LLM check using Claude Haiku (max 150 tokens). Catches paraphrased violations the regex misses. If triggered, audio already playing is dropped via `onCancel` and a safe replacement is synthesized.
+
+---
+
+## Maya persona
+
+Maya is PIKORUA GROUP's AI relationship manager. Key invariants:
+
+- **Feminine Hindi verb forms only** — `बोल रही हूँ` not `बोल रहा हूँ`
+- **All Hindi in Devanagari** — never romanized in prompt output
+- **NEVER disclose prices** — pricing is for internal budget-matching only (three independent layers: prompt, hard guardrail, semantic guardrail)
+- **"PIKORUA GROUP" pronounced "पिकोरा GROUP"** — the U is silent
+- **Sign-off is exactly "Thank you."** — never "take care", "have a nice day"
+- **One question per turn**, short spoken sentences
+- **9-step call flow**: intro → BHK preference → budget → location → possession timeline → recommend project + invite → collect name → confirm appointment → know-them → close
+
+The property inventory (14 rows, 5 Ahmedabad micro-markets) is embedded in the system prompt. Internal prices are marked `[internal]` and used only for budget-matching (±1 Cr tolerance) — they are never spoken.
+
+**Sub-₹2 Cr callers**: Maya collects all details without inviting for a site visit, then closes with "Our team will personally reach out to you." The reason is never revealed.
+
+---
+
+## Barge-in
+
+Server-authoritative barge-in: when `onPartial` fires with ≥ 4 characters while the bot is speaking:
+
+1. `state.active.controller.abort()` — cancels in-flight LLM/TTS
+2. `send({ event: "clear" })` — tells Exotel to drop its audio queue
+3. `state.speaking = false` — resets the flag
+
+The `finally` block of every `runTurn`/`runStreamingTurn` path unconditionally resets `state.speaking = false`, so a failed or interrupted turn never leaves the flag permanently armed.
+
+---
+
+## Call state — two-level cache
+
+```
+L1: Map<callId, CallState>       in-process, zero-latency reads
+L2: Redis key call_state:<id>    cross-instance, crash recovery (3-hour TTL)
+```
+
+`persistState` writes to Redis fire-and-forget after every turn. On L1 miss the service loads from Redis before rebuilding cold from DB. `clearHistory` deletes both when a webhook signals a terminal call status.
+
+---
+
+## Dial window
+
+Campaigns can restrict dialing to a time window (`dialWindowStart` / `dialWindowEnd` in HH:MM, **IST**). `nextDialWindowAt` returns the next window-open timestamp in UTC. The IST calendar date is derived independently of the UTC date so calls are deferred correctly during the 18:30–23:59 UTC window (IST midnight to 05:29 AM).
+
+---
+
+## Database schema
+
+| Table | Purpose |
+|---|---|
+| `campaigns` | Dial batch — name, status, locale, dial window, max attempts |
+| `campaign_targets` | Dial list — phone, locale, dial status, attempt count |
+| `calls` | One row per call attempt — provider SID, status, timestamps |
+| `call_turns` | Per-turn transcript + latency (STT/LLM/TTS ms) + token usage |
+| `lead_scores` | Post-call score (0–100), label (hot/warm/cold), timeline |
+| `crm_sync_log` | Every CRM REST sync attempt with idempotency key |
+| `call_events` | Operational events: HOT alerts, guardrail blocks, escalations |
+| `webhook_events` | Raw Exotel webhooks with HMAC signature verification status |
+
+Turn row convention: caller turns use `turnIndex * 2`, assistant turns use `turnIndex * 2 + 1` — adjacent and ordered correctly.
+
+---
+
+## Environment variables
+
+### apps/api
+
+| Variable | Default | Description |
+|---|---|---|
+| `NODE_ENV` | `development` | |
+| `API_PORT` | `4100` | HTTP listen port |
+| `API_AUTH_TOKEN` | — | Bearer token for REST + WS auth; required in production |
+| `DATABASE_URL` | required | PostgreSQL connection string |
+| `REDIS_URL` | required | Redis connection string |
+| `EXOTEL_SID` | — | Exotel account SID |
+| `EXOTEL_API_KEY` | — | Exotel API key |
+| `EXOTEL_API_TOKEN` | — | Exotel API token |
+| `EXOTEL_SUBDOMAIN` | `api.exotel.com` | |
+| `EXOTEL_CALLER_ID` | — | ExoPhone (virtual number) |
+| `EXOTEL_APP_ID` | — | Voicebot App ID from Exotel dashboard |
+| `EXOTEL_WEBHOOK_SECRET` | — | HMAC secret for webhook signature verification |
+| `EXOTEL_STREAM_SECRET` | — | Optional shared secret for `/exotel-stream` WS endpoint |
+| `PUBLIC_BASE_URL` | `http://localhost:4100` | Used for Exotel status callback URL |
+| `CALL_LOCALE_DEFAULT` | `hi-IN` | Fallback locale when none is set on the call |
+| `LLM_PROVIDER_OVERRIDE` | — | `openrouter` or `auto` (leave blank for auto) |
+| `GUARDRAIL_SEMANTIC_ENABLED` | `true` | Enable LLM semantic guardrail (set `false` for local demos) |
+| `STT_STREAMING_ENABLED` | `false` | Use low-latency buffered STT in REST turn path |
+| `TTS_WS_STREAMING_ENABLED` | `false` | Use ElevenLabs WS streaming instead of HTTP per sentence |
+| `LLM_TIMEOUT_MS` | `3000` | Per-provider LLM timeout |
+| `OPENROUTER_TIMEOUT_MS` | `4000` | OpenRouter-specific timeout |
+| `TTS_TIMEOUT_MS` | `8000` | ElevenLabs request timeout |
+| `TURN_TIMEOUT_MS` | `12000` | Per-turn watchdog; aborts LLM+TTS on overrun |
+| `CALL_MAX_DURATION_MS` | `900000` | Hard call length cap (15 min); `0` = disabled |
+| `LLM_HISTORY_MAX_MESSAGES` | `20` | Sliding-window history cap |
+| `DEEPGRAM_API_KEY` | required (prod) | |
+| `ELEVENLABS_API_KEY` | required (prod) | |
+| `ELEVENLABS_VOICE_ID` | required (prod) | Indian multilingual voice ID |
+| `ELEVENLABS_STABILITY` | `0.65` | Voice stability (0–1) |
+| `ELEVENLABS_SIMILARITY_BOOST` | `0.9` | Voice similarity boost (0–1) |
+| `ELEVENLABS_STYLE` | `0.1` | Style exaggeration (keep low) |
+| `ELEVENLABS_MODEL` | `eleven_turbo_v2_5` | |
+| `ELEVENLABS_LANGUAGE_CODE` | `hi` | Forces Hindi phonetics for romanized Hindi |
+| `OPENROUTER_API_KEY` | required (prod) | |
+| `OPENROUTER_MODEL` | `anthropic/claude-haiku-4-5` | Primary LLM model |
+| `OPENROUTER_FALLBACK_MODEL` | — | Optional second model if primary fails |
+| `CRM_API_BASE_URL` | `http://localhost:4000` | |
+| `CRM_API_TOKEN` | — | |
+
+### apps/worker
+
+| Variable | Default | Description |
+|---|---|---|
+| `LLM_SCORING_PROVIDER` | `auto` | `openrouter` or `auto` |
+| `LLM_SCORING_MODEL` | — | Override model for lead scoring (defaults to `OPENROUTER_MODEL`) |
+
+Worker inherits all Exotel, Redis, DB, and OpenRouter vars from the shared `.env`.
+
+---
+
+## API reference
+
+### Campaigns
+
+```
+POST /api/campaigns
+Authorization: Bearer <API_AUTH_TOKEN>
+Content-Type: application/json
+
+{
+  "name": "Ahmedabad Launch — June 2026",
+  "status": "active",
+  "defaultLocale": "hi-IN",
+  "dialWindowStart": "09:00",
+  "dialWindowEnd": "18:00",
+  "targets": [
+    { "phone": "+919876543210", "fullName": "Ravi Shah", "locale": "hi-IN" }
+  ]
+}
+```
+
+Setting `status: "active"` immediately enqueues all targets for dialing.
+
+### REST turn API (non-telephony path)
+
+```
+POST /api/calls/:callId/turns
+Authorization: Bearer <API_AUTH_TOKEN>
+Content-Type: application/json
+
+{ "turnIndex": 0, "audioBase64": "<base64 WAV>" }
+
+→ { "audioBase64": "...", "transcript": "...", "reply": "...", "endCall": false }
+```
+
+### Health
+
+```
+GET /api/health
+→ { "status": "ok", "details": { "uptimeMs": ..., "database": "ok", "redis": "ok" } }
+```
+
+Returns HTTP 503 when either dependency is unhealthy.
+
+### Metrics
+
+```
+GET /api/metrics
+Authorization: Bearer <API_AUTH_TOKEN>
+→ Prometheus text format
+```
+
+Key metrics: `pikorua_turns_total{result}`, `pikorua_turn_stt_ms`, `pikorua_turn_llm_ms`, `pikorua_turn_tts_ms`, `pikorua_turn_ttfa_ms` (time-to-first-audio), `pikorua_turn_total_ms`.
+
+---
+
+## WebSocket protocols
+
+### Exotel Voicebot — `/exotel-stream`
+
+Exotel opens this socket when a call connects.
+
+**Inbound (Exotel → server)**
+
+| Event | Key fields |
+|---|---|
+| `connected` | Handshake |
+| `start` | `call_sid`, `custom_parameters.callId`, `custom_parameters.locale` |
+| `media` | `payload` (base64 PCM 8 kHz) |
+| `dtmf` | `digit` ("1" / "2" / "3") |
+| `stop` | Call ended |
+
+**Outbound (server → Exotel)**
+
+| Event | Key fields |
+|---|---|
+| `media` | `payload` (base64 PCM 8 kHz, 320-byte-aligned frames) |
+| `mark` | `name` ("s0", "s1", … sentence boundaries) |
+| `clear` | Drop queued audio (barge-in) |
+
+### Browser demo — `/demo-voice`
+
+**Client → server control frames (JSON)**
+
+| `type` | Additional fields | Purpose |
+|---|---|---|
+| `start` | `callId`, `language`, `sampleRate`, `streaming: true` | Begin session |
+| `playback-done` | — | Client finished playing audio |
+| `stop` | — | End session |
+| Binary frame | Raw PCM16 audio at `sampleRate` Hz | Caller audio |
+
+**Server → client frames (JSON)**
+
+| `type` | Key fields | When |
+|---|---|---|
+| `turn-start` | `transcript` | Utterance received, LLM starting |
+| `partial` | `transcript` | Deepgram interim result |
+| `reply-chunk` | `text` | LLM streaming delta |
+| `audio-chunk` | `audioBase64`, `sentenceIndex`, `last` | TTS audio fragment |
+| `cancel` | — | Barge-in: drop queued audio |
+| `reply-end` | `transcript`, `reply`, `endCall`, `canceled` | Turn complete |
+| `holding` | `transcript` | Fragment held (mid-thought) |
+| `greeting-end` | `reply`, `canceled` | Opening greeting complete |
+| `error` | `message` | Processing error |
+
+---
+
+## Post-call processing
+
+When Exotel fires a `completed` webhook:
+
+1. `PostCallQueueService.enqueue(callId)` adds a BullMQ job
+2. `PostCallWorker` picks it up → `PostCallProcessingService.processCall`
+3. **Lead scoring**: `LeadScoreLlmService.evaluate` asks OpenRouter for a score (0–100), label (`hot`/`warm`/`cold`), and timeline. Falls back to keyword heuristics if LLM unavailable:
+   - Positive: `interested`, `site visit`, `book`, `appointment`, `buy`, `purchase`, `schedule`, `when can`, `call me`, `contact me`
+   - Negative: `not interested`, `don't call`, `do not call`, `stop`, `unsubscribe`, `no thanks`
+4. Score ≥ 75 → **HOT alert** written to `call_events`
+5. **CRM sync**: POST to `CRM_API_BASE_URL/leads` with idempotency key. Failures retried by `CrmRetryWorker` every 5 minutes (up to 5 attempts)
+
+---
+
+## Security
+
+- **REST + WS auth**: `ApiAuthGuard` / `isWebSocketAuthorized` check `Authorization: Bearer <token>`, `x-api-key` header, or `?token=` query param. Skipped in development when `API_AUTH_TOKEN` is unset.
+- **Webhook signature**: HMAC-SHA256 on `x-exotel-signature` using `EXOTEL_WEBHOOK_SECRET`. Webhooks are accepted but flagged `signatureValid: false` when no secret is configured.
+- **Rate limiting**: 120 requests / 60 s per IP via `ThrottlerModule` (global).
+- **Price protection**: Hard guardrail regex + LLM prompt constraint + inventory prices marked `[internal]`. Three independent layers; prices are never spoken or hinted at.
+
+---
+
+## IVR locale selection
+
+When Exotel sends DTMF digits via webhook:
+
+| Digit | Locale |
+|---|---|
+| `1` | `en-IN` |
+| `2` | `hi-IN` |
+| `3` | `gu-IN` |
+| other | `hi-IN` |
+
+---
+
+## Deployment (Render)
+
+The project includes a `render.yaml` for one-click deployment:
+- **API service**: `pnpm build && pnpm start:api`, port 4100
+- **Worker service**: `pnpm build && pnpm start:worker`
+
+Both services read from the same Render environment group. Set `PUBLIC_BASE_URL` to the deployed API service URL so Exotel can reach the webhook endpoint at `PUBLIC_BASE_URL/api/webhooks/exotel`.
+
+---
+
+## Ports (local — distinct from CRM / ai-leads repos)
+
+| Service | Host port |
+|---|---|
+| API | 4100 |
+| PostgreSQL | 5433 |
+| Redis | 6380 |

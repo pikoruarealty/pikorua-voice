@@ -17,6 +17,9 @@ const TTS_RESPELLINGS: Array<[RegExp, string]> = [
   // "brochure" is French-derived — the Hindi engine reads it with English
   // phonemes ("bro-chure") instead of the correct "BROH-shuh" sound.
   [/\bbrochures?\b/gi, "ब्रोशर"],
+  // Brand suffix "Group" in "पिकोरा Group" — the Hindi engine mangles the Latin
+  // word mid-sentence; respell in Devanagari so it reads as "ग्रुप".
+  [/\bgroup\b/gi, "ग्रुप"],
   // Hard-block "take care" — replace with the correct sign-off at the TTS layer.
   [/\btake care[!.]*/gi, "Thank you."],
 ];
@@ -298,24 +301,18 @@ export function normalizeForTts(text: string, languageCode = "hi"): string {
     out = out.replace(/\btake care[!.]*/gi, "Thank you.");
   }
 
-  // Expand BHK configurations: "4BHK" → "चार BHK" (Hindi) / "four BHK" (English).
-  // Handles whole and half configs: 4, 4.5, 5, etc.
+  // Expand BHK configurations: "4BHK" → "four BHK". The BHK count is always
+  // spoken in English number words even in Hindi mode — "four BHK" not
+  // "चार BHK" — because the property type ("BHK") is English and the Hindi
+  // numeral sounds unnatural against it. Handles whole and half configs.
   // Must run before the general number pass so the digit isn't left raw for TTS.
   out = out.replace(/\b(\d+(?:\.\d+)?)\s*BHK\b/gi, (_, num) => {
     const n = parseFloat(num);
     const whole = Math.floor(n);
     const half = n % 1 !== 0;
     const wordWhole =
-      Number.isInteger(whole) && whole < 100
-        ? hindi
-          ? hindiNumberWords(whole)
-          : englishNumberWords(whole)
-        : String(whole);
-    return half
-      ? hindi
-        ? `${wordWhole} और आधा BHK`
-        : `${wordWhole} and a half BHK`
-      : `${wordWhole} BHK`;
+      Number.isInteger(whole) && whole < 100 ? englishNumberWords(whole) : String(whole);
+    return half ? `${wordWhole} and a half BHK` : `${wordWhole} BHK`;
   });
 
   // Convert numbers to words so the engine doesn't mispronounce them.

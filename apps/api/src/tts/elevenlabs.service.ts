@@ -84,16 +84,106 @@ const ROMAN_HINDI_WORDS: Array<[RegExp, string]> = [
 // Hindi number words 0-99 (Hindi numerals are irregular — lookup table needed)
 // 0 is "ज़ीरो" (the everyday spoken form) not "शून्य" (formal/mathematical).
 const HINDI_0_99 = [
-  "ज़ीरो", "एक", "दो", "तीन", "चार", "पाँच", "छह", "सात", "आठ", "नौ",
-  "दस", "ग्यारह", "बारह", "तेरह", "चौदह", "पंद्रह", "सोलह", "सत्रह", "अठारह", "उन्नीस",
-  "बीस", "इक्कीस", "बाईस", "तेईस", "चौबीस", "पच्चीस", "छब्बीस", "सत्ताईस", "अट्ठाईस", "उनतीस",
-  "तीस", "इकतीस", "बत्तीस", "तैंतीस", "चौंतीस", "पैंतीस", "छत्तीस", "सैंतीस", "अड़तीस", "उनतालीस",
-  "चालीस", "इकतालीस", "बयालीस", "तैंतालीस", "चवालीस", "पैंतालीस", "छियालीस", "सैंतालीस", "अड़तालीस", "उनचास",
-  "पचास", "इक्यावन", "बावन", "तिरपन", "चौवन", "पचपन", "छप्पन", "सत्तावन", "अट्ठावन", "उनसठ",
-  "साठ", "इकसठ", "बासठ", "तिरसठ", "चौंसठ", "पैंसठ", "छियासठ", "सड़सठ", "अड़सठ", "उनहत्तर",
-  "सत्तर", "इकहत्तर", "बहत्तर", "तिहत्तर", "चौहत्तर", "पचहत्तर", "छिहत्तर", "सतहत्तर", "अठहत्तर", "उनासी",
-  "अस्सी", "इक्यासी", "बयासी", "तिरासी", "चौरासी", "पचासी", "छियासी", "सत्तासी", "अठासी", "नवासी",
-  "नब्बे", "इक्यानबे", "बानबे", "तिरानबे", "चौरानबे", "पचानबे", "छियानबे", "सत्तानबे", "अट्ठानबे", "निन्यानबे",
+  "ज़ीरो",
+  "एक",
+  "दो",
+  "तीन",
+  "चार",
+  "पाँच",
+  "छह",
+  "सात",
+  "आठ",
+  "नौ",
+  "दस",
+  "ग्यारह",
+  "बारह",
+  "तेरह",
+  "चौदह",
+  "पंद्रह",
+  "सोलह",
+  "सत्रह",
+  "अठारह",
+  "उन्नीस",
+  "बीस",
+  "इक्कीस",
+  "बाईस",
+  "तेईस",
+  "चौबीस",
+  "पच्चीस",
+  "छब्बीस",
+  "सत्ताईस",
+  "अट्ठाईस",
+  "उनतीस",
+  "तीस",
+  "इकतीस",
+  "बत्तीस",
+  "तैंतीस",
+  "चौंतीस",
+  "पैंतीस",
+  "छत्तीस",
+  "सैंतीस",
+  "अड़तीस",
+  "उनतालीस",
+  "चालीस",
+  "इकतालीस",
+  "बयालीस",
+  "तैंतालीस",
+  "चवालीस",
+  "पैंतालीस",
+  "छियालीस",
+  "सैंतालीस",
+  "अड़तालीस",
+  "उनचास",
+  "पचास",
+  "इक्यावन",
+  "बावन",
+  "तिरपन",
+  "चौवन",
+  "पचपन",
+  "छप्पन",
+  "सत्तावन",
+  "अट्ठावन",
+  "उनसठ",
+  "साठ",
+  "इकसठ",
+  "बासठ",
+  "तिरसठ",
+  "चौंसठ",
+  "पैंसठ",
+  "छियासठ",
+  "सड़सठ",
+  "अड़सठ",
+  "उनहत्तर",
+  "सत्तर",
+  "इकहत्तर",
+  "बहत्तर",
+  "तिहत्तर",
+  "चौहत्तर",
+  "पचहत्तर",
+  "छिहत्तर",
+  "सतहत्तर",
+  "अठहत्तर",
+  "उनासी",
+  "अस्सी",
+  "इक्यासी",
+  "बयासी",
+  "तिरासी",
+  "चौरासी",
+  "पचासी",
+  "छियासी",
+  "सत्तासी",
+  "अठासी",
+  "नवासी",
+  "नब्बे",
+  "इक्यानबे",
+  "बानबे",
+  "तिरानबे",
+  "चौरानबे",
+  "पचानबे",
+  "छियानबे",
+  "सत्तानबे",
+  "अट्ठानबे",
+  "निन्यानबे",
 ];
 
 function hindiNumberWords(n: number): string {
@@ -119,12 +209,38 @@ function hindiNumberWords(n: number): string {
 }
 
 const EN_0_19 = [
-  "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
-  "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen",
-  "eighteen", "nineteen",
+  "zero",
+  "one",
+  "two",
+  "three",
+  "four",
+  "five",
+  "six",
+  "seven",
+  "eight",
+  "nine",
+  "ten",
+  "eleven",
+  "twelve",
+  "thirteen",
+  "fourteen",
+  "fifteen",
+  "sixteen",
+  "seventeen",
+  "eighteen",
+  "nineteen",
 ];
 const EN_TENS = [
-  "", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety",
+  "",
+  "",
+  "twenty",
+  "thirty",
+  "forty",
+  "fifty",
+  "sixty",
+  "seventy",
+  "eighty",
+  "ninety",
 ];
 
 // Indian-English number words (lakh/crore grouping) for non-Hindi voice modes.
@@ -191,10 +307,14 @@ export function normalizeForTts(text: string, languageCode = "hi"): string {
     const half = n % 1 !== 0;
     const wordWhole =
       Number.isInteger(whole) && whole < 100
-        ? hindi ? hindiNumberWords(whole) : englishNumberWords(whole)
+        ? hindi
+          ? hindiNumberWords(whole)
+          : englishNumberWords(whole)
         : String(whole);
     return half
-      ? hindi ? `${wordWhole} और आधा BHK` : `${wordWhole} and a half BHK`
+      ? hindi
+        ? `${wordWhole} और आधा BHK`
+        : `${wordWhole} and a half BHK`
       : `${wordWhole} BHK`;
   });
 
@@ -414,7 +534,12 @@ export class ElevenlabsService {
   //
   // Returns a session handle; the caller must call session.close() when done.
   openWsSession(
-    opts: SynthesizeOptions & { onChunk: (chunk: Buffer) => void; onDone: () => void; onError: (err: string) => void; signal?: AbortSignal },
+    opts: SynthesizeOptions & {
+      onChunk: (chunk: Buffer) => void;
+      onDone: () => void;
+      onError: (err: string) => void;
+      signal?: AbortSignal;
+    },
   ): { sendText: (text: string) => void; flush: () => void; close: () => void } {
     const cfg = this.requestConfig(opts);
     const outputFormat = opts.outputFormat ?? "mp3_44100_128";
@@ -438,7 +563,9 @@ export class ElevenlabsService {
 
     const flushPending = () => {
       for (const t of pendingTexts) {
-        try { ws?.send(JSON.stringify({ text: t, try_trigger_generation: true })); } catch {}
+        try {
+          ws?.send(JSON.stringify({ text: t, try_trigger_generation: true }));
+        } catch {}
       }
       pendingTexts.length = 0;
     };
@@ -449,20 +576,27 @@ export class ElevenlabsService {
     ws = socket;
 
     socket.on("open", () => {
-      if (closed) { try { socket.close(); } catch {} return; }
+      if (closed) {
+        try {
+          socket.close();
+        } catch {}
+        return;
+      }
       wsOpen = true;
       // Send voice settings handshake
-      socket.send(JSON.stringify({
-        text: " ",
-        voice_settings: {
-          stability: cfg.stability,
-          similarity_boost: cfg.similarityBoost,
-          style: cfg.style,
-          use_speaker_boost: true,
-        },
-        ...(cfg.languageCode ? { language_code: cfg.languageCode.split("-")[0] } : {}),
-        xi_api_key: cfg.key,
-      }));
+      socket.send(
+        JSON.stringify({
+          text: " ",
+          voice_settings: {
+            stability: cfg.stability,
+            similarity_boost: cfg.similarityBoost,
+            style: cfg.style,
+            use_speaker_boost: true,
+          },
+          ...(cfg.languageCode ? { language_code: cfg.languageCode.split("-")[0] } : {}),
+          xi_api_key: cfg.key,
+        }),
+      );
       flushPending();
     });
 
@@ -489,7 +623,9 @@ export class ElevenlabsService {
 
     opts.signal?.addEventListener("abort", () => {
       closed = true;
-      try { socket.close(); } catch {}
+      try {
+        socket.close();
+      } catch {}
     });
 
     return {
@@ -497,7 +633,9 @@ export class ElevenlabsService {
         if (closed) return;
         const normalized = normalizeForTts(text, cfg.languageCode);
         if (wsOpen) {
-          try { socket.send(JSON.stringify({ text: normalized, try_trigger_generation: true })); } catch {}
+          try {
+            socket.send(JSON.stringify({ text: normalized, try_trigger_generation: true }));
+          } catch {}
         } else {
           pendingTexts.push(normalized);
         }
@@ -506,16 +644,24 @@ export class ElevenlabsService {
         if (closed) return;
         // ElevenLabs flushes on receiving an empty string
         if (wsOpen) {
-          try { socket.send(JSON.stringify({ text: "" })); } catch {}
+          try {
+            socket.send(JSON.stringify({ text: "" }));
+          } catch {}
         }
       },
       close: () => {
         if (closed) return;
         closed = true;
         if (wsOpen) {
-          try { socket.send(JSON.stringify({ text: "" })); } catch {}
+          try {
+            socket.send(JSON.stringify({ text: "" }));
+          } catch {}
         }
-        setTimeout(() => { try { socket.close(); } catch {} }, 500);
+        setTimeout(() => {
+          try {
+            socket.close();
+          } catch {}
+        }, 500);
       },
     };
   }

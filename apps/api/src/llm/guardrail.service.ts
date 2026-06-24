@@ -95,7 +95,9 @@ export class GuardrailService {
 
     // OpenRouter primary (Claude Haiku via OpenRouter — fast, cheap, accurate for binary checks)
     const openRouterKey = this.config.get<string>("OPENROUTER_API_KEY");
-    const openRouterModel = String(this.config.get("OPENROUTER_MODEL") ?? "anthropic/claude-haiku-4-5");
+    const openRouterModel = String(
+      this.config.get("OPENROUTER_MODEL") ?? "anthropic/claude-haiku-4-5",
+    );
     if (openRouterKey) {
       try {
         const res = await axios.post(

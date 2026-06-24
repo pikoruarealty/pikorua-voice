@@ -34,7 +34,8 @@ const MAX_BUFFERED_CHUNKS = 200; // ~20s of 100ms frames — drop oldest beyond 
 // Short ack words that don't need the full 1400ms silence window.
 // After one of these fires as a complete utterance, tighten to 400ms so the
 // caller isn't forced to wait an extra second before the bot responds.
-const SHORT_ACK_PATTERN = /^(haan|ha|han|okay|ok|yes|no|nahi|nai|sure|bilkul|theek|thik|hmm|ji|hm|yep|nope|right|got it|go on|accha|acha)[\s.,!?।]*$/i;
+const SHORT_ACK_PATTERN =
+  /^(haan|ha|han|okay|ok|yes|no|nahi|nai|sure|bilkul|theek|thik|hmm|ji|hm|yep|nope|right|got it|go on|accha|acha)[\s.,!?।]*$/i;
 const SHORT_ACK_ENDPOINTING_MS = 400;
 const DEFAULT_ENDPOINTING_MS = 1400;
 

@@ -108,7 +108,9 @@ export class LlmService {
       attempts.push(() => this.streamOpenRouter(messages, opts, start, maxTokens, guardedDelta));
       const fallbackModel = this.config.get<string>("OPENROUTER_FALLBACK_MODEL");
       if (fallbackModel) {
-        attempts.push(() => this.streamOpenRouter(messages, opts, start, maxTokens, guardedDelta, fallbackModel));
+        attempts.push(() =>
+          this.streamOpenRouter(messages, opts, start, maxTokens, guardedDelta, fallbackModel),
+        );
       }
     }
 
@@ -140,7 +142,8 @@ export class LlmService {
     const key = this.config.get<string>("OPENROUTER_API_KEY");
     const breakerKey = modelOverride ? `openrouter-fallback` : "openrouter";
     if (!key || this.breakerOpen(breakerKey)) return null;
-    const model = modelOverride ?? String(this.config.get("OPENROUTER_MODEL") ?? "anthropic/claude-haiku-4-5");
+    const model =
+      modelOverride ?? String(this.config.get("OPENROUTER_MODEL") ?? "anthropic/claude-haiku-4-5");
     try {
       const orMessages: Array<{ role: string; content: string }> = [];
       if (opts.systemPrompt) orMessages.push({ role: "system", content: opts.systemPrompt });
@@ -181,10 +184,7 @@ export class LlmService {
       return { text, llmMs: ms, model, promptTokens: null, completionTokens: null };
     } catch (err) {
       this.recordFailure(breakerKey);
-      this.logger.warn(
-        "OpenRouter stream failed",
-        err instanceof Error ? err.stack : String(err),
-      );
+      this.logger.warn("OpenRouter stream failed", err instanceof Error ? err.stack : String(err));
       throw err;
     }
   }
@@ -244,7 +244,7 @@ export class LlmService {
         },
         {
           headers: {
-            "Authorization": `Bearer ${openRouterKey}`,
+            Authorization: `Bearer ${openRouterKey}`,
             "Content-Type": "application/json",
           },
           timeout: this.openRouterTimeoutMs(),

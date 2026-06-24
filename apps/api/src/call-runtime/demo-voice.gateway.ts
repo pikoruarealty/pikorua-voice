@@ -1,8 +1,4 @@
-import {
-  WebSocketGateway,
-  OnGatewayConnection,
-  OnGatewayDisconnect,
-} from "@nestjs/websockets";
+import { WebSocketGateway, OnGatewayConnection, OnGatewayDisconnect } from "@nestjs/websockets";
 import { WebSocket, RawData } from "ws";
 import { Injectable, Logger } from "@nestjs/common";
 import type { IncomingMessage } from "http";
@@ -117,10 +113,7 @@ export class DemoVoiceGateway implements OnGatewayConnection, OnGatewayDisconnec
           state.stt = null;
         }
       } catch (err) {
-        this.logger.warn(
-          "Bad control message",
-          err instanceof Error ? err.message : String(err),
-        );
+        this.logger.warn("Bad control message", err instanceof Error ? err.message : String(err));
       }
     });
   }
@@ -153,7 +146,9 @@ export class DemoVoiceGateway implements OnGatewayConnection, OnGatewayDisconnec
           this.logger.warn(`STT session failed call=${state.callId} — recovering in 5 s`);
           setTimeout(() => {
             if (client.readyState !== WebSocket.OPEN || !state.callId) return;
-            try { state.stt?.close(); } catch {}
+            try {
+              state.stt?.close();
+            } catch {}
             this.logger.log(`Re-opening STT session call=${state.callId}`);
             state.stt = this.openSttSession(client, state, sampleRate, true);
           }, 5000);
@@ -209,7 +204,9 @@ export class DemoVoiceGateway implements OnGatewayConnection, OnGatewayDisconnec
               handle.cancel();
             }
           })
-          .catch(() => { state.speculativePending = false; });
+          .catch(() => {
+            state.speculativePending = false;
+          });
       }
     }
 
@@ -351,28 +348,24 @@ export class DemoVoiceGateway implements OnGatewayConnection, OnGatewayDisconnec
     this.send(client, { type: "turn-start", transcript: "" });
 
     try {
-      const result = await this.runtime.generateGreetingStream(
-        state.callId,
-        state.locale,
-        {
-          signal: controller.signal,
-          onReplyDelta: (text) => this.send(client, { type: "reply-chunk", text }),
-          onAudioChunk: (chunk, info) => {
-            active.audioSent = true;
-            state.speaking = true;
-            this.send(client, {
-              type: "audio-chunk",
-              audioBase64: chunk.length > 0 ? chunk.toString("base64") : "",
-              sentenceIndex: info.sentenceIndex,
-              last: info.last,
-            });
-          },
-          onCancel: () => {
-            state.speaking = false;
-            this.send(client, { type: "cancel" });
-          },
+      const result = await this.runtime.generateGreetingStream(state.callId, state.locale, {
+        signal: controller.signal,
+        onReplyDelta: (text) => this.send(client, { type: "reply-chunk", text }),
+        onAudioChunk: (chunk, info) => {
+          active.audioSent = true;
+          state.speaking = true;
+          this.send(client, {
+            type: "audio-chunk",
+            audioBase64: chunk.length > 0 ? chunk.toString("base64") : "",
+            sentenceIndex: info.sentenceIndex,
+            last: info.last,
+          });
         },
-      );
+        onCancel: () => {
+          state.speaking = false;
+          this.send(client, { type: "cancel" });
+        },
+      });
 
       if (!result.skipped) {
         this.send(client, {
@@ -382,10 +375,7 @@ export class DemoVoiceGateway implements OnGatewayConnection, OnGatewayDisconnec
         });
       }
     } catch (err) {
-      this.logger.warn(
-        "Greeting failed",
-        err instanceof Error ? err.message : String(err),
-      );
+      this.logger.warn("Greeting failed", err instanceof Error ? err.message : String(err));
     } finally {
       if (state.active === active) {
         state.active = null;

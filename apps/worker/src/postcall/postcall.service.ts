@@ -55,7 +55,14 @@ export class PostCallProcessingService {
       "call me",
       "contact me",
     ];
-    const negative = ["not interested", "don't call", "do not call", "stop", "unsubscribe", "no thanks"];
+    const negative = [
+      "not interested",
+      "don't call",
+      "do not call",
+      "stop",
+      "unsubscribe",
+      "no thanks",
+    ];
 
     const matchedPos: string[] = [];
     const matchedNeg: string[] = [];

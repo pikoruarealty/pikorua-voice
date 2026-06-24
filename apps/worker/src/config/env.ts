@@ -49,7 +49,6 @@ export const workerEnvSchema = z
       "EXOTEL_API_KEY",
       "EXOTEL_API_TOKEN",
       "EXOTEL_CALLER_ID",
-      "CRM_API_TOKEN",
     ];
     for (const key of required) {
       if (!env[key]) {

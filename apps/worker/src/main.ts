@@ -36,7 +36,9 @@ async function bootstrap() {
 
   const port = Number(process.env.PORT ?? 10000);
   await app.listen(port, "0.0.0.0");
-  logger.log(`${SERVICE.WORKER} ready — dial, postcall, and CRM-retry workers running (health on :${port})`);
+  logger.log(
+    `${SERVICE.WORKER} ready — dial, postcall, and CRM-retry workers running (health on :${port})`,
+  );
 
   const shutdown = async (signal: string) => {
     logger.log(`Received ${signal} — shutting down`);

@@ -48,24 +48,88 @@ type CallState = {
 // Trailing words that signal the caller paused mid-thought rather than finishing.
 // Covers common Hindi/English conjunctions, fillers, and dangling possessives.
 const CONTINUATION_CUES = new Set([
-  "aur", "and", "to", "toh", "but", "lekin", "par", "ki", "because", "kyunki", "kyuki",
-  "matlab", "like", "so", "ya", "or", "plus", "um", "uh", "umm", "hmm", "ek",
-  "mera", "meri", "apna", "apni", "uska", "uski",
+  "aur",
+  "and",
+  "to",
+  "toh",
+  "but",
+  "lekin",
+  "par",
+  "ki",
+  "because",
+  "kyunki",
+  "kyuki",
+  "matlab",
+  "like",
+  "so",
+  "ya",
+  "or",
+  "plus",
+  "um",
+  "uh",
+  "umm",
+  "hmm",
+  "ek",
+  "mera",
+  "meri",
+  "apna",
+  "apni",
+  "uska",
+  "uski",
 ]);
 
 // Transcripts that are pure noise/filler should not reach the LLM because
 // the LLM will invent apology phrases (e.g. "Sorry, आवाज़ कट गई") and loop.
 // A transcript is noise if every word is a known filler AND total length is tiny.
 const NOISE_WORDS = new Set([
-  "um", "uh", "uhh", "umm", "ah", "ahh", "oh", "hmm", "hm", "ha",
-  "haan", "ha", "huh", "mhm", "uh-huh",
-  ...["aur", "and", "to", "toh", "but", "lekin", "par", "ki", "because",
-      "kyunki", "kyuki", "matlab", "like", "so", "ya", "or", "plus",
-      "mera", "meri", "apna", "apni", "uska", "uski", "ek"],
+  "um",
+  "uh",
+  "uhh",
+  "umm",
+  "ah",
+  "ahh",
+  "oh",
+  "hmm",
+  "hm",
+  "ha",
+  "haan",
+  "ha",
+  "huh",
+  "mhm",
+  "uh-huh",
+  ...[
+    "aur",
+    "and",
+    "to",
+    "toh",
+    "but",
+    "lekin",
+    "par",
+    "ki",
+    "because",
+    "kyunki",
+    "kyuki",
+    "matlab",
+    "like",
+    "so",
+    "ya",
+    "or",
+    "plus",
+    "mera",
+    "meri",
+    "apna",
+    "apni",
+    "uska",
+    "uski",
+    "ek",
+  ],
 ]);
 
 function isNoisyTranscript(text: string): boolean {
-  const normalized = text.toLowerCase().replace(/[।,.!?]+/g, "").trim();
+  const normalized = text
+    .toLowerCase()
+    .replace(/[।,.!?]+/g, "")
+    .trim();
   if (normalized.length > 20) return false; // anything longer is probably real speech
   const words = normalized.split(/\s+/).filter(Boolean);
   if (words.length === 0) return true;
@@ -77,7 +141,11 @@ function looksIncomplete(text: string): boolean {
   if (!trimmed) return false;
   // Trailing comma or dash — sentence clearly cut off
   if (/[,\-–—]$/.test(trimmed)) return true;
-  const words = trimmed.toLowerCase().replace(/[.?!।]+$/, "").trim().split(/\s+/);
+  const words = trimmed
+    .toLowerCase()
+    .replace(/[.?!।]+$/, "")
+    .trim()
+    .split(/\s+/);
   const last = words[words.length - 1] ?? "";
   return CONTINUATION_CUES.has(last);
 }
@@ -216,7 +284,7 @@ export class CallRuntimeService implements OnApplicationShutdown {
   // Used to pick the right number-word language regardless of call locale.
   private replyLanguageCode(text: string, locale: string): string | undefined {
     if (/[ऀ-ॿ]/.test(text)) return undefined; // has Devanagari → Hindi mode
-    if (/[a-zA-Z]/.test(text)) return "en";             // Latin script only → English mode
+    if (/[a-zA-Z]/.test(text)) return "en"; // Latin script only → English mode
     return this.ttsLanguageCode(locale);
   }
 
@@ -296,8 +364,12 @@ export class CallRuntimeService implements OnApplicationShutdown {
         },
         (delta) => collectedDeltas.push(delta),
       )
-      .then((r) => { streamResult = r; })
-      .catch((err) => { streamError = err; });
+      .then((r) => {
+        streamResult = r;
+      })
+      .catch((err) => {
+        streamError = err;
+      });
 
     return {
       text: partialText,
@@ -501,10 +573,20 @@ export class CallRuntimeService implements OnApplicationShutdown {
   // them means the first sentence of every turn is served from cache with zero
   // TTS round-trip latency.
   private readonly ACK_CLIPS_HI = [
-    "Perfect.", "Noted.", "Certainly.", "हाँ, बिल्कुल.", "समझ गई.", "Absolutely.",
+    "Perfect.",
+    "Noted.",
+    "Certainly.",
+    "हाँ, बिल्कुल.",
+    "समझ गई.",
+    "Absolutely.",
   ];
   private readonly ACK_CLIPS_EN = [
-    "Perfect.", "Noted.", "Certainly.", "Absolutely.", "Right.", "Of course.",
+    "Perfect.",
+    "Noted.",
+    "Certainly.",
+    "Absolutely.",
+    "Right.",
+    "Of course.",
   ];
 
   private ackClips(locale: string): string[] {
@@ -515,10 +597,7 @@ export class CallRuntimeService implements OnApplicationShutdown {
     try {
       const state = await this.getOrCreateState(callId, locale);
       this.tts.prewarmClips(
-        [
-          ...this.allFallbackLines(state.locale),
-          ...this.ackClips(state.locale),
-        ],
+        [...this.allFallbackLines(state.locale), ...this.ackClips(state.locale)],
         { languageCode: this.ttsLanguageCode(state.locale) },
       );
     } catch (err) {
@@ -985,7 +1064,9 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
     const trimmedText = text.trim();
     if (!trimmedText || isNoisyTranscript(trimmedText)) {
       // Empty or noise-only transcript (silence, background sound, single filler).
-      this.logger.warn(`Empty/noise transcript on call=${callId} turn=${turnIndex}: "${trimmedText.slice(0, 40)}" — re-prompting`);
+      this.logger.warn(
+        `Empty/noise transcript on call=${callId} turn=${turnIndex}: "${trimmedText.slice(0, 40)}" — re-prompting`,
+      );
       const state = await this.getOrCreateState(callId, locale);
       const now = Date.now();
       // Track consecutive silence strikes within the window. Reset if gap is too long.
@@ -1005,7 +1086,13 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
         return { audio, transcript: "", reply: spokenText, endCall: true, waitForMore: false };
       }
       if (this.apologyOnCooldown(state)) {
-        return { audio: Buffer.alloc(0), transcript: "", reply: "", endCall: false, waitForMore: true };
+        return {
+          audio: Buffer.alloc(0),
+          transcript: "",
+          reply: "",
+          endCall: false,
+          waitForMore: true,
+        };
       }
       const reprompt = this.apologyText(locale);
       const { audio, spokenText } = await this.synthesizeWithFallback(reprompt, locale, callId);
@@ -1141,7 +1228,13 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
       } catch (err) {
         if (turnController.signal.aborted) {
           // Watchdog fired — don't punish the caller with an apology, just end the turn silently.
-          return { audio: Buffer.alloc(0), transcript: utterance, reply: "", endCall: false, waitForMore: false };
+          return {
+            audio: Buffer.alloc(0),
+            transcript: utterance,
+            reply: "",
+            endCall: false,
+            waitForMore: false,
+          };
         }
         // Every provider failed — keep the call alive with a polite re-prompt
         // instead of surfacing a 503 mid-conversation. The caller repeats, and
@@ -1152,12 +1245,24 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
         );
         this.metrics.increment("pikorua_turns_total", { result: "llm_error" });
         if (this.apologyOnCooldown(state)) {
-          return { audio: Buffer.alloc(0), transcript: utterance, reply: "", endCall: false, waitForMore: false };
+          return {
+            audio: Buffer.alloc(0),
+            transcript: utterance,
+            reply: "",
+            endCall: false,
+            waitForMore: false,
+          };
         }
         const excuse = this.apologyText(locale);
         const { audio, spokenText } = await this.synthesizeWithFallback(excuse, locale, callId);
         this.markApologyPlayed(state);
-        return { audio, transcript: utterance, reply: spokenText, endCall: false, waitForMore: false };
+        return {
+          audio,
+          transcript: utterance,
+          reply: spokenText,
+          endCall: false,
+          waitForMore: false,
+        };
       }
 
       const { text: rawLlmText, llmMs, model, promptTokens, completionTokens } = llmResolved;
@@ -1205,9 +1310,7 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
         if (semantic.triggered) {
           guardrailTriggered = true;
           guardrailRule = semantic.rule;
-          spokenReply =
-            semantic.replacement?.trim() ||
-            this.guardrailFallbackText(locale);
+          spokenReply = semantic.replacement?.trim() || this.guardrailFallbackText(locale);
           const replacementTts = await this.synthesizeWithFallback(spokenReply, locale, callId);
           audio = replacementTts.audio;
           ttsMs = replacementTts.ttsMs;
@@ -1322,7 +1425,13 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
       this.logger.warn(
         `Skipping noise utterance on live path callId=${callId}: "${trimmedUtterance.slice(0, 40)}"`,
       );
-      return { transcript: trimmedUtterance, reply: "", endCall: false, waitForMore: true, canceled: false };
+      return {
+        transcript: trimmedUtterance,
+        reply: "",
+        endCall: false,
+        waitForMore: true,
+        canceled: false,
+      };
     }
 
     const prep = await this.prepareUtterance(callId, utteranceText, opts.locale);
@@ -1373,7 +1482,13 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
         // wrap-up audio is best-effort
       }
       await this.completeCall(callId);
-      return { transcript: utterance, reply: wrapUp, endCall: true, waitForMore: false, canceled: false };
+      return {
+        transcript: utterance,
+        reply: wrapUp,
+        endCall: true,
+        waitForMore: false,
+        canceled: false,
+      };
     }
 
     this.activeTurns += 1;
@@ -1402,7 +1517,9 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
     let wsSession: ReturnType<typeof this.tts.openWsSession> | null = null;
     let resolveWsDone: () => void = () => {};
     const wsAudioDone: Promise<void> | null = useWsStreaming
-      ? new Promise<void>((r) => { resolveWsDone = r; })
+      ? new Promise<void>((r) => {
+          resolveWsDone = r;
+        })
       : null;
 
     if (useWsStreaming && !turnController.signal.aborted) {
@@ -1533,16 +1650,34 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
           } catch {
             // excuse audio is best-effort; transport will surface the error
           }
-          return { transcript: utterance, reply: excuse, endCall: false, waitForMore: false, canceled: false };
+          return {
+            transcript: utterance,
+            reply: excuse,
+            endCall: false,
+            waitForMore: false,
+            canceled: false,
+          };
         }
         if (!dispatchedText) {
-          return { transcript: utterance, reply: "", endCall: false, waitForMore: false, canceled: false };
+          return {
+            transcript: utterance,
+            reply: "",
+            endCall: false,
+            waitForMore: false,
+            canceled: false,
+          };
         }
         // Some sentences were already spoken — drain audio then end the turn.
         wsSession?.flush();
         await (wsAudioDone ?? ttsQueue);
         state.history.push({ role: "assistant", content: dispatchedText });
-        return { transcript: utterance, reply: dispatchedText, endCall: false, waitForMore: false, canceled: false };
+        return {
+          transcript: utterance,
+          reply: dispatchedText,
+          endCall: false,
+          waitForMore: false,
+          canceled: false,
+        };
       }
       const llmEnd = Date.now();
       const llmElapsed = llmResolved.llmMs ?? Math.max(0, llmEnd - llmStart);
@@ -1609,9 +1744,7 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
       if (replacement) {
         guardrailTriggered = true;
         guardrailRule = replacement.rule;
-        spokenReply =
-          replacement.replacement?.trim() ||
-          this.guardrailFallbackText(locale);
+        spokenReply = replacement.replacement?.trim() || this.guardrailFallbackText(locale);
         // Drop queued/playing audio on the transport, then speak the safe text.
         wsSession?.close();
         turnController.abort();

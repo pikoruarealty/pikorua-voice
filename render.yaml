@@ -13,9 +13,9 @@ services:
 
       # Set these in Render dashboard after creating Neon + Upstash accounts
       - key: DATABASE_URL
-        sync: false        # paste Neon connection string
+        sync: false # paste Neon connection string
       - key: REDIS_URL
-        sync: false        # paste Upstash Redis URL
+        sync: false # paste Upstash Redis URL
 
       # ── App ──────────────────────────────────────────────────────────────
       - key: API_AUTH_TOKEN
@@ -110,9 +110,9 @@ services:
         value: production
 
       - key: DATABASE_URL
-        sync: false        # same Neon connection string as the API service
+        sync: false # same Neon connection string as the API service
       - key: REDIS_URL
-        sync: false        # same Upstash Redis URL as the API service
+        sync: false # same Upstash Redis URL as the API service
 
       # ── Telephony · Exotel ────────────────────────────────────────────────
       - key: EXOTEL_SID
@@ -128,7 +128,7 @@ services:
       - key: EXOTEL_SUBDOMAIN
         value: api.exotel.com
       - key: PUBLIC_BASE_URL
-        sync: false         # same Render API URL — used for the StatusCallback
+        sync: false # same Render API URL — used for the StatusCallback
 
       # ── CRM (post-call sync) ──────────────────────────────────────────────
       - key: CRM_API_BASE_URL

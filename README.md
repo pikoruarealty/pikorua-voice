@@ -57,18 +57,18 @@ Outbound AI voice concierge for ultra-luxury real estate. The system places call
 
 ## Tech stack
 
-| Layer | Technology |
-|---|---|
-| Runtime | Node.js 20, TypeScript 5 |
-| Framework | NestJS 10 |
-| Monorepo | Turborepo + pnpm workspaces |
-| Database | PostgreSQL via Neon (serverless) |
-| ORM | Drizzle ORM |
-| Queue | BullMQ on Redis (Upstash) |
-| STT | Deepgram Nova-2 (WebSocket live streaming) |
-| LLM | OpenRouter → Claude Haiku 4-5 (streaming SSE) |
-| TTS | ElevenLabs Turbo v2.5 (HTTP stream or WebSocket) |
-| Telephony | Exotel Voicebot WebSocket |
+| Layer     | Technology                                       |
+| --------- | ------------------------------------------------ |
+| Runtime   | Node.js 20, TypeScript 5                         |
+| Framework | NestJS 10                                        |
+| Monorepo  | Turborepo + pnpm workspaces                      |
+| Database  | PostgreSQL via Neon (serverless)                 |
+| ORM       | Drizzle ORM                                      |
+| Queue     | BullMQ on Redis (Upstash)                        |
+| STT       | Deepgram Nova-2 (WebSocket live streaming)       |
+| LLM       | OpenRouter → Claude Haiku 4-5 (streaming SSE)    |
+| TTS       | ElevenLabs Turbo v2.5 (HTTP stream or WebSocket) |
+| Telephony | Exotel Voicebot WebSocket                        |
 
 ---
 
@@ -131,6 +131,7 @@ pnpm dev
 The browser demo UI is served at `http://localhost:4100/`.
 
 Verify the API:
+
 ```bash
 curl http://localhost:4100/api/health
 # → { "status": "ok", "details": { "uptimeMs": ..., "database": "ok", "redis": "ok" } }
@@ -188,10 +189,10 @@ Exotel requires frames to be a **multiple of 320 bytes** (20 ms per frame at 8 k
 
 `DeepgramLiveService` opens a persistent WebSocket to Deepgram Nova-2 per call.
 
-| Parameter | Value | Purpose |
-|---|---|---|
-| `endpointing` | 300 ms | VAD sensitivity (silence threshold) — set once on connect, never changed |
-| `utterance_end_ms` | 1400 ms | Hard utterance boundary; 400 ms after short acks |
+| Parameter          | Value   | Purpose                                                                  |
+| ------------------ | ------- | ------------------------------------------------------------------------ |
+| `endpointing`      | 300 ms  | VAD sensitivity (silence threshold) — set once on connect, never changed |
+| `utterance_end_ms` | 1400 ms | Hard utterance boundary; 400 ms after short acks                         |
 
 After a short acknowledgment ("haan", "ok") `utterance_end_ms` is tightened to **400 ms** via a Deepgram `Configure` message, making the bot respond faster. It restores to 1400 ms on the next full utterance.
 
@@ -217,12 +218,13 @@ A per-turn watchdog (`TURN_TIMEOUT_MS`, default 12 s) aborts in-flight provider 
 
 Two modes, controlled by `TTS_WS_STREAMING_ENABLED`:
 
-| Mode | How | Characteristic |
-|---|---|---|
-| HTTP (default) | One `/stream` request per sentence | ~200–400 ms to first byte per sentence |
-| WS streaming | One persistent WS session per turn; sentences sent as text frames | True pipelining — next sentence generates while previous plays |
+| Mode           | How                                                               | Characteristic                                                 |
+| -------------- | ----------------------------------------------------------------- | -------------------------------------------------------------- |
+| HTTP (default) | One `/stream` request per sentence                                | ~200–400 ms to first byte per sentence                         |
+| WS streaming   | One persistent WS session per turn; sentences sent as text frames | True pipelining — next sentence generates while previous plays |
 
 `normalizeForTts` runs on every reply before synthesis:
+
 - Devanagari respellings for Indian proper nouns (`crore` → `करोड़`, `ISKCON` → `इस्कॉन`)
 - Romanized Hindi → Devanagari (`aapko` → `आपको`, `bilkul` → `बिल्कुल`)
 - BHK expansion: `4BHK` → `चार BHK` (Hindi) / `four BHK` (English)
@@ -237,13 +239,13 @@ Two independent layers, both per sentence:
 
 **Hard rules** (synchronous, zero API cost — always on):
 
-| Rule | Pattern | Replacement |
-|---|---|---|
-| `pricing_claim` | "exact price", "costs ₹", "quote you" | Refer to consultant |
-| `roi_guarantee` | "guaranteed return", "will definitely appreciate" | No return promises |
-| `legal_advice` | "you should consult a lawyer", "your legal right" | Refer to legal professional |
-| `tax_advice` | "you can save tax", "under section 80" | Refer to tax advisor |
-| `fabricated_inventory` | "only N units left", "almost sold out" | Refer to consultant |
+| Rule                   | Pattern                                           | Replacement                 |
+| ---------------------- | ------------------------------------------------- | --------------------------- |
+| `pricing_claim`        | "exact price", "costs ₹", "quote you"             | Refer to consultant         |
+| `roi_guarantee`        | "guaranteed return", "will definitely appreciate" | No return promises          |
+| `legal_advice`         | "you should consult a lawyer", "your legal right" | Refer to legal professional |
+| `tax_advice`           | "you can save tax", "under section 80"            | Refer to tax advisor        |
+| `fabricated_inventory` | "only N units left", "almost sold out"            | Refer to consultant         |
 
 **Semantic guardrail** (`GUARDRAIL_SEMANTIC_ENABLED=true`, default): concurrent LLM check using Claude Haiku (max 150 tokens). Catches paraphrased violations the regex misses. If triggered, audio already playing is dropped via `onCancel` and a safe replacement is synthesized.
 
@@ -298,16 +300,16 @@ Campaigns can restrict dialing to a time window (`dialWindowStart` / `dialWindow
 
 ## Database schema
 
-| Table | Purpose |
-|---|---|
-| `campaigns` | Dial batch — name, status, locale, dial window, max attempts |
-| `campaign_targets` | Dial list — phone, locale, dial status, attempt count |
-| `calls` | One row per call attempt — provider SID, status, timestamps |
-| `call_turns` | Per-turn transcript + latency (STT/LLM/TTS ms) + token usage |
-| `lead_scores` | Post-call score (0–100), label (hot/warm/cold), timeline |
-| `crm_sync_log` | Every CRM REST sync attempt with idempotency key |
-| `call_events` | Operational events: HOT alerts, guardrail blocks, escalations |
-| `webhook_events` | Raw Exotel webhooks with HMAC signature verification status |
+| Table              | Purpose                                                       |
+| ------------------ | ------------------------------------------------------------- |
+| `campaigns`        | Dial batch — name, status, locale, dial window, max attempts  |
+| `campaign_targets` | Dial list — phone, locale, dial status, attempt count         |
+| `calls`            | One row per call attempt — provider SID, status, timestamps   |
+| `call_turns`       | Per-turn transcript + latency (STT/LLM/TTS ms) + token usage  |
+| `lead_scores`      | Post-call score (0–100), label (hot/warm/cold), timeline      |
+| `crm_sync_log`     | Every CRM REST sync attempt with idempotency key              |
+| `call_events`      | Operational events: HOT alerts, guardrail blocks, escalations |
+| `webhook_events`   | Raw Exotel webhooks with HMAC signature verification status   |
 
 Turn row convention: caller turns use `turnIndex * 2`, assistant turns use `turnIndex * 2 + 1` — adjacent and ordered correctly.
 
@@ -317,53 +319,53 @@ Turn row convention: caller turns use `turnIndex * 2`, assistant turns use `turn
 
 ### apps/api
 
-| Variable | Default | Description |
-|---|---|---|
-| `NODE_ENV` | `development` | |
-| `API_PORT` | `4100` | HTTP listen port |
-| `API_AUTH_TOKEN` | — | Bearer token for REST + WS auth; required in production |
-| `DATABASE_URL` | required | PostgreSQL connection string |
-| `REDIS_URL` | required | Redis connection string |
-| `EXOTEL_SID` | — | Exotel account SID |
-| `EXOTEL_API_KEY` | — | Exotel API key |
-| `EXOTEL_API_TOKEN` | — | Exotel API token |
-| `EXOTEL_SUBDOMAIN` | `api.exotel.com` | |
-| `EXOTEL_CALLER_ID` | — | ExoPhone (virtual number) |
-| `EXOTEL_APP_ID` | — | Voicebot App ID from Exotel dashboard |
-| `EXOTEL_WEBHOOK_SECRET` | — | HMAC secret for webhook signature verification |
-| `EXOTEL_STREAM_SECRET` | — | Optional shared secret for `/exotel-stream` WS endpoint |
-| `PUBLIC_BASE_URL` | `http://localhost:4100` | Used for Exotel status callback URL |
-| `CALL_LOCALE_DEFAULT` | `hi-IN` | Fallback locale when none is set on the call |
-| `LLM_PROVIDER_OVERRIDE` | — | `openrouter` or `auto` (leave blank for auto) |
-| `GUARDRAIL_SEMANTIC_ENABLED` | `true` | Enable LLM semantic guardrail (set `false` for local demos) |
-| `STT_STREAMING_ENABLED` | `false` | Use low-latency buffered STT in REST turn path |
-| `TTS_WS_STREAMING_ENABLED` | `false` | Use ElevenLabs WS streaming instead of HTTP per sentence |
-| `LLM_TIMEOUT_MS` | `3000` | Per-provider LLM timeout |
-| `OPENROUTER_TIMEOUT_MS` | `4000` | OpenRouter-specific timeout |
-| `TTS_TIMEOUT_MS` | `8000` | ElevenLabs request timeout |
-| `TURN_TIMEOUT_MS` | `12000` | Per-turn watchdog; aborts LLM+TTS on overrun |
-| `CALL_MAX_DURATION_MS` | `900000` | Hard call length cap (15 min); `0` = disabled |
-| `LLM_HISTORY_MAX_MESSAGES` | `20` | Sliding-window history cap |
-| `DEEPGRAM_API_KEY` | required (prod) | |
-| `ELEVENLABS_API_KEY` | required (prod) | |
-| `ELEVENLABS_VOICE_ID` | required (prod) | Indian multilingual voice ID |
-| `ELEVENLABS_STABILITY` | `0.65` | Voice stability (0–1) |
-| `ELEVENLABS_SIMILARITY_BOOST` | `0.9` | Voice similarity boost (0–1) |
-| `ELEVENLABS_STYLE` | `0.1` | Style exaggeration (keep low) |
-| `ELEVENLABS_MODEL` | `eleven_turbo_v2_5` | |
-| `ELEVENLABS_LANGUAGE_CODE` | `hi` | Forces Hindi phonetics for romanized Hindi |
-| `OPENROUTER_API_KEY` | required (prod) | |
-| `OPENROUTER_MODEL` | `anthropic/claude-haiku-4-5` | Primary LLM model |
-| `OPENROUTER_FALLBACK_MODEL` | — | Optional second model if primary fails |
-| `CRM_API_BASE_URL` | `http://localhost:4000` | |
-| `CRM_API_TOKEN` | — | |
+| Variable                      | Default                      | Description                                                 |
+| ----------------------------- | ---------------------------- | ----------------------------------------------------------- |
+| `NODE_ENV`                    | `development`                |                                                             |
+| `API_PORT`                    | `4100`                       | HTTP listen port                                            |
+| `API_AUTH_TOKEN`              | —                            | Bearer token for REST + WS auth; required in production     |
+| `DATABASE_URL`                | required                     | PostgreSQL connection string                                |
+| `REDIS_URL`                   | required                     | Redis connection string                                     |
+| `EXOTEL_SID`                  | —                            | Exotel account SID                                          |
+| `EXOTEL_API_KEY`              | —                            | Exotel API key                                              |
+| `EXOTEL_API_TOKEN`            | —                            | Exotel API token                                            |
+| `EXOTEL_SUBDOMAIN`            | `api.exotel.com`             |                                                             |
+| `EXOTEL_CALLER_ID`            | —                            | ExoPhone (virtual number)                                   |
+| `EXOTEL_APP_ID`               | —                            | Voicebot App ID from Exotel dashboard                       |
+| `EXOTEL_WEBHOOK_SECRET`       | —                            | HMAC secret for webhook signature verification              |
+| `EXOTEL_STREAM_SECRET`        | —                            | Optional shared secret for `/exotel-stream` WS endpoint     |
+| `PUBLIC_BASE_URL`             | `http://localhost:4100`      | Used for Exotel status callback URL                         |
+| `CALL_LOCALE_DEFAULT`         | `hi-IN`                      | Fallback locale when none is set on the call                |
+| `LLM_PROVIDER_OVERRIDE`       | —                            | `openrouter` or `auto` (leave blank for auto)               |
+| `GUARDRAIL_SEMANTIC_ENABLED`  | `true`                       | Enable LLM semantic guardrail (set `false` for local demos) |
+| `STT_STREAMING_ENABLED`       | `false`                      | Use low-latency buffered STT in REST turn path              |
+| `TTS_WS_STREAMING_ENABLED`    | `false`                      | Use ElevenLabs WS streaming instead of HTTP per sentence    |
+| `LLM_TIMEOUT_MS`              | `3000`                       | Per-provider LLM timeout                                    |
+| `OPENROUTER_TIMEOUT_MS`       | `4000`                       | OpenRouter-specific timeout                                 |
+| `TTS_TIMEOUT_MS`              | `8000`                       | ElevenLabs request timeout                                  |
+| `TURN_TIMEOUT_MS`             | `12000`                      | Per-turn watchdog; aborts LLM+TTS on overrun                |
+| `CALL_MAX_DURATION_MS`        | `900000`                     | Hard call length cap (15 min); `0` = disabled               |
+| `LLM_HISTORY_MAX_MESSAGES`    | `20`                         | Sliding-window history cap                                  |
+| `DEEPGRAM_API_KEY`            | required (prod)              |                                                             |
+| `ELEVENLABS_API_KEY`          | required (prod)              |                                                             |
+| `ELEVENLABS_VOICE_ID`         | required (prod)              | Indian multilingual voice ID                                |
+| `ELEVENLABS_STABILITY`        | `0.65`                       | Voice stability (0–1)                                       |
+| `ELEVENLABS_SIMILARITY_BOOST` | `0.9`                        | Voice similarity boost (0–1)                                |
+| `ELEVENLABS_STYLE`            | `0.1`                        | Style exaggeration (keep low)                               |
+| `ELEVENLABS_MODEL`            | `eleven_turbo_v2_5`          |                                                             |
+| `ELEVENLABS_LANGUAGE_CODE`    | `hi`                         | Forces Hindi phonetics for romanized Hindi                  |
+| `OPENROUTER_API_KEY`          | required (prod)              |                                                             |
+| `OPENROUTER_MODEL`            | `anthropic/claude-haiku-4-5` | Primary LLM model                                           |
+| `OPENROUTER_FALLBACK_MODEL`   | —                            | Optional second model if primary fails                      |
+| `CRM_API_BASE_URL`            | `http://localhost:4000`      |                                                             |
+| `CRM_API_TOKEN`               | —                            |                                                             |
 
 ### apps/worker
 
-| Variable | Default | Description |
-|---|---|---|
-| `LLM_SCORING_PROVIDER` | `auto` | `openrouter` or `auto` |
-| `LLM_SCORING_MODEL` | — | Override model for lead scoring (defaults to `OPENROUTER_MODEL`) |
+| Variable               | Default | Description                                                      |
+| ---------------------- | ------- | ---------------------------------------------------------------- |
+| `LLM_SCORING_PROVIDER` | `auto`  | `openrouter` or `auto`                                           |
+| `LLM_SCORING_MODEL`    | —       | Override model for lead scoring (defaults to `OPENROUTER_MODEL`) |
 
 Worker inherits all Exotel, Redis, DB, and OpenRouter vars from the shared `.env`.
 
@@ -433,46 +435,46 @@ Exotel opens this socket when a call connects.
 
 **Inbound (Exotel → server)**
 
-| Event | Key fields |
-|---|---|
-| `connected` | Handshake |
-| `start` | `call_sid`, `custom_parameters.callId`, `custom_parameters.locale` |
-| `media` | `payload` (base64 PCM 8 kHz) |
-| `dtmf` | `digit` ("1" / "2" / "3") |
-| `stop` | Call ended |
+| Event       | Key fields                                                         |
+| ----------- | ------------------------------------------------------------------ |
+| `connected` | Handshake                                                          |
+| `start`     | `call_sid`, `custom_parameters.callId`, `custom_parameters.locale` |
+| `media`     | `payload` (base64 PCM 8 kHz)                                       |
+| `dtmf`      | `digit` ("1" / "2" / "3")                                          |
+| `stop`      | Call ended                                                         |
 
 **Outbound (server → Exotel)**
 
-| Event | Key fields |
-|---|---|
+| Event   | Key fields                                            |
+| ------- | ----------------------------------------------------- |
 | `media` | `payload` (base64 PCM 8 kHz, 320-byte-aligned frames) |
-| `mark` | `name` ("s0", "s1", … sentence boundaries) |
-| `clear` | Drop queued audio (barge-in) |
+| `mark`  | `name` ("s0", "s1", … sentence boundaries)            |
+| `clear` | Drop queued audio (barge-in)                          |
 
 ### Browser demo — `/demo-voice`
 
 **Client → server control frames (JSON)**
 
-| `type` | Additional fields | Purpose |
-|---|---|---|
-| `start` | `callId`, `language`, `sampleRate`, `streaming: true` | Begin session |
-| `playback-done` | — | Client finished playing audio |
-| `stop` | — | End session |
-| Binary frame | Raw PCM16 audio at `sampleRate` Hz | Caller audio |
+| `type`          | Additional fields                                     | Purpose                       |
+| --------------- | ----------------------------------------------------- | ----------------------------- |
+| `start`         | `callId`, `language`, `sampleRate`, `streaming: true` | Begin session                 |
+| `playback-done` | —                                                     | Client finished playing audio |
+| `stop`          | —                                                     | End session                   |
+| Binary frame    | Raw PCM16 audio at `sampleRate` Hz                    | Caller audio                  |
 
 **Server → client frames (JSON)**
 
-| `type` | Key fields | When |
-|---|---|---|
-| `turn-start` | `transcript` | Utterance received, LLM starting |
-| `partial` | `transcript` | Deepgram interim result |
-| `reply-chunk` | `text` | LLM streaming delta |
-| `audio-chunk` | `audioBase64`, `sentenceIndex`, `last` | TTS audio fragment |
-| `cancel` | — | Barge-in: drop queued audio |
-| `reply-end` | `transcript`, `reply`, `endCall`, `canceled` | Turn complete |
-| `holding` | `transcript` | Fragment held (mid-thought) |
-| `greeting-end` | `reply`, `canceled` | Opening greeting complete |
-| `error` | `message` | Processing error |
+| `type`         | Key fields                                   | When                             |
+| -------------- | -------------------------------------------- | -------------------------------- |
+| `turn-start`   | `transcript`                                 | Utterance received, LLM starting |
+| `partial`      | `transcript`                                 | Deepgram interim result          |
+| `reply-chunk`  | `text`                                       | LLM streaming delta              |
+| `audio-chunk`  | `audioBase64`, `sentenceIndex`, `last`       | TTS audio fragment               |
+| `cancel`       | —                                            | Barge-in: drop queued audio      |
+| `reply-end`    | `transcript`, `reply`, `endCall`, `canceled` | Turn complete                    |
+| `holding`      | `transcript`                                 | Fragment held (mid-thought)      |
+| `greeting-end` | `reply`, `canceled`                          | Opening greeting complete        |
+| `error`        | `message`                                    | Processing error                 |
 
 ---
 
@@ -503,11 +505,11 @@ When Exotel fires a `completed` webhook:
 
 When Exotel sends DTMF digits via webhook:
 
-| Digit | Locale |
-|---|---|
-| `1` | `en-IN` |
-| `2` | `hi-IN` |
-| `3` | `gu-IN` |
+| Digit | Locale  |
+| ----- | ------- |
+| `1`   | `en-IN` |
+| `2`   | `hi-IN` |
+| `3`   | `gu-IN` |
 | other | `hi-IN` |
 
 ---
@@ -515,6 +517,7 @@ When Exotel sends DTMF digits via webhook:
 ## Deployment (Render)
 
 The project includes a `render.yaml` for one-click deployment:
+
 - **API service**: `pnpm build && pnpm start:api`, port 4100
 - **Worker service**: `pnpm build && pnpm start:worker`
 
@@ -524,8 +527,8 @@ Both services read from the same Render environment group. Set `PUBLIC_BASE_URL`
 
 ## Ports (local — distinct from CRM / ai-leads repos)
 
-| Service | Host port |
-|---|---|
-| API | 4100 |
-| PostgreSQL | 5433 |
-| Redis | 6380 |
+| Service    | Host port |
+| ---------- | --------- |
+| API        | 4100      |
+| PostgreSQL | 5433      |
+| Redis      | 6380      |

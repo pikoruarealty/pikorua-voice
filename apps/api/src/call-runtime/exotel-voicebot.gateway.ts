@@ -1,8 +1,4 @@
-import {
-  WebSocketGateway,
-  OnGatewayConnection,
-  OnGatewayDisconnect,
-} from "@nestjs/websockets";
+import { WebSocketGateway, OnGatewayConnection, OnGatewayDisconnect } from "@nestjs/websockets";
 import { WebSocket, RawData } from "ws";
 import { Injectable, Inject, Logger } from "@nestjs/common";
 import type { IncomingMessage } from "http";
@@ -142,11 +138,7 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
     );
   }
 
-  private async handleEvent(
-    client: WebSocket,
-    state: SessionState,
-    msg: Record<string, unknown>,
-  ) {
+  private async handleEvent(client: WebSocket, state: SessionState, msg: Record<string, unknown>) {
     switch (String(msg.event ?? "")) {
       case "connected":
         this.logger.log("Exotel stream: connected");
@@ -177,9 +169,7 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
               if (call.locale) state.locale = call.locale;
             }
           } catch (err) {
-            this.logger.warn(
-              `Failed to resolve callId from callSid=${callSid}: ${String(err)}`,
-            );
+            this.logger.warn(`Failed to resolve callId from callSid=${callSid}: ${String(err)}`);
           }
         }
 

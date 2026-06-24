@@ -223,7 +223,7 @@ export class LlmService {
     const openRouterKey = this.config.get<string>("OPENROUTER_API_KEY");
     if (!openRouterKey) return null;
     const openRouterModel = String(
-      this.config.get("OPENROUTER_MODEL") ?? "anthropic/claude-haiku-4.5",
+      this.config.get("OPENROUTER_MODEL") ?? "anthropic/claude-haiku-4-5",
     );
     try {
       const orMessages: Array<{ role: string; content: string }> = [];

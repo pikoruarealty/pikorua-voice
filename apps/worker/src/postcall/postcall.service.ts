@@ -38,19 +38,24 @@ export class PostCallProcessingService {
     const transcriptSource = callerTurns.length > 0 ? callerTurns : turns;
     const transcript = transcriptSource.map((t) => t.content).join(" \n");
 
-    // Heuristic signals (fallback when the LLM scorer is unavailable)
+    // Heuristic signals (fallback when the LLM scorer is unavailable).
+    // "yes" / "no" are intentionally excluded — they appear too freely in
+    // real-estate Hinglish ("yes I understand", "no problem") to be reliable
+    // signals. Prefer multi-word phrases that indicate clear intent.
     const positive = [
       "interested",
-      "yes",
+      "site visit",
+      "visit",
+      "book",
+      "appointment",
       "buy",
       "purchase",
       "schedule",
-      "demo",
+      "when can",
       "call me",
       "contact me",
-      "lead",
     ];
-    const negative = ["no", "not interested", "stop", "unsubscribe", "no thanks"];
+    const negative = ["not interested", "don't call", "do not call", "stop", "unsubscribe", "no thanks"];
 
     const matchedPos: string[] = [];
     const matchedNeg: string[] = [];

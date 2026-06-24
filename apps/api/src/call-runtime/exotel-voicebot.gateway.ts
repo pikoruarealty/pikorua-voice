@@ -383,6 +383,9 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
       );
     } finally {
       if (state.active === active) state.active = null;
+      // Always clear: on clean finish we never set it false otherwise; on barge-in
+      // onCancel already did this, so setting false twice is harmless.
+      state.speaking = false;
     }
   }
 

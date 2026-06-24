@@ -18,7 +18,7 @@ const TTS_RESPELLINGS: Array<[RegExp, string]> = [
   // phonemes ("bro-chure") instead of the correct "BROH-shuh" sound.
   [/\bbrochures?\b/gi, "ब्रोशर"],
   // Hard-block "take care" — replace with the correct sign-off at the TTS layer.
-  [/\btake care[!.]*/gi, "Have a nice day."],
+  [/\btake care[!.]*/gi, "Thank you."],
 ];
 
 // Area units: in Hindi mode the engine reads "square feet" with English
@@ -179,18 +179,23 @@ export function normalizeForTts(text: string, languageCode = "hi"): string {
     }
   } else {
     // Hard-block "take care" — replace with the correct sign-off at the TTS layer.
-    out = out.replace(/\btake care[!.]*/gi, "Have a nice day.");
+    out = out.replace(/\btake care[!.]*/gi, "Thank you.");
   }
 
-  // Expand BHK configurations: "4BHK" → "चार BHK" (Hindi) / "4 BHK" (English).
+  // Expand BHK configurations: "4BHK" → "चार BHK" (Hindi) / "four BHK" (English).
   // Handles whole and half configs: 4, 4.5, 5, etc.
   // Must run before the general number pass so the digit isn't left raw for TTS.
   out = out.replace(/\b(\d+(?:\.\d+)?)\s*BHK\b/gi, (_, num) => {
     const n = parseFloat(num);
     const whole = Math.floor(n);
     const half = n % 1 !== 0;
-    const wordWhole = Number.isInteger(whole) && whole < 100 ? englishNumberWords(whole) : String(whole);
-    return half ? `${wordWhole} and a half BHK` : `${wordWhole} BHK`;
+    const wordWhole =
+      Number.isInteger(whole) && whole < 100
+        ? hindi ? hindiNumberWords(whole) : englishNumberWords(whole)
+        : String(whole);
+    return half
+      ? hindi ? `${wordWhole} और आधा BHK` : `${wordWhole} and a half BHK`
+      : `${wordWhole} BHK`;
   });
 
   // Convert numbers to words so the engine doesn't mispronounce them.

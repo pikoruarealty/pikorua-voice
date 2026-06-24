@@ -246,7 +246,7 @@ export class CallRuntimeService implements OnApplicationShutdown {
   }
 
   // Returns true (and stamps the cooldown) when an apology should play.
-  // Suppresses consecutive apologies within 15s — a repeated provider failure
+  // Suppresses consecutive apologies within 25s — a repeated provider failure
   // must not loop the same sorry message every turn.
   private apologyOnCooldown(state: CallState): boolean {
     return Date.now() - state.lastApologyAt < 25_000;
@@ -807,25 +807,25 @@ You know the full portfolio below including internal prices. Prices are FOR YOUR
 
 APARTMENTS (all have clubhouse amenities and a sample flat ready):
 [internal prices are in Crore, for budget-matching only — never disclose]
-- Off Sindhu Bhavan Road: 4 BHK, 3,300 sqft, ₹3+ Cr [internal], Under Construction (~2.5 years), 30+ storeys, 500+ units, 5 towers
-- Off Sindhu Bhavan Road: 4 BHK, 4,200 sqft, ₹4+ Cr [internal], Under Construction (~2.5 years), 30+ storeys, 500+ units, 5 towers
-- Off Sindhu Bhavan Road: 5 BHK, 6,100 sqft, ₹5.8+ Cr [internal], Under Construction (~2.5 years), 30+ storeys, 500+ units, 5 towers
-- Off Sindhu Bhavan Road: 4 BHK, 4,800 sqft, ₹3+ Cr [internal], Ready to Move In (<2 months), 10+ storeys, 45+ units, 2 towers
-- Off Sindhu Bhavan Road: 5 BHK, 8,500 sqft, ₹6.5+ Cr [internal], Ready to Move In (<2 months), 10+ storeys, 45+ units, 2 towers
-- Off Sindhu Bhavan Road: 4 BHK, 7,300 sqft, ₹6.5+ Cr [internal], Near Possession (<1 year), 20+ storeys, 110+ units, 3 towers
-- Off Sindhu Bhavan Road: 5 BHK, 8,400 sqft, ₹7.5+ Cr [internal], Near Possession (<1 year), 20+ storeys, 110+ units, 3 towers
-- Iskon-Ambli Road: 4 BHK, 5,000 sqft, ₹4.5+ Cr [internal], Ready to Move In (<2 months), 10+ storeys, 65+ units, 2 towers
-- Off Iskon-Ambli: 4 BHK, 3,700 sqft, ₹3.8+ Cr [internal], Under Construction (~2 years), 20+ storeys, 70+ units, 2 towers
-- Off Iskon-Ambli: 5 BHK, 6,500 sqft, ₹7+ Cr [internal], Under Construction (~2 years), 20+ storeys, 70+ units, 2 towers
-- Off Iskon-Ambli: 4 BHK, 5,700 sqft, ₹6+ Cr [internal], Under Construction (~1.5 years), 30+ storeys, 110+ units, 2 towers
-- Off Iskon-Ambli: 5 BHK, 7,600 sqft, ₹8+ Cr [internal], Under Construction (~1.5 years), 30+ storeys, 110+ units, 2 towers
-- Thaltej: 4 BHK, 3,400 sqft, ₹3+ Cr [internal], Ready to Move In (<2 months), 13+ storeys, 100+ units, 4 towers
-- Thaltej: 5 BHK, 6,500 sqft, ₹6.5+ Cr [internal], Ready to Move In (<2 months), 13+ storeys, 100+ units, 4 towers
-- Nehrunagar: 4 BHK, 3,000 sqft, ₹3+ Cr [internal], Pre-Launch (~3+ years), 25+ storeys, 600+ units, 10 towers [no sample flat — sales team handles site visit]
-- Nehrunagar: 5 BHK, 6,000 sqft, ₹3+ Cr [internal], Pre-Launch (~3+ years), 25+ storeys, 600+ units, 10 towers [no sample flat — sales team handles site visit]
-- Vastrapur: 3 BHK, 3,000 sqft, ₹4+ Cr [internal], Pre-Launch (~3+ years), 17+ storeys, 220+ units, 4 towers
-- Vastrapur: 4 BHK, 4,200 sqft, ₹4+ Cr [internal], Pre-Launch (~3+ years), 17+ storeys, 220+ units, 4 towers
-- Vastrapur: 4 BHK, 4,700 sqft, ₹4+ Cr [internal], Pre-Launch (~3+ years), 17+ storeys, 220+ units, 4 towers
+- Off Sindhu Bhavan Road: 4 BHK, 3,300 square feet, ₹3+ Cr [internal], Under Construction (~2.5 years), 30+ storeys, 500+ units, 5 towers
+- Off Sindhu Bhavan Road: 4 BHK, 4,200 square feet, ₹4+ Cr [internal], Under Construction (~2.5 years), 30+ storeys, 500+ units, 5 towers
+- Off Sindhu Bhavan Road: 5 BHK, 6,100 square feet, ₹5.8+ Cr [internal], Under Construction (~2.5 years), 30+ storeys, 500+ units, 5 towers
+- Off Sindhu Bhavan Road: 4 BHK, 4,800 square feet, ₹3+ Cr [internal], Ready to Move In (<2 months), 10+ storeys, 45+ units, 2 towers
+- Off Sindhu Bhavan Road: 5 BHK, 8,500 square feet, ₹6.5+ Cr [internal], Ready to Move In (<2 months), 10+ storeys, 45+ units, 2 towers
+- Off Sindhu Bhavan Road: 4 BHK, 7,300 square feet, ₹6.5+ Cr [internal], Near Possession (<1 year), 20+ storeys, 110+ units, 3 towers
+- Off Sindhu Bhavan Road: 5 BHK, 8,400 square feet, ₹7.5+ Cr [internal], Near Possession (<1 year), 20+ storeys, 110+ units, 3 towers
+- Iskon-Ambli Road: 4 BHK, 5,000 square feet, ₹4.5+ Cr [internal], Ready to Move In (<2 months), 10+ storeys, 65+ units, 2 towers
+- Off Iskon-Ambli: 4 BHK, 3,700 square feet, ₹3.8+ Cr [internal], Under Construction (~2 years), 20+ storeys, 70+ units, 2 towers
+- Off Iskon-Ambli: 5 BHK, 6,500 square feet, ₹7+ Cr [internal], Under Construction (~2 years), 20+ storeys, 70+ units, 2 towers
+- Off Iskon-Ambli: 4 BHK, 5,700 square feet, ₹6+ Cr [internal], Under Construction (~1.5 years), 30+ storeys, 110+ units, 2 towers
+- Off Iskon-Ambli: 5 BHK, 7,600 square feet, ₹8+ Cr [internal], Under Construction (~1.5 years), 30+ storeys, 110+ units, 2 towers
+- Thaltej: 4 BHK, 3,400 square feet, ₹3+ Cr [internal], Ready to Move In (<2 months), 13+ storeys, 100+ units, 4 towers
+- Thaltej: 5 BHK, 6,500 square feet, ₹6.5+ Cr [internal], Ready to Move In (<2 months), 13+ storeys, 100+ units, 4 towers
+- Nehrunagar: 4 BHK, 3,000 square feet, ₹3+ Cr [internal], Pre-Launch (~3+ years), 25+ storeys, 600+ units, 10 towers [no sample flat — sales team handles site visit]
+- Nehrunagar: 5 BHK, 6,000 square feet, ₹3+ Cr [internal], Pre-Launch (~3+ years), 25+ storeys, 600+ units, 10 towers [no sample flat — sales team handles site visit]
+- Vastrapur: 3 BHK, 3,000 square feet, ₹4+ Cr [internal], Pre-Launch (~3+ years), 17+ storeys, 220+ units, 4 towers
+- Vastrapur: 4 BHK, 4,200 square feet, ₹4+ Cr [internal], Pre-Launch (~3+ years), 17+ storeys, 220+ units, 4 towers
+- Vastrapur: 4 BHK, 4,700 square feet, ₹4+ Cr [internal], Pre-Launch (~3+ years), 17+ storeys, 220+ units, 4 towers
 
 BUNGALOWS & PLOTS (all have CC/clubhouse amenities and a sample bungalow/plot ready):
 [internal prices are in Crore, for budget-matching only — never disclose]
@@ -937,8 +937,8 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
 
   private wrapUpText(locale: string): string {
     return this.isHinglishLocale(locale)
-      ? "Sir, हमारे luxury sales expert आपसे personally connect करेंगे। Thank you."
-      : "Sir, our luxury sales expert will personally reach out to you. Thank you.";
+      ? "हमारे luxury sales expert आपसे personally connect करेंगे। Thank you."
+      : "Our luxury sales expert will personally reach out to you. Thank you.";
   }
 
   // TTS with outage fallback: a transient ElevenLabs failure must not drop a
@@ -1328,6 +1328,16 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
     waitForMore: boolean;
     canceled: boolean;
   }> {
+    // Mirror the noise guard from the HTTP path so background audio / short
+    // fillers don't trigger an LLM call on the live Exotel path either.
+    const trimmedUtterance = utteranceText.trim();
+    if (!trimmedUtterance || isNoisyTranscript(trimmedUtterance)) {
+      this.logger.warn(
+        `Skipping noise utterance on live path callId=${callId}: "${trimmedUtterance.slice(0, 40)}"`,
+      );
+      return { transcript: trimmedUtterance, reply: "", endCall: false, waitForMore: true, canceled: false };
+    }
+
     const prep = await this.prepareUtterance(callId, utteranceText, opts.locale);
     if (prep.hold) {
       return {
@@ -1401,8 +1411,7 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
     // of one HTTP call per sentence. Sentences are dispatched as text frames;
     // ElevenLabs pipelines them so the next sentence starts generating while the
     // previous is still playing. Controlled by TTS_WS_STREAMING_ENABLED env var.
-    const useWsStreaming =
-      String(this.config.get("TTS_WS_STREAMING_ENABLED") ?? "false") === "true";
+    const useWsStreaming = this.config.get<boolean>("TTS_WS_STREAMING_ENABLED") === true;
     let wsSession: ReturnType<typeof this.tts.openWsSession> | null = null;
     let resolveWsDone: () => void = () => {};
     const wsAudioDone: Promise<void> | null = useWsStreaming

@@ -51,6 +51,7 @@ export const envSchema = z
     GUARDRAIL_SEMANTIC_ENABLED: booleanFlag.default(true),
     STT_REALTIME_ENABLED: booleanFlag.default(false),
     STT_STREAMING_ENABLED: booleanFlag.default(false),
+    TTS_WS_STREAMING_ENABLED: booleanFlag.default(false),
 
     // Voice-turn latency & robustness tuning
     LLM_TIMEOUT_MS: z.coerce.number().int().positive().default(3000),

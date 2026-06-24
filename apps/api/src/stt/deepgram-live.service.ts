@@ -99,8 +99,11 @@ export class DeepgramLiveService {
     const sendEndpointing = (ms: number) => {
       if (!open || !ws) return;
       try {
-        // Deepgram accepts live config updates via a JSON message on the same socket.
-        ws.send(JSON.stringify({ type: "Configure", processors: { endpointing: ms, utterance_end_ms: ms } }));
+        // Only update utterance_end_ms (the hard utterance boundary). The
+        // endpointing=300 from the URL is the fine-grained VAD sensitivity and
+        // should stay fixed — coupling both to the same value drifts endpointing
+        // to 1400 permanently after the first short-ack restore cycle.
+        ws.send(JSON.stringify({ type: "Configure", processors: { utterance_end_ms: ms } }));
       } catch {}
     };
 

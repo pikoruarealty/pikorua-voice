@@ -86,6 +86,16 @@ export class DeepgramLiveService {
       utterance_end_ms: "1400",
       vad_events: "true",
     });
+    // Boost recognition of local project/area proper nouns that nova-2 otherwise
+    // mangles or drops entirely — most notably "Iskcon Ambli". Format is
+    // term:intensifier (higher = stronger bias toward that spelling).
+    for (const kw of [
+      "Iskcon:2", "Ambli:2", "Sindhu:1", "Bhavan:1", "Rajpath:1", "Rangoli:1",
+      "Thaltej:1", "Vastrapur:1", "Nehrunagar:1", "Vaishnodevi:1", "Gota:1",
+      "Shilaj:1", "Nandoli:1", "Bodakdev:1",
+    ]) {
+      params.append("keywords", kw);
+    }
     const url = `wss://api.deepgram.com/v1/listen?${params.toString()}`;
 
     let ws: WebSocket | null = null;

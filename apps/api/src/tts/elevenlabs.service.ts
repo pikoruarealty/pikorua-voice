@@ -386,12 +386,17 @@ export class ElevenlabsService {
     // delivery (a friendly young woman) without going so high that stability
     // drops and the voice starts to waver.
     const style = Number(this.config.get("ELEVENLABS_STYLE") ?? 0.3);
+    // Playback speed. ElevenLabs accepts 0.7–1.2 only (1.0 = natural pace).
+    // Default bumped to 1.2 — the maximum — for a brisker delivery on the new
+    // voice, which read too slowly at 1.0. Clamped so an out-of-range env value
+    // can't break synthesis. Lower via ELEVENLABS_SPEED if 1.2 feels rushed.
+    const speed = Math.min(1.2, Math.max(0.7, Number(this.config.get("ELEVENLABS_SPEED") ?? 1.2)));
     const modelId = String(this.config.get("ELEVENLABS_MODEL") ?? "eleven_turbo_v2_5");
     // Forcing the language makes the model read romanized Hindi correctly
     // ("aapko", "kya") instead of mangling it with English phonemes. English
     // words then get a natural Indian accent — right for Hinglish calls.
     const languageCode = this.resolveLanguageCode(opts);
-    return { key, vid, stability, similarityBoost, style, modelId, languageCode };
+    return { key, vid, stability, similarityBoost, style, speed, modelId, languageCode };
   }
 
   private buildBody(text: string, cfg: ReturnType<ElevenlabsService["requestConfig"]>) {
@@ -402,6 +407,7 @@ export class ElevenlabsService {
         stability: cfg.stability,
         similarity_boost: cfg.similarityBoost,
         style: cfg.style,
+        speed: cfg.speed,
         use_speaker_boost: true,
       },
     };
@@ -591,6 +597,7 @@ export class ElevenlabsService {
             stability: cfg.stability,
             similarity_boost: cfg.similarityBoost,
             style: cfg.style,
+            speed: cfg.speed,
             use_speaker_boost: true,
           },
           ...(cfg.languageCode ? { language_code: cfg.languageCode.split("-")[0] } : {}),

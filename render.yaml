@@ -56,11 +56,13 @@ services:
       - key: ELEVENLABS_LANGUAGE_CODE
         value: hi
       - key: ELEVENLABS_STABILITY
-        value: "0.65"
+        value: "0.5"
       - key: ELEVENLABS_SIMILARITY_BOOST
         value: "0.9"
       - key: ELEVENLABS_STYLE
-        value: "0.1"
+        value: "0.45"
+      - key: ELEVENLABS_SPEED
+        value: "1.1"
 
       # ── LLM · OpenRouter (Claude Haiku primary, GPT-OSS fallback) ─────────
       - key: OPENROUTER_API_KEY

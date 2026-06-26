@@ -377,20 +377,24 @@ export class ElevenlabsService {
       throw new ServiceUnavailableException("ElevenLabs API key is not configured");
     }
     // Voice tuning for a natural, human conversational tone (not robotic):
-    // moderate stability keeps it steady without monotone; lower style avoids
-    // the exaggerated/synthetic feel; high similarity keeps the voice's warmth.
+    // moderate stability keeps it steady without monotone; style adds the
+    // smile/warmth; high similarity keeps the voice's character.
     // All overridable via env so you can tune without a redeploy.
-    const stability = Number(this.config.get("ELEVENLABS_STABILITY") ?? 0.58);
+    // Stability lowered to 0.50 — higher values flatten the expressiveness into
+    // a neutral monotone, which is exactly what made her sound bland. A bit less
+    // stability lets the "smile" from `style` actually come through.
+    const stability = Number(this.config.get("ELEVENLABS_STABILITY") ?? 0.5);
     const similarityBoost = Number(this.config.get("ELEVENLABS_SIMILARITY_BOOST") ?? 0.9);
-    // Style controls expressiveness. Nudged to 0.30 for a warmer, smiling
-    // delivery (a friendly young woman) without going so high that stability
-    // drops and the voice starts to waver.
-    const style = Number(this.config.get("ELEVENLABS_STYLE") ?? 0.3);
+    // Style controls expressiveness — this is the "smile" dial. Raised to 0.45
+    // (from 0.30) so she sounds like a warm, smiling young woman rather than a
+    // flat, neutral reader. Pushing much past ~0.5 starts to sound theatrical
+    // and can make her waver, so 0.45 is the warm-but-steady sweet spot.
+    const style = Number(this.config.get("ELEVENLABS_STYLE") ?? 0.45);
     // Playback speed. ElevenLabs accepts 0.7–1.2 only (1.0 = natural pace).
-    // Default bumped to 1.2 — the maximum — for a brisker delivery on the new
-    // voice, which read too slowly at 1.0. Clamped so an out-of-range env value
-    // can't break synthesis. Lower via ELEVENLABS_SPEED if 1.2 feels rushed.
-    const speed = Math.min(1.2, Math.max(0.7, Number(this.config.get("ELEVENLABS_SPEED") ?? 1.2)));
+    // Default 1.1 — a touch brisker than natural for the new voice (which read
+    // too slowly at 1.0) without the rushed feel of the 1.2 maximum. Clamped so
+    // an out-of-range env value can't break synthesis. Tune via ELEVENLABS_SPEED.
+    const speed = Math.min(1.2, Math.max(0.7, Number(this.config.get("ELEVENLABS_SPEED") ?? 1.1)));
     const modelId = String(this.config.get("ELEVENLABS_MODEL") ?? "eleven_turbo_v2_5");
     // Forcing the language makes the model read romanized Hindi correctly
     // ("aapko", "kya") instead of mangling it with English phonemes. English

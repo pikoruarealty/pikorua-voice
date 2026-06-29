@@ -80,6 +80,9 @@ const CONTINUATION_CUES = new Set([
 
 // Pure interjections / backchannels with no content of their own. On their own
 // they are never a real answer.
+// NOTE: "haan"/"हाँ" (yes) is intentionally NOT here — it's a valid one-word
+// answer to a yes/no question (e.g. confirming a time), so it must reach the LLM
+// rather than being filtered as noise.
 const FILLER_INTERJECTIONS = [
   "um",
   "uh",
@@ -91,7 +94,6 @@ const FILLER_INTERJECTIONS = [
   "hmm",
   "hm",
   "ha",
-  "haan",
   "huh",
   "mhm",
   "uh-huh",
@@ -796,7 +798,7 @@ POSSESSION GUIDE: "Ready to Move In" = possession in under 2 months. "Near Posse
 BUDGET-MATCHING (internal reasoning step — never share this logic with the client):
 When the client states a budget (e.g. "3 करोड़", "around 5 Cr", "4-5 Cr"):
 1. Parse their number as करोड़. If they give a range, use the midpoint.
-2. SUB-2 CR FLOW: If their budget is below ₹2 Cr — do NOT say anything about budget or pricing. Do NOT invite for a site visit. Continue the conversation: ask remaining questions (location, BHK, possession, name) warmly ONE at a time. Collect ALL details first. Only AFTER you have their name AND have asked the know-them questions (profession, area of residence) — close warmly: "Sir, हमारी team आपको personally contact करेगी और आपके requirement के according best options share करेगी। Thank you." → end with ${END_CALL_TOKEN}. NEVER reveal why the team will contact them. NEVER mention budget, price, or any limitation.
+2. SUB-2.5 CR FLOW: If their budget is below ₹2.5 Cr — stay just as warm, polite, and gracious as with any other caller; NEVER make them feel their budget is small or insufficient. Do NOT say anything about budget or pricing. Do NOT invite for a site visit. Simply continue your normal script naturally: ask the remaining questions (location, BHK, possession, name) warmly ONE at a time. Collect ALL details first. Only AFTER you have their name AND have asked the know-them questions (profession, area of residence) — close warmly: "Sir, हमारी team आपको personally contact करेगी और आपके requirement के according best options share करेगी। Thank you." → end with ${END_CALL_TOKEN}. NEVER reveal why the team will contact them. NEVER mention budget, price, or any limitation.
 3. HIGH-BUDGET NO-MATCH: If the client's stated budget significantly exceeds the highest-priced inventory for their chosen property type (e.g., 25 Cr+ for apartments when max apartment price is ~8 Cr; or 20+ Cr for a bungalow) — do NOT recommend a property priced far below their budget. Instead, pivot warmly without mentioning the mismatch: describe the project briefly as a distinguished gated community, mention the sample apartment is ready, and invite directly — "यह एक exceptional gated community है — sample apartment तैयार है। Family के साथ sample apartment देखने आज 11 बजे सुबह convenient रहेगा या 5 बजे शाम?" The expert team will have the right conversation about scope at the site.
 4. Apply ±1 करोड़ tolerance: budget of 4 Cr → shortlist anything priced ₹3 Cr to ₹5 Cr.
 5. From that shortlist, apply location + BHK + possession filters.
@@ -943,7 +945,7 @@ POSSESSION GUIDE: "Ready to Move In" = possession in under 2 months. "Near Posse
 BUDGET-MATCHING (internal reasoning step — never share this logic with the client):
 When the client states a budget (e.g. "3 Crore", "around 5 Cr", "4-5 Cr"):
 1. Parse their number as Crore. If they give a range, use the midpoint.
-2. SUB-2 CR FLOW: If their budget is below ₹2 Cr — do NOT say anything about budget or pricing. Do NOT invite for a site visit. Continue the conversation: ask remaining questions (location, BHK, possession, name) warmly ONE at a time. Collect ALL details first. Only AFTER you have their name AND have asked the know-them questions (profession, area of residence) — close warmly: "Our team will personally reach out to you and share the best options suited to your requirement. Thank you." → end with ${END_CALL_TOKEN}. NEVER reveal why the team will contact them. NEVER mention budget, price, or any limitation.
+2. SUB-2.5 CR FLOW: If their budget is below ₹2.5 Cr — stay just as warm, polite, and gracious as with any other caller; NEVER make them feel their budget is small or insufficient. Do NOT say anything about budget or pricing. Do NOT invite for a site visit. Simply continue your normal script naturally: ask the remaining questions (location, BHK, possession, name) warmly ONE at a time. Collect ALL details first. Only AFTER you have their name AND have asked the know-them questions (profession, area of residence) — close warmly: "Our team will personally reach out to you and share the best options suited to your requirement. Thank you." → end with ${END_CALL_TOKEN}. NEVER reveal why the team will contact them. NEVER mention budget, price, or any limitation.
 3. HIGH-BUDGET NO-MATCH: If the client's stated budget significantly exceeds the highest-priced inventory for their chosen property type (e.g., 25 Cr+ for apartments when max apartment price is ~8 Cr; or 20+ Cr for a bungalow) — do NOT recommend a property priced far below their budget. Instead, pivot warmly without mentioning the mismatch: describe the project briefly as a distinguished gated community, mention the sample apartment is ready, and invite directly — "It's a distinguished gated community of luxury residences. We have a sample apartment ready — what time would be convenient for you to visit the sample apartment — 11 in the morning or 5 in the evening?" The expert team will have the right conversation about scope at the site.
 4. Apply ±1 Cr tolerance: budget of 4 Cr → shortlist anything priced ₹3 Cr to ₹5 Cr.
 5. From that shortlist, apply location + BHK + possession filters.

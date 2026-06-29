@@ -37,7 +37,7 @@ const EXOTEL_FRAME_PACING_MS = 90;
 // the instant the queue drains clips the end of Maya's closing line. We wait an
 // extra fixed grace so Exotel's buffer plays out fully and her final sentence is
 // never cut off. Generous enough to cover any realistic closing statement.
-const EXOTEL_HANGUP_GRACE_MS = 2500;
+const EXOTEL_HANGUP_GRACE_MS = 3000;
 
 class PcmReframer {
   private buf: Buffer = Buffer.alloc(0);
@@ -122,6 +122,10 @@ type SessionState = {
   queue: Promise<void>;
   speaking: boolean;
   active: ActiveTurn | null;
+  // True only while the FINAL (end-call) statement is playing out. Barge-in is
+  // disabled during this window so the caller saying "ok/bye" can't clip Maya's
+  // closing line before the call hangs up.
+  closing: boolean;
   // Real-time-paced audio sender to Exotel (shared across greeting + turns).
   pacer: PacedSender;
 };
@@ -172,6 +176,7 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
       queue: Promise.resolve(),
       speaking: false,
       active: null,
+      closing: false,
       pacer: new PacedSender((frame) =>
         this.send(client, { event: "media", media: { payload: frame.toString("base64") } }),
       ),
@@ -351,26 +356,48 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
     );
   }
 
-  // Server-side barge-in: when the caller is talking over the bot, abort the
-  // active turn and tell Exotel to drop its audio queue. Threshold is low (2
-  // chars) so Maya stops almost immediately on a short interjection ("हाँ",
-  // "ok", "but") rather than talking over the caller — she goes silent, lets
-  // them finish, and the completed utterance drives the next turn.
+  // True while Maya's voice is still going out to the caller. CRUCIAL: a turn's
+  // promise resolves when audio is handed to the pacer, NOT when Exotel finishes
+  // playing it — the pacer keeps streaming for seconds afterwards. So `active`
+  // and `speaking` are both false during that tail; only `pacer.active` reflects
+  // that the caller can still hear Maya. Barge-in MUST consider it or late
+  // interruptions are missed.
+  private isMayaAudible(state: SessionState): boolean {
+    return state.active !== null || state.speaking || state.pacer.active;
+  }
+
+  // Stop whatever Maya is currently saying: abort the in-flight turn, drop all
+  // queued + in-flight audio locally, and tell Exotel to flush its own playback
+  // buffer. After this the caller has the floor.
+  private stopSpeaking(client: WebSocket, state: SessionState) {
+    state.active?.controller.abort();
+    state.pacer.clear();
+    this.send(client, { event: "clear" });
+    state.speaking = false;
+  }
+
+  // Server-side barge-in (fast path): the caller starts talking over Maya. A
+  // 3-char floor filters 1-2 char noise/echo blips while still catching short
+  // interjections ("हाँ", "रुको", "stop", "नहीं"). She goes silent immediately
+  // and the completed utterance drives the next turn.
   private handlePartial(client: WebSocket, state: SessionState, text: string) {
-    if ((state.active || state.speaking) && text.trim().length >= 2) {
-      if (state.active) {
-        this.logger.log(`Barge-in callId=${state.callId} — aborting active turn`);
-        state.active.controller.abort();
-      }
-      if (state.speaking || state.active) {
-        state.pacer.clear();
-        this.send(client, { event: "clear" });
-        state.speaking = false;
-      }
+    if (state.closing) return; // never interrupt the final closing line
+    if (this.isMayaAudible(state) && text.trim().length >= 3) {
+      this.logger.log(`Barge-in (partial) callId=${state.callId} — stopping playback`);
+      this.stopSpeaking(client, state);
     }
   }
 
   private enqueueTurn(client: WebSocket, state: SessionState, utterance: string) {
+    this.logger.log(`Utterance callId=${state.callId}: "${utterance.slice(0, 60)}"`);
+    // Reliable barge-in (commit path): a fully-formed caller utterance must stop
+    // Maya even if no partial triggered the fast path above — otherwise her old
+    // reply keeps playing from the pacer/Exotel buffer and this turn just queues
+    // behind it (the bug that made barge-in look broken). Skipped while closing.
+    if (!state.closing && this.isMayaAudible(state)) {
+      this.logger.log(`Barge-in (utterance) callId=${state.callId} — stopping playback`);
+      this.stopSpeaking(client, state);
+    }
     state.queue = state.queue.then(async () => {
       if (!state.callId || client.readyState !== WebSocket.OPEN) return;
       await this.runTurn(client, state, utterance);
@@ -424,7 +451,10 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
       }
 
       if (result.endCall) {
-        this.logger.log(`Call ended callId=${state.callId}`);
+        // Lock out barge-in so a caller "ok/bye/thanks" during the closing line
+        // can't abort it and hang up mid-sentence.
+        state.closing = true;
+        this.logger.log(`Call ended callId=${state.callId} — draining final audio`);
         // Let the paced audio fully drain before closing the WebSocket, else
         // the final reply is cut off. Cap the wait so a stuck pacer can't hang.
         await this.waitForPacerDrain(state, 20_000);

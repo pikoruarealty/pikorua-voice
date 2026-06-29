@@ -31,6 +31,14 @@ const EXOTEL_FRAME_ALIGN = 320; // 20 ms — Exotel's required multiple
 // without overflowing it.
 const EXOTEL_FRAME_PACING_MS = 90;
 
+// Grace period before hanging up after the LAST reply. Because we pace frames
+// at a slight lead (90 ms send per 100 ms of audio), our local queue empties
+// BEFORE Exotel has finished playing what we already sent — closing the socket
+// the instant the queue drains clips the end of Maya's closing line. We wait an
+// extra fixed grace so Exotel's buffer plays out fully and her final sentence is
+// never cut off. Generous enough to cover any realistic closing statement.
+const EXOTEL_HANGUP_GRACE_MS = 2500;
+
 class PcmReframer {
   private buf: Buffer = Buffer.alloc(0);
 
@@ -344,9 +352,12 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
   }
 
   // Server-side barge-in: when the caller is talking over the bot, abort the
-  // active turn and tell Exotel to drop its audio queue.
+  // active turn and tell Exotel to drop its audio queue. Threshold is low (2
+  // chars) so Maya stops almost immediately on a short interjection ("हाँ",
+  // "ok", "but") rather than talking over the caller — she goes silent, lets
+  // them finish, and the completed utterance drives the next turn.
   private handlePartial(client: WebSocket, state: SessionState, text: string) {
-    if ((state.active || state.speaking) && text.trim().length >= 4) {
+    if ((state.active || state.speaking) && text.trim().length >= 2) {
       if (state.active) {
         this.logger.log(`Barge-in callId=${state.callId} — aborting active turn`);
         state.active.controller.abort();
@@ -417,6 +428,10 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
         // Let the paced audio fully drain before closing the WebSocket, else
         // the final reply is cut off. Cap the wait so a stuck pacer can't hang.
         await this.waitForPacerDrain(state, 20_000);
+        // Our local queue drains slightly ahead of real-time playback, so give
+        // Exotel's buffer time to finish playing Maya's last sentence before we
+        // hang up — otherwise her closing line gets clipped.
+        await new Promise<void>((r) => setTimeout(r, EXOTEL_HANGUP_GRACE_MS));
         try {
           client.close();
         } catch {}

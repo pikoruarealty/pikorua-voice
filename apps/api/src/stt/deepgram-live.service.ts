@@ -20,7 +20,7 @@ export type LiveSession = {
   clearBuffer: () => void;
   // Dynamically tighten/loosen the VAD silence window (ms). Use ~400 after the
   // caller speaks a short ack ("haan", "ok", "yes") to avoid wasting ~1s of
-  // dead air; restore to 1400 for full utterances.
+  // dead air; restore to 1000 for full utterances.
   setEndpointing: (utteranceEndMs: number) => void;
   close: () => void;
 };
@@ -37,7 +37,7 @@ const MAX_BUFFERED_CHUNKS = 200; // ~20s of 100ms frames — drop oldest beyond 
 const SHORT_ACK_PATTERN =
   /^(haan|ha|han|okay|ok|yes|no|nahi|nai|sure|bilkul|theek|thik|hmm|ji|hm|yep|nope|right|got it|go on|accha|acha)[\s.,!?।]*$/i;
 const SHORT_ACK_ENDPOINTING_MS = 400;
-const DEFAULT_ENDPOINTING_MS = 1400;
+const DEFAULT_ENDPOINTING_MS = 1000;
 
 // Persistent Deepgram Live (streaming) STT with server-side endpointing.
 // Utterance boundaries come from Deepgram's VAD (speech_final / UtteranceEnd
@@ -81,9 +81,12 @@ export class DeepgramLiveService {
       interim_results: "true",
       // endpointing: ms of silence after speech before is_final fires
       endpointing: "300",
-      // utterance_end_ms: hard utterance boundary — generous so thinking
-      // pauses don't cut the caller off
-      utterance_end_ms: "1400",
+      // utterance_end_ms: hard fallback utterance boundary when no speech_final
+      // fires. 1000ms responds noticeably faster than the old 1400ms while still
+      // tolerating short thinking pauses (the runtime's fragment-hold catches
+      // genuine mid-thought cut-offs). speech_final (endpointing=300) remains the
+      // primary, faster trigger for most utterances.
+      utterance_end_ms: "1000",
       vad_events: "true",
     });
     // Boost recognition of local project/area proper nouns that nova-2 otherwise
@@ -118,16 +121,17 @@ export class DeepgramLiveService {
       } catch {}
     };
 
-    // noiseFilter: only suppress single unrecognized words from VAD/UtteranceEnd
-    // events (likely background noise). Do NOT filter on socket-close paths where
-    // the caller's final word must always be delivered.
-    const flushUtterance = (noiseFilter = false) => {
+    // Deliver every finished utterance, including single-word answers — callers
+    // legitimately reply with one word ("Thaltej", "doctor", "five", "5 BHK"),
+    // and dropping those forced them to repeat themselves. Pure filler/noise
+    // (um, uh, haan-only) is still filtered downstream by isNoisyTranscript in
+    // the call runtime, so genuine background noise doesn't reach the LLM.
+    // (noiseFilter param retained for call-site compatibility; no longer drops.)
+    const flushUtterance = (_noiseFilter = false) => {
       const utterance = finalSegments.join(" ").replace(/\s+/g, " ").trim();
       finalSegments = [];
       if (!utterance) return;
       const isShortAck = SHORT_ACK_PATTERN.test(utterance);
-      // Drop single-word noise transcriptions only when called from VAD paths.
-      if (noiseFilter && utterance.split(/\s+/).length === 1 && !isShortAck) return;
       const targetMs = isShortAck ? SHORT_ACK_ENDPOINTING_MS : DEFAULT_ENDPOINTING_MS;
       if (targetMs !== currentEndpointingMs) {
         currentEndpointingMs = targetMs;

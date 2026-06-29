@@ -346,6 +346,7 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
       state.locale,
       EXOTEL_SAMPLE_RATE,
       {
+        onSpeechStart: () => this.handleSpeechStart(client, state),
         onPartial: (text) => this.handlePartial(client, state, text),
         onUtterance: (text) => this.enqueueTurn(client, state, text),
         onError: (message) => {
@@ -354,6 +355,17 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
       },
       { encoding: "linear16" },
     );
+  }
+
+  // Immediate barge-in from Deepgram's VAD — fires the instant voice is
+  // detected, before any transcript arrives. This is the fastest stop signal;
+  // handlePartial is a slower fallback for cases where SpeechStarted is missed.
+  private handleSpeechStart(client: WebSocket, state: SessionState) {
+    if (state.closing) return;
+    if (this.isMayaAudible(state)) {
+      this.logger.log(`Barge-in (speech-start VAD) callId=${state.callId} — stopping playback`);
+      this.stopSpeaking(client, state);
+    }
   }
 
   // True while Maya's voice is still going out to the caller. CRUCIAL: a turn's
@@ -382,7 +394,7 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
   // and the completed utterance drives the next turn.
   private handlePartial(client: WebSocket, state: SessionState, text: string) {
     if (state.closing) return; // never interrupt the final closing line
-    if (this.isMayaAudible(state) && text.trim().length >= 3) {
+    if (this.isMayaAudible(state) && text.trim().length >= 2) {
       this.logger.log(`Barge-in (partial) callId=${state.callId} — stopping playback`);
       this.stopSpeaking(client, state);
     }

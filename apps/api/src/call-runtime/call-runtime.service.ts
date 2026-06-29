@@ -121,6 +121,11 @@ function isNoisyTranscript(text: string): boolean {
   if (normalized.length > 20) return false; // anything longer is probably real speech
   const words = normalized.split(/\s+/).filter(Boolean);
   if (words.length === 0) return true;
+  // Single-word utterances: only drop unambiguous pure fillers (um, uh, hmm…).
+  // Continuation cues like "ya" (yes in Indian English) or "ek" (one in Hindi)
+  // are valid standalone answers — dropping them causes one-word responses to be
+  // silently ignored. Multi-word all-cue phrases ("aur mera to") remain noise.
+  if (words.length === 1) return FILLER_INTERJECTIONS.includes(words[0]);
   return words.every((w) => NOISE_WORDS.has(w));
 }
 
@@ -133,7 +138,11 @@ function looksIncomplete(text: string): boolean {
     .toLowerCase()
     .replace(/[.?!।]+$/, "")
     .trim()
-    .split(/\s+/);
+    .split(/\s+/)
+    .filter(Boolean);
+  // Single-word answers are never mid-thought. Holding them deadlocks the call —
+  // the caller said their one word and is now waiting for Maya to respond.
+  if (words.length <= 1) return false;
   const last = words[words.length - 1] ?? "";
   return CONTINUATION_CUES.has(last);
 }

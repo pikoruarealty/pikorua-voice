@@ -8,6 +8,9 @@ export type LiveSessionCallbacks = {
   // A finished utterance, as decided by Deepgram's own endpointing.
   onUtterance: (text: string) => void;
   onError: (message: string) => void;
+  // Fires the instant Deepgram's VAD detects voice — before any transcript.
+  // Use this for immediate barge-in; onPartial is a slower fallback.
+  onSpeechStart?: () => void;
 };
 
 export type LiveSessionOptions = {
@@ -210,6 +213,10 @@ export class DeepgramLiveService {
             // Fires after utterance_end_ms of silence as a fallback boundary when
             // no speech_final arrived. Downstream isNoisyTranscript filters noise.
             flushUtterance();
+          } else if (msg.type === "SpeechStarted") {
+            // VAD event: fires the instant Deepgram detects voice activity,
+            // before any ASR result. Fastest possible barge-in signal.
+            callbacks.onSpeechStart?.();
           }
         } catch {
           // ignore non-JSON frames

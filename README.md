@@ -349,7 +349,7 @@ Turn row convention: caller turns use `turnIndex * 2`, assistant turns use `turn
 | `DEEPGRAM_API_KEY`            | required (prod)              |                                                             |
 | `ELEVENLABS_API_KEY`          | required (prod)              |                                                             |
 | `ELEVENLABS_VOICE_ID`         | required (prod)              | Indian multilingual voice ID                                |
-| `ELEVENLABS_STABILITY`        | `0.65`                       | Voice stability (0–1)                                       |
+| `ELEVENLABS_STABILITY`        | `0.55`                       | Voice stability (0–1)                                       |
 | `ELEVENLABS_SIMILARITY_BOOST` | `0.9`                        | Voice similarity boost (0–1)                                |
 | `ELEVENLABS_STYLE`            | `0.1`                        | Style exaggeration (keep low)                               |
 | `ELEVENLABS_MODEL`            | `eleven_turbo_v2_5`          |                                                             |

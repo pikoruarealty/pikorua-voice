@@ -12,6 +12,7 @@ const TTS_RESPELLINGS: Array<[RegExp, string]> = [
   [/\blakhs?\b/gi, "लाख"],
   [/\bISKCON\b/gi, "इस्कॉन"],
   [/\bAmbli\b/gi, "अंबली"],
+  [/\bBopal\b/gi, "बोपल"],
   [/\bAhmedabad\b/gi, "अहमदाबाद"],
   [/\bBodakdev\b/gi, "बोडकदेव"],
   // "brochure" is French-derived — the Hindi engine reads it with English
@@ -20,6 +21,9 @@ const TTS_RESPELLINGS: Array<[RegExp, string]> = [
   // Brand suffix "Group" in "पिकोरा Group" — the Hindi engine mangles the Latin
   // word mid-sentence; respell in Devanagari so it reads as "ग्रुप".
   [/\bgroup\b/gi, "ग्रुप"],
+  // Brand suffix "Realty" in "पिकोरा Realty" — respell so the Hindi engine reads
+  // it cleanly as "रियल्टी" instead of mangling the Latin word mid-sentence.
+  [/\brealty\b/gi, "रियल्टी"],
   // Hard-block "take care" — replace with the correct sign-off at the TTS layer.
   [/\btake care[!.]*/gi, "Thank you."],
 ];
@@ -380,10 +384,11 @@ export class ElevenlabsService {
     // moderate stability keeps it steady without monotone; style adds the
     // smile/warmth; high similarity keeps the voice's character.
     // All overridable via env so you can tune without a redeploy.
-    // Stability lowered to 0.50 — higher values flatten the expressiveness into
-    // a neutral monotone, which is exactly what made her sound bland. A bit less
-    // stability lets the "smile" from `style` actually come through.
-    const stability = Number(this.config.get("ELEVENLABS_STABILITY") ?? 0.5);
+    // Stability 0.55 — the consistency dial. Too low (≤0.5) lets tone drift
+    // turn-to-turn (sometimes warm, sometimes flat); too high flattens the
+    // smile into a monotone. 0.55 holds a steady, consistent tone across the
+    // whole conversation while `style` below still carries the warmth.
+    const stability = Number(this.config.get("ELEVENLABS_STABILITY") ?? 0.55);
     const similarityBoost = Number(this.config.get("ELEVENLABS_SIMILARITY_BOOST") ?? 0.9);
     // Style controls expressiveness — this is the "smile" dial. Raised to 0.45
     // (from 0.30) so she sounds like a warm, smiling young woman rather than a

@@ -89,13 +89,17 @@ export class DeepgramLiveService {
       utterance_end_ms: "1000",
       vad_events: "true",
     });
-    // Boost recognition of local project/area proper nouns that nova-2 otherwise
-    // mangles or drops entirely — most notably "Iskcon Ambli". Format is
-    // term:intensifier (higher = stronger bias toward that spelling).
+    // Boost recognition of local project/area proper nouns and property terms
+    // that nova-2 otherwise mangles or drops entirely — most notably the
+    // "Ambli-Bopal Road" area and "bungalow". Format is term:intensifier
+    // (higher = stronger bias toward that spelling). Old aliases (Iskcon, Ambli)
+    // are kept so callers who still say them are recognised and mapped.
     for (const kw of [
-      "Iskcon:2", "Ambli:2", "Sindhu:1", "Bhavan:1", "Rajpath:1", "Rangoli:1",
-      "Thaltej:1", "Vastrapur:1", "Nehrunagar:1", "Vaishnodevi:1", "Gota:1",
-      "Shilaj:1", "Nandoli:1", "Bodakdev:1",
+      "Ambli:2", "Bopal:2", "Iskcon:2",
+      "bungalow:2", "bungalows:2", "penthouse:1", "duplex:1",
+      "Sindhu:2", "Bhavan:2", "Rajpath:2", "Rangoli:2",
+      "Thaltej:2", "Vastrapur:2", "Nehrunagar:2", "Vaishnodevi:2", "Gota:1",
+      "Shilaj:2", "Nandoli:2", "Bodakdev:1",
     ]) {
       params.append("keywords", kw);
     }

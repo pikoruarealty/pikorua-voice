@@ -56,7 +56,7 @@ services:
       - key: ELEVENLABS_LANGUAGE_CODE
         value: hi
       - key: ELEVENLABS_STABILITY
-        value: "0.5"
+        value: "0.55"
       - key: ELEVENLABS_SIMILARITY_BOOST
         value: "0.9"
       - key: ELEVENLABS_STYLE

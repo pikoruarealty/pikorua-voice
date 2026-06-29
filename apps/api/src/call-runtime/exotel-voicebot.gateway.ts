@@ -37,7 +37,12 @@ const EXOTEL_FRAME_PACING_MS = 90;
 // the instant the queue drains clips the end of Maya's closing line. We wait an
 // extra fixed grace so Exotel's buffer plays out fully and her final sentence is
 // never cut off. Generous enough to cover any realistic closing statement.
-const EXOTEL_HANGUP_GRACE_MS = 3000;
+const EXOTEL_HANGUP_GRACE_MS = 7000;
+
+// If the client says nothing for this long, Maya asks if they're still there.
+const INACTIVITY_TIMEOUT_MS = 15_000;
+// Two consecutive inactivity fires with no real utterance in between → goodbye + hang up.
+const INACTIVITY_MAX_STRIKES = 2;
 
 class PcmReframer {
   private buf: Buffer = Buffer.alloc(0);
@@ -128,6 +133,9 @@ type SessionState = {
   closing: boolean;
   // Real-time-paced audio sender to Exotel (shared across greeting + turns).
   pacer: PacedSender;
+  // Inactivity: fires after INACTIVITY_TIMEOUT_MS with no client utterance.
+  inactivityTimer: ReturnType<typeof setTimeout> | null;
+  inactivityStrikes: number;
 };
 
 // Exotel Voicebot WebSocket gateway.
@@ -180,6 +188,8 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
       pacer: new PacedSender((frame) =>
         this.send(client, { event: "media", media: { payload: frame.toString("base64") } }),
       ),
+      inactivityTimer: null,
+      inactivityStrikes: 0,
     };
     this.sessions.set(client, state);
     this.logger.log("Exotel voicebot connection opened");
@@ -200,6 +210,7 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
       state.active?.controller.abort();
       state.stt?.close();
       state.pacer.clear();
+      this.clearInactivityTimer(state);
     }
     this.sessions.delete(client);
     this.logger.log(
@@ -286,6 +297,7 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
         state.stt?.close();
         state.stt = null;
         state.pacer.clear();
+        this.clearInactivityTimer(state);
         break;
     }
   }
@@ -338,6 +350,8 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
       );
     } finally {
       if (state.active?.controller === controller) state.active = null;
+      // Greeting done — start the 15 s inactivity clock waiting for client to speak.
+      this.resetInactivityTimer(client, state);
     }
   }
 
@@ -390,6 +404,9 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
 
   private enqueueTurn(client: WebSocket, state: SessionState, utterance: string) {
     this.logger.log(`Utterance callId=${state.callId}: "${utterance.slice(0, 60)}"`);
+    // Real utterance — reset inactivity so Maya doesn't ask "still there?" mid-conversation.
+    state.inactivityStrikes = 0;
+    this.resetInactivityTimer(client, state);
     // Reliable barge-in (commit path): a fully-formed caller utterance must stop
     // Maya even if no partial triggered the fast path above — otherwise her old
     // reply keeps playing from the pacer/Exotel buffer and this turn just queues
@@ -435,6 +452,12 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
             state.speaking = false;
             state.pacer.clear();
             this.send(client, { event: "clear" });
+          },
+          onEndCall: () => {
+            // Lock out barge-in the moment the LLM signals end-call, before TTS
+            // audio finishes draining — otherwise a 1-char partial from background
+            // noise fires stopSpeaking and clips Maya's closing statement.
+            state.closing = true;
           },
         },
       );
@@ -493,6 +516,97 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
       try {
         client.send(JSON.stringify(payload));
       } catch {}
+    }
+  }
+
+  private resetInactivityTimer(client: WebSocket, state: SessionState): void {
+    if (state.inactivityTimer !== null) {
+      clearTimeout(state.inactivityTimer);
+      state.inactivityTimer = null;
+    }
+    if (state.closing) return;
+    state.inactivityTimer = setTimeout(
+      () => void this.handleInactivity(client, state),
+      INACTIVITY_TIMEOUT_MS,
+    );
+  }
+
+  private clearInactivityTimer(state: SessionState): void {
+    if (state.inactivityTimer !== null) {
+      clearTimeout(state.inactivityTimer);
+      state.inactivityTimer = null;
+    }
+  }
+
+  private handleInactivity(client: WebSocket, state: SessionState): void {
+    state.inactivityTimer = null;
+    if (state.closing || client.readyState !== WebSocket.OPEN) return;
+    if (this.isMayaAudible(state)) {
+      // Maya is mid-reply — re-arm and check again shortly.
+      state.inactivityTimer = setTimeout(
+        () => void this.handleInactivity(client, state),
+        2_000,
+      );
+      return;
+    }
+    state.inactivityStrikes += 1;
+    const strikes = state.inactivityStrikes;
+    const isHindi = state.locale.startsWith("hi") || state.locale.startsWith("gu");
+
+    if (strikes >= INACTIVITY_MAX_STRIKES) {
+      // Second strike with no response — say goodbye and hang up.
+      const goodbye = isHindi
+        ? "लगता है आप अभी available नहीं हैं। हमारे sales expert आपसे personally connect करेंगे। Thank you, namaste."
+        : "It seems you are unavailable. Our sales expert will personally reach out to you. Thank you.";
+      state.queue = state.queue.then(async () => {
+        if (state.inactivityStrikes < strikes || client.readyState !== WebSocket.OPEN) return;
+        state.closing = true;
+        await this.playDirectTts(state, goodbye);
+        await this.waitForPacerDrain(state, 10_000);
+        await new Promise<void>((r) => setTimeout(r, EXOTEL_HANGUP_GRACE_MS));
+        try { client.close(); } catch {}
+      });
+    } else {
+      // First strike — ask if they're still there.
+      const checkIn = isHindi
+        ? "Hello? क्या आप अभी भी line पर हैं?"
+        : "Hello? Are you still there?";
+      state.queue = state.queue.then(async () => {
+        // If the client spoke while this was queued, skip it.
+        if (state.inactivityStrikes < strikes || state.closing) return;
+        if (client.readyState !== WebSocket.OPEN) return;
+        await this.playDirectTts(state, checkIn);
+      });
+      // Re-arm: another 15 s with no response → second strike.
+      this.resetInactivityTimer(client, state);
+    }
+  }
+
+  // Synthesize text directly to the pacer, bypassing the LLM pipeline.
+  // Used for inactivity check-ins where no LLM call is needed.
+  private async playDirectTts(state: SessionState, text: string): Promise<void> {
+    const controller = new AbortController();
+    state.active = { controller };
+    state.speaking = false;
+    const reframer = new PcmReframer((frame) => {
+      state.speaking = true;
+      state.pacer.enqueue(frame);
+    });
+    try {
+      await this.tts.synthesizeStream(text, {
+        languageCode: /[ऀ-ॿ]/.test(text) ? undefined : "en",
+        outputFormat: EXOTEL_OUTPUT_FORMAT,
+        signal: controller.signal,
+        onChunk: (chunk) => {
+          if (chunk.length > 0) reframer.push(chunk);
+        },
+      });
+      if (!controller.signal.aborted) reframer.flush();
+    } catch {
+      // aborted by barge-in or TTS failure — pacer carries whatever was queued
+    } finally {
+      state.speaking = false;
+      if (state.active?.controller === controller) state.active = null;
     }
   }
 }

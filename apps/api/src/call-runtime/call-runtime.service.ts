@@ -183,6 +183,9 @@ export type TurnStreamSink = {
   onAudioChunk: (chunk: Buffer, info: { sentenceIndex: number; last: boolean }) => void;
   // Transport must drop any queued/playing audio (guardrail replacement).
   onCancel?: () => void;
+  // Fires the instant the LLM emits the end-call signal, before TTS audio finishes.
+  // Lock out barge-in here so the closing statement can't be clipped by noise.
+  onEndCall?: () => void;
 };
 
 export type TurnResult = {
@@ -1561,6 +1564,14 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
     let jsonMode: boolean | null = null;
     let pendingText = "";
     let endCallDetected = false;
+    // Call once when end-call is first detected — notifies the transport to
+    // lock out barge-in immediately so the closing statement isn't cut off.
+    const markEndCall = () => {
+      if (!endCallDetected) {
+        endCallDetected = true;
+        sink.onEndCall?.();
+      }
+    };
 
     // WS streaming path: one persistent ElevenLabs WS session per turn instead
     // of one HTTP call per sentence. Sentences are dispatched as text frames;
@@ -1645,7 +1656,7 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
 
       // Strip a complete end-call sentinel anywhere in the buffer.
       if (hasEndCall(pendingText)) {
-        endCallDetected = true;
+        markEndCall();
         pendingText = stripEndCall(pendingText);
       }
 
@@ -1739,7 +1750,7 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
       if (jsonMode) {
         const parsed = this.parseLlmReply(llmResolved.text, callId);
         reply = parsed.reply;
-        endCallDetected = endCallDetected || parsed.endCall;
+        if (parsed.endCall) markEndCall();
         // Nothing was dispatched yet in JSON mode — dispatch parsed sentences now.
         let rest = reply;
         let m: RegExpExecArray | null;
@@ -1751,14 +1762,14 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
         if (rest.trim()) dispatchSentence(rest);
       } else {
         if (hasEndCall(pendingText)) {
-          endCallDetected = true;
+          markEndCall();
           pendingText = stripEndCall(pendingText);
         }
         if (pendingText.trim()) dispatchSentence(pendingText);
         pendingText = "";
         const parsed = this.parseLlmReply(llmResolved.text, callId);
         reply = parsed.reply;
-        endCallDetected = endCallDetected || parsed.endCall;
+        if (parsed.endCall) markEndCall();
       }
 
       if (!reply.trim()) {

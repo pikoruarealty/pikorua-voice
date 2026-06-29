@@ -37,7 +37,7 @@ const EXOTEL_FRAME_PACING_MS = 90;
 // the instant the queue drains clips the end of Maya's closing line. We wait an
 // extra fixed grace so Exotel's buffer plays out fully and her final sentence is
 // never cut off. Generous enough to cover any realistic closing statement.
-const EXOTEL_HANGUP_GRACE_MS = 7000;
+const EXOTEL_HANGUP_GRACE_MS = 9000;
 
 // If the client says nothing for this long, Maya asks if they're still there.
 const INACTIVITY_TIMEOUT_MS = 15_000;

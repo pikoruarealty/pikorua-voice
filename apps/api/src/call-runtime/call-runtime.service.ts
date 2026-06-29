@@ -1770,10 +1770,26 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
         : this.guardrail.checkSemantic(reply).catch((): GuardrailResult => {
             return { triggered: false, rule: null, replacement: null };
           });
-      const [, semantic] = await Promise.all([wsAudioDone ?? ttsQueue, semanticPromise]);
 
-      if (sink.signal.aborted) {
-        return this.finishCanceledTurn(state, dispatchedText, utterance, /* alreadyPushed */ true);
+      // Race drain + guardrail against a barge-in abort. The guardrail LLM call
+      // takes ~1–2 s; if the caller already interrupted, waiting for it stalls
+      // the queue and delays processing their utterance by the same amount.
+      // On abort we bail immediately — the result is irrelevant for a canceled turn.
+      const drainAndCheck = Promise.all([wsAudioDone ?? ttsQueue, semanticPromise]);
+      let semantic: GuardrailResult = { triggered: false, rule: null, replacement: null };
+      {
+        let aborted = sink.signal.aborted;
+        if (!aborted) {
+          const abortRace = new Promise<void>((r) =>
+            sink.signal.addEventListener("abort", () => r(), { once: true }),
+          );
+          await Promise.race([drainAndCheck.then(() => {}), abortRace]);
+          aborted = sink.signal.aborted;
+        }
+        if (aborted) {
+          return this.finishCanceledTurn(state, dispatchedText, utterance, /* alreadyPushed */ true);
+        }
+        [, semantic] = await drainAndCheck; // already resolved
       }
 
       let guardrailTriggered = false;

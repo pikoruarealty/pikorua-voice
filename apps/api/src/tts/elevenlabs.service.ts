@@ -14,6 +14,11 @@ const TTS_RESPELLINGS: Array<[RegExp, string]> = [
   [/\bAmbli\b/gi, "अंबली"],
   [/\bBopal\b/gi, "बोपल"],
   [/\bAhmedabad\b/gi, "अहमदाबाद"],
+  // "bungalow" — Hindi engine mangles the Latin word; respell so it reads naturally.
+  [/\bbungalows\b/gi, "बंगलो"],
+  [/\bbungalow\b/gi, "बंगलो"],
+  [/\bबंगले\b/g, "बंगलो"],
+  [/\bबंगला\b/g, "बंगलो"],
   [/\bBodakdev\b/gi, "बोडकदेव"],
   // "brochure" is French-derived — the Hindi engine reads it with English
   // phonemes ("bro-chure") instead of the correct "BROH-shuh" sound.

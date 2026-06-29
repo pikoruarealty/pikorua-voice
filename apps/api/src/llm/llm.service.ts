@@ -14,7 +14,7 @@ export type LlmResult = {
 
 export type LlmOptions = {
   model?: string;
-  provider?: "google" | "auto" | "openrouter";
+  provider?: "auto" | "openrouter";
   systemPrompt?: string;
   maxTokens?: number;
   // Aborts the in-flight request — used by the per-turn watchdog and barge-in.

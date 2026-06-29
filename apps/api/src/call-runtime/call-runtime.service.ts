@@ -30,7 +30,7 @@ type CallState = {
   locale: string;
   // LLM provider is pinned at call start so the voice/persona doesn't drift
   // mid-conversation from per-turn provider roulette.
-  provider: "google" | "auto" | "openrouter";
+  provider: "auto" | "openrouter";
   startedAt: number;
   lastActivityAt: number;
   // Caller speech held back because it looked like a mid-thought pause.
@@ -78,10 +78,9 @@ const CONTINUATION_CUES = new Set([
   "uski",
 ]);
 
-// Transcripts that are pure noise/filler should not reach the LLM because
-// the LLM will invent apology phrases (e.g. "Sorry, आवाज़ कट गई") and loop.
-// A transcript is noise if every word is a known filler AND total length is tiny.
-const NOISE_WORDS = new Set([
+// Pure interjections / backchannels with no content of their own. On their own
+// they are never a real answer.
+const FILLER_INTERJECTIONS = [
   "um",
   "uh",
   "uhh",
@@ -93,37 +92,24 @@ const NOISE_WORDS = new Set([
   "hm",
   "ha",
   "haan",
-  "ha",
   "huh",
   "mhm",
   "uh-huh",
-  ...[
-    "aur",
-    "and",
-    "to",
-    "toh",
-    "but",
-    "lekin",
-    "par",
-    "ki",
-    "because",
-    "kyunki",
-    "kyuki",
-    "matlab",
-    "like",
-    "so",
-    "ya",
-    "or",
-    "plus",
-    "mera",
-    "meri",
-    "apna",
-    "apni",
-    "uska",
-    "uski",
-    "ek",
-  ],
-]);
+];
+
+// Transcripts that are pure noise/filler should not reach the LLM because
+// the LLM will invent apology phrases (e.g. "Sorry, आवाज़ कट गई") and loop.
+// A transcript is noise if every word is a known filler AND total length is tiny.
+//
+// NOISE_WORDS deliberately includes every CONTINUATION_CUE: a transcript that is
+// ONLY conjunctions/possessives ("aur", "mera to") carries no answer either.
+// Building the set from CONTINUATION_CUES (single source of truth) keeps the two
+// lists from drifting. The two checks do NOT conflict because they run in order:
+// isNoisyTranscript() fires first and drops an all-cue *short* transcript as
+// noise; looksIncomplete()'s fragment-hold only applies to a *real* utterance
+// that happens to trail off on a cue (e.g. "मेरा budget around 5 करोड़ है, और"),
+// which is longer than the 20-char noise gate and so never reaches the cue check.
+const NOISE_WORDS = new Set<string>([...FILLER_INTERJECTIONS, ...CONTINUATION_CUES]);
 
 function isNoisyTranscript(text: string): boolean {
   const normalized = text
@@ -154,7 +140,20 @@ function looksIncomplete(text: string): boolean {
 // of wrapping every reply in a JSON envelope — plain text can be streamed
 // sentence-by-sentence into TTS, a JSON wrapper cannot.
 const END_CALL_TOKEN = "<end_call/>";
-const END_CALL_PATTERN = /<\s*end_call\s*\/?\s*>/gi;
+
+// The end-call detector is the most safety-critical check in the runtime
+// (it decides whether to hang up). It MUST be stateless: a module-level
+// global (/g) regex carries `lastIndex` between calls, so a `.test()` from one
+// streaming turn would silently change the result of the next — across
+// concurrent calls sharing this module. These helpers build a fresh regex per
+// invocation, so there is no shared mutable state to leak.
+const END_CALL_SOURCE = "<\\s*end_call\\s*/?\\s*>";
+function hasEndCall(text: string): boolean {
+  return new RegExp(END_CALL_SOURCE, "i").test(text);
+}
+function stripEndCall(text: string): string {
+  return text.replace(new RegExp(END_CALL_SOURCE, "gi"), "");
+}
 
 // Sentence boundary for streaming dispatch: ., !, ?, or Devanagari danda,
 // optionally followed by a closing quote/bracket.
@@ -191,7 +190,10 @@ export type PreStreamedData = {
 };
 
 // End the call after this many consecutive silence turns within SILENCE_WINDOW_MS.
-const SILENCE_END_THRESHOLD = 2;
+// Default 3 (was 2): on a noisy line two filler/blank transcripts in a row are
+// common — a prospect who simply pauses twice should not get hung up on. Three
+// strikes is a firmer signal the line is genuinely dead. Tunable via env.
+const SILENCE_END_THRESHOLD_DEFAULT = 3;
 const SILENCE_WINDOW_MS = 45_000;
 
 // Redis TTL for call state: 3 hours, covering max call duration plus headroom.
@@ -466,12 +468,10 @@ export class CallRuntimeService implements OnApplicationShutdown {
         jsonMode = head.startsWith("{") || head.startsWith("`");
       }
       if (jsonMode) return;
-      if (END_CALL_PATTERN.test(pendingText)) {
+      if (hasEndCall(pendingText)) {
         endCallDetected = true;
-        END_CALL_PATTERN.lastIndex = 0;
-        pendingText = pendingText.replace(END_CALL_PATTERN, "");
+        pendingText = stripEndCall(pendingText);
       }
-      END_CALL_PATTERN.lastIndex = 0;
       let match: RegExpExecArray | null;
       while ((match = SENTENCE_BOUNDARY.exec(pendingText))) {
         const end = match.index + match[1].length;
@@ -524,12 +524,10 @@ export class CallRuntimeService implements OnApplicationShutdown {
         }
         if (rest.trim()) dispatchSentence(rest);
       } else {
-        if (END_CALL_PATTERN.test(pendingText)) {
+        if (hasEndCall(pendingText)) {
           endCallDetected = true;
-          END_CALL_PATTERN.lastIndex = 0;
-          pendingText = pendingText.replace(END_CALL_PATTERN, "");
+          pendingText = stripEndCall(pendingText);
         }
-        END_CALL_PATTERN.lastIndex = 0;
         if (pendingText.trim()) dispatchSentence(pendingText);
         pendingText = "";
         const parsed = this.parseLlmReply(llmResolved.text, callId);
@@ -606,7 +604,7 @@ export class CallRuntimeService implements OnApplicationShutdown {
   // LLM provider for this call, decided ONCE at call start.
   private pickProvider(_locale: string): CallState["provider"] {
     try {
-      const override = this.config.get<"google" | "auto" | "openrouter" | undefined>(
+      const override = this.config.get<"auto" | "openrouter" | undefined>(
         "LLM_PROVIDER_OVERRIDE",
       );
       if (override) return override;
@@ -1021,9 +1019,8 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
       }
     }
 
-    const endCall = END_CALL_PATTERN.test(stripped);
-    END_CALL_PATTERN.lastIndex = 0;
-    return { reply: stripped.replace(END_CALL_PATTERN, "").trim(), endCall };
+    const endCall = hasEndCall(stripped);
+    return { reply: stripEndCall(stripped).trim(), endCall };
   }
 
   // Token-budget guard: keep the most recent turns. The system prompt carries
@@ -1044,6 +1041,11 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
 
   private turnTimeoutMs(): number {
     return Number(this.config.get("TURN_TIMEOUT_MS") ?? 12_000);
+  }
+
+  private silenceEndThreshold(): number {
+    const v = Number(this.config.get("SILENCE_END_THRESHOLD") ?? SILENCE_END_THRESHOLD_DEFAULT);
+    return Number.isFinite(v) && v >= 1 ? v : SILENCE_END_THRESHOLD_DEFAULT;
   }
 
   private guardrailFallbackText(locale: string): string {
@@ -1116,7 +1118,7 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
       state.silenceStrikes += 1;
       state.lastSilenceAt = now;
       // End the call after threshold consecutive silences within the window.
-      if (state.silenceStrikes >= SILENCE_END_THRESHOLD) {
+      if (state.silenceStrikes >= this.silenceEndThreshold()) {
         state.silenceStrikes = 0;
         const goodbye = this.isHinglishLocale(locale)
           ? "लगता है connection ठीक नहीं है। हमारे luxury sales expert आपसे personally connect करेंगे। Thank you."
@@ -1631,12 +1633,10 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
       if (jsonMode) return; // buffer everything; parse at end
 
       // Strip a complete end-call sentinel anywhere in the buffer.
-      if (END_CALL_PATTERN.test(pendingText)) {
+      if (hasEndCall(pendingText)) {
         endCallDetected = true;
-        END_CALL_PATTERN.lastIndex = 0;
-        pendingText = pendingText.replace(END_CALL_PATTERN, "");
+        pendingText = stripEndCall(pendingText);
       }
-      END_CALL_PATTERN.lastIndex = 0;
 
       // Dispatch complete sentences, but hold back a tail that could be the
       // start of a split sentinel token ("<end_ca...").
@@ -1739,12 +1739,10 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
         }
         if (rest.trim()) dispatchSentence(rest);
       } else {
-        if (END_CALL_PATTERN.test(pendingText)) {
+        if (hasEndCall(pendingText)) {
           endCallDetected = true;
-          END_CALL_PATTERN.lastIndex = 0;
-          pendingText = pendingText.replace(END_CALL_PATTERN, "");
+          pendingText = stripEndCall(pendingText);
         }
-        END_CALL_PATTERN.lastIndex = 0;
         if (pendingText.trim()) dispatchSentence(pendingText);
         pendingText = "";
         const parsed = this.parseLlmReply(llmResolved.text, callId);

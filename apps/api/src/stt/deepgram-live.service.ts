@@ -94,6 +94,20 @@ export class DeepgramLiveService {
     // "Ambli-Bopal Road" area and "bungalow". Format is term:intensifier
     // (higher = stronger bias toward that spelling). Old aliases (Iskcon, Ambli)
     // are kept so callers who still say them are recognised and mapped.
+    //
+    // Param choice is correct for the pinned model: `keywords` is the nova-2
+    // boosting mechanism; `keyterm` (Keyterm Prompting) is nova-3-only, so it is
+    // intentionally NOT used here.
+    //
+    // OPEN QUESTION (needs a live A/B, can't be settled from code): on a Hindi
+    // session nova-2 emits Devanagari (सिंधु, थलतेज), but these boosts are Latin.
+    // The English-word terms (bungalow/penthouse/duplex) and caller aliases
+    // (Iskcon/Ambli/Bopal) are correct as Latin in every mode; the area proper
+    // nouns may be no-ops in Hindi mode. To validate: run a batch of recorded
+    // Hindi calls with (a) Latin-only, (b) Latin + Devanagari area spellings,
+    // (c) Devanagari-only, and compare area-name WER. Only add Devanagari
+    // spellings once they are confirmed to match nova-2's exact output tokens —
+    // a near-miss spelling silently fails to bias and just adds request noise.
     for (const kw of [
       "Ambli:2", "Bopal:2", "Iskcon:2",
       "bungalow:2", "bungalows:2", "penthouse:1", "duplex:1",
@@ -130,8 +144,7 @@ export class DeepgramLiveService {
     // and dropping those forced them to repeat themselves. Pure filler/noise
     // (um, uh, haan-only) is still filtered downstream by isNoisyTranscript in
     // the call runtime, so genuine background noise doesn't reach the LLM.
-    // (noiseFilter param retained for call-site compatibility; no longer drops.)
-    const flushUtterance = (_noiseFilter = false) => {
+    const flushUtterance = () => {
       const utterance = finalSegments.join(" ").replace(/\s+/g, " ").trim();
       finalSegments = [];
       if (!utterance) return;
@@ -189,14 +202,14 @@ export class DeepgramLiveService {
             if (msg.is_final) {
               if (transcript) finalSegments.push(transcript);
               // speech_final: Deepgram's endpointing says the speaker finished
-              if (msg.speech_final) flushUtterance(true);
+              if (msg.speech_final) flushUtterance();
             } else if (transcript) {
               callbacks.onPartial(transcript);
             }
           } else if (msg.type === "UtteranceEnd") {
-            // Fires after utterance_end_ms of silence — most likely source of
-            // noise transcriptions; apply the single-word filter here.
-            flushUtterance(true);
+            // Fires after utterance_end_ms of silence as a fallback boundary when
+            // no speech_final arrived. Downstream isNoisyTranscript filters noise.
+            flushUtterance();
           }
         } catch {
           // ignore non-JSON frames

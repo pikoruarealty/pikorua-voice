@@ -283,12 +283,48 @@ function isHindiMode(languageCode: string): boolean {
   return code.startsWith("hi") || code.startsWith("gu");
 }
 
+// Area-figure units (square feet / square yards) in the spellings the model
+// emits. Used to detect that a number names a property size.
+const AREA_UNIT_SRC =
+  "(?:square\\s+feet|sq\\.?\\s*(?:ft\\.?|feet)|sqft|square\\s+yards?|sq\\.?\\s*(?:yds?\\.?|yards?))";
+const AREA_NUM_SRC = "\\d{1,3}(?:,\\d{2,3})+|\\d+";
+const AREA_RANGE_RE = new RegExp(
+  `\\b(${AREA_NUM_SRC})(\\s*(?:up\\s+to|to|से|–|—|-)\\s*)(${AREA_NUM_SRC})(\\s*)(${AREA_UNIT_SRC})\\b`,
+  "gi",
+);
+const AREA_SINGLE_RE = new RegExp(`\\b(${AREA_NUM_SRC})(\\s*)(${AREA_UNIT_SRC})\\b`, "gi");
+
+// Property sizes read more naturally with the NUMBER in English even on a Hindi
+// call — "four thousand eight hundred square feet", not the Hindi number words —
+// the same reasoning as the BHK rule. The unit itself is still respelled to
+// Devanagari downstream (in Hindi mode) for correct pronunciation; only the
+// figure switches to English words. Handles single figures and two-number
+// ranges ("4,000–9,000 square feet", "700 to 2,100 square yards", "5,500 से
+// 11,000 square feet"). Must run BEFORE the Hindi unit respelling (which rewrites
+// "square feet" → Devanagari) and BEFORE the general number pass.
+function areaNumbersToEnglish(text: string): string {
+  const toWords = (raw: string) => {
+    const n = parseInt(raw.replace(/,/g, ""), 10);
+    return Number.isFinite(n) && n <= 9999999 ? englishNumberWords(n) : raw;
+  };
+  let out = text.replace(
+    AREA_RANGE_RE,
+    (_m, a, sep, b, sp, unit) => `${toWords(a)}${sep}${toWords(b)}${sp}${unit}`,
+  );
+  out = out.replace(AREA_SINGLE_RE, (_m, num, sp, unit) => `${toWords(num)}${sp}${unit}`);
+  return out;
+}
+
 // Normalize reply text for the voice engine. Locale-aware: Hindi/Gujarati
 // modes respell Indian words and large numbers in Devanagari and transliterate
 // leaked romanized Hindi; English modes only expand large numbers to words.
 export function normalizeForTts(text: string, languageCode = "hi"): string {
   let out = text;
   const hindi = isHindiMode(languageCode);
+
+  // Property sizes: number spoken in English in every mode. Runs first so the
+  // unit respelling and general number pass below see English words, not digits.
+  out = areaNumbersToEnglish(out);
 
   if (hindi) {
     for (const [pattern, replacement] of TTS_RESPELLINGS) {
@@ -322,7 +358,9 @@ export function normalizeForTts(text: string, languageCode = "hi"): string {
   // Convert numbers to words so the engine doesn't mispronounce them.
   // Exclusions (kept as digits — engine handles these natively or word-form is worse):
   //   • Years 1900–2099 not in a comma-grouped string
-  //   • Numbers immediately followed by AM/PM / % (e.g. "9AM")
+  //   • Numbers followed by AM/PM / % — with or without a space ("9AM" and "9 AM").
+  //     Clock times read more naturally as digits ("9 AM" not "nine AM"); the
+  //     model emits the spaced form, so the optional \s* is essential here.
   //   • Time patterns like "10:30"
   //   • Numbers > 9,999,999 (crore+) — too rare/complex to handle reliably
   out = out.replace(/\b\d{1,3}(?:,\d{2,3})+\b|\b\d+\b/g, (match, offset, str) => {
@@ -330,9 +368,10 @@ export function normalizeForTts(text: string, languageCode = "hi"): string {
     if (!Number.isFinite(n) || n > 9999999) return match;
     // Skip years when not comma-formatted
     if (!match.includes(",") && n >= 1900 && n <= 2099) return match;
-    // Skip if followed by AM/PM, %
+    // Skip if followed by AM/PM (optionally space-separated) or %. The \b after
+    // am/pm avoids matching "9 American"; % needs no boundary.
     const after = str.slice(offset + match.length);
-    if (/^(?:am|pm|%)/i.test(after)) return match;
+    if (/^\s*(?:(?:am|pm)\b|%)/i.test(after)) return match;
     // Skip time patterns like "10:30" — both the hour and minute digits
     const before = str.slice(0, offset);
     if (/[:.]\s*$/.test(before)) return match;

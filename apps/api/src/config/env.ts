@@ -14,9 +14,12 @@ const booleanFlag = z.preprocess((value) => {
   return value;
 }, z.boolean());
 
+// Only OpenRouter is implemented today; "auto" resolves to OpenRouter with
+// retry + optional fallback model. A removed "google" option would silently
+// pick a provider that does not exist, so it is intentionally not accepted.
 const optionalLlmProvider = z.preprocess(
   (value) => (value === "" ? undefined : value),
-  z.enum(["google", "auto", "openrouter"]).optional(),
+  z.enum(["auto", "openrouter"]).optional(),
 );
 
 // ─── Environment schema ──────────────────────────────────────────────────────
@@ -42,6 +45,11 @@ export const envSchema = z
     EXOTEL_CALLER_ID: optionalNonEmpty,
     EXOTEL_APP_ID: optionalNonEmpty,
     EXOTEL_WEBHOOK_SECRET: optionalNonEmpty,
+    // NOTE: NOT an enforced security control. Exotel strips query params from
+    // wss:// stream URLs, so a token in the stream URL cannot be relied on; the
+    // gateway never reads this. Stream security comes from TLS + callSid DB
+    // validation in the "start" handler. Kept only for forward compatibility —
+    // do not treat it as authentication. (See exotel-voicebot.gateway.ts.)
     EXOTEL_STREAM_SECRET: optionalNonEmpty,
     PUBLIC_BASE_URL: z.string().url().default("http://localhost:4100"),
 
@@ -59,6 +67,10 @@ export const envSchema = z
     TURN_TIMEOUT_MS: z.coerce.number().int().positive().default(12000),
     // Hard cap on call length (0 disables). Default 15 minutes.
     CALL_MAX_DURATION_MS: z.coerce.number().int().nonnegative().default(900000),
+    // Consecutive silent/noise turns (within a 45s window) before we assume the
+    // line is dead and hang up. Default 3 — lower values risk dropping a prospect
+    // who merely paused twice on a noisy line.
+    SILENCE_END_THRESHOLD: z.coerce.number().int().positive().default(3),
     // Sliding-window history cap so long calls can't blow the context budget.
     LLM_HISTORY_MAX_MESSAGES: z.coerce.number().int().nonnegative().default(20),
     // Speech-to-Text · Deepgram

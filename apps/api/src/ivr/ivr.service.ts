@@ -1,6 +1,6 @@
 import { Injectable } from "@nestjs/common";
 
-export type IvrMapResult = { locale: string; provider?: "openrouter" | "google" };
+export type IvrMapResult = { locale: string; provider?: "openrouter" };
 
 @Injectable()
 export class IvrService {

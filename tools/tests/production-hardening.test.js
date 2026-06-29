@@ -139,7 +139,13 @@ test("post-call scoring prefers caller turns over assistant turns", async () => 
 
   await service.processCall("call-1");
 
-  assert.equal(savedLead.label, "hot");
+  // The whole point: only the CALLER turn ("schedule a demo today") is scored.
+  // The assistant turn ("not interested") must NOT drag the label down — if both
+  // roles were scored the negative phrase would push this to "cold". One positive
+  // caller keyword on the base heuristic lands at "warm"; the negative is ignored.
+  assert.equal(savedLead.label, "warm");
+  assert.deepEqual(savedLead.signals.matchedPos, ["schedule"]);
+  assert.deepEqual(savedLead.signals.matchedNeg, []);
   assert.equal(savedLead.signals.source, "heuristic");
   assert.match(crmLog.idempotencyKey, /^pikorua:create_lead:call-1$/);
 });
@@ -283,7 +289,14 @@ test("call-runtime separates spoken reply from history entry to preserve LLM coh
   const src = read("apps/api/src/call-runtime/call-runtime.service.ts");
   assert.match(src, /spokenReply/, "spokenReply variable must separate TTS text from history");
   assert.match(src, /content: reply/, "raw LLM reply (not replacement) must be stored in history");
-  assert.match(src, /synthesize\(spokenReply\)/, "TTS must synthesize spokenReply, not raw reply");
+  // TTS is fed spokenReply (the safe/guardrailed text), not the raw history reply.
+  // Synthesis goes through synthesizeWithFallback(spokenReply, ...) on the buffered
+  // path and streamSentence(... dispatchedText/replacement ...) on the streaming path.
+  assert.match(
+    src,
+    /synthesizeWithFallback\(\s*spokenReply/,
+    "TTS must synthesize spokenReply, not the raw history reply",
+  );
 });
 
 test("call-runtime totalMs uses real elapsed durations from captured timestamps", () => {
@@ -294,21 +307,8 @@ test("call-runtime totalMs uses real elapsed durations from captured timestamps"
   assert.match(src, /llmEnd - llmStart/, "llmElapsed must use llmEnd - llmStart");
 });
 
-test("realtime STT failures reject instead of returning empty transcripts", () => {
-  const src = read("apps/api/src/stt/deepgram-realtime.service.ts");
-  assert.match(
-    src,
-    /reject\(new ServiceUnavailableException/,
-    "realtime STT provider failures must reject explicitly",
-  );
-  assert.doesNotMatch(
-    src,
-    /resolve\(\{\s*text:\s*finalText/,
-    "realtime STT must not resolve an empty finalText as success",
-  );
-  assert.match(
-    src,
-    /without transcript|socket error/,
-    "failure messages should explain missing transcript/provider failure",
-  );
-});
+// NOTE: the legacy buffered "deepgram-realtime.service.ts" was removed when the
+// project moved to the persistent Deepgram Live streaming session
+// (deepgram-live.service.ts). Its failure-handling test was deleted with it.
+// Live-session reconnect/error behaviour is covered by the gateway integration
+// tests; see deepgram-live.service.ts onError -> callbacks.onError.

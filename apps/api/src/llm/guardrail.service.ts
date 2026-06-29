@@ -18,6 +18,18 @@ const HARD_RULES: Array<{ rule: string; pattern: RegExp; replacement: string }> 
       "I'm not able to share specific pricing right now — our consultant will walk you through that in detail.",
   },
   {
+    // Backstop against a prompt-extraction / regression leak of the internal
+    // price sheet. Every inventory price in the system prompt carries a "₹"
+    // figure and an "[internal]" marker, neither of which ever appears in a
+    // legitimate spoken reply (Maya never quotes any rupee amount; she only asks
+    // the caller's budget and offers spoken tiers like "3-4 करोड़" — no ₹, no
+    // marker). So "₹<digit>" or "[internal]" in a REPLY is a near-certain leak.
+    rule: "internal_pricing_leak",
+    pattern: /₹\s*\d|\[\s*internal\s*\]/i,
+    replacement:
+      "I'm not able to share pricing — our expert team shares all the details with you in person at the site visit.",
+  },
+  {
     rule: "roi_guarantee",
     pattern: /\b(guaranteed return|guaranteed roi|promise.*return|will definitely appreciate)\b/i,
     replacement:

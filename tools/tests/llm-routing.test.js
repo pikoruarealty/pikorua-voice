@@ -5,15 +5,18 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 
-test("LlmService passes system prompt to OpenRouter and Gemini", () => {
+test("LlmService passes the system prompt to OpenRouter as a system-role message", () => {
   const src = require("fs").readFileSync(
     require("path").join(process.cwd(), "apps/api/src/llm/llm.service.ts"),
     "utf8",
   );
 
   assert.match(src, /systemPrompt/, "systemPrompt option must be present in LlmService.generate");
-  assert.match(src, /role.*system.*systemPrompt/, "system prompt must be sent as system role to OpenRouter");
-  assert.match(src, /\[System\].*opts/, "system prompt injected into Gemini contents");
+  assert.match(
+    src,
+    /role:\s*"system",\s*content:\s*opts[.?]*\.systemPrompt/,
+    "system prompt must be sent as a system-role message to OpenRouter",
+  );
 });
 
 test("LlmService passes full message history not just latest message", () => {
@@ -25,15 +28,13 @@ test("LlmService passes full message history not just latest message", () => {
   assert.match(src, /for \(const m of messages\)/, "messages array must be iterated for providers");
 });
 
-test("LlmService returns promptTokens and completionTokens", () => {
+test("LlmService returns promptTokens and completionTokens from OpenRouter usage", () => {
   const src = require("fs").readFileSync(
     require("path").join(process.cwd(), "apps/api/src/llm/llm.service.ts"),
     "utf8",
   );
-  assert.match(src, /promptTokenCount/, "Google promptTokenCount consumed");
-  assert.match(src, /candidatesTokenCount/, "Google candidatesTokenCount consumed");
-  assert.match(src, /prompt_tokens/, "OpenRouter prompt_tokens consumed");
-  assert.match(src, /completion_tokens/, "OpenRouter completion_tokens consumed");
+  assert.match(src, /usage\?\.prompt_tokens/, "OpenRouter prompt_tokens consumed");
+  assert.match(src, /usage\?\.completion_tokens/, "OpenRouter completion_tokens consumed");
 });
 
 test("CallRuntimeService stores state per callId and clears on completion", () => {
@@ -70,13 +71,16 @@ test("WebhookService clears call history on terminal status", () => {
   assert.match(src, /callRuntime\?\.clearHistory/, "clearHistory must be optional-chained");
 });
 
-test("LLM provider routing: OpenRouter primary, Gemini fallback", () => {
+test("LLM provider routing: OpenRouter primary with retry + optional fallback model", () => {
   const src = require("fs").readFileSync(
     require("path").join(process.cwd(), "apps/api/src/llm/llm.service.ts"),
     "utf8",
   );
-  assert.match(src, /openrouter.*auto/, "OpenRouter must be tried for auto provider");
-  assert.match(src, /streamGemini/, "Gemini streaming fallback must exist");
+  assert.match(src, /provider === "openrouter" \|\| provider === "auto"/, "OpenRouter must be tried for the auto provider");
   assert.match(src, /tryOpenRouter/, "tryOpenRouter helper must exist");
+  assert.match(src, /streamOpenRouter/, "streamOpenRouter helper must exist");
+  assert.match(src, /OPENROUTER_FALLBACK_MODEL/, "an optional OpenRouter fallback model must be supported");
+  // Providers are reached only through OpenRouter — no direct vendor SDKs/endpoints.
+  assert.doesNotMatch(src, /streamGemini|generativelanguage\.googleapis\.com/, "Gemini must not be called directly");
   assert.doesNotMatch(src, /anthropic\.com\/v1\/messages/, "direct Anthropic API must not be called");
 });

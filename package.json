@@ -9,6 +9,7 @@
     "test": "pnpm build && node --test tools/tests/*.test.js",
     "demo:voice": "node tools/demo/local-voice-demo.js",
     "staging:providers": "node tools/staging/provider-smoke.js",
+    "staging:deepgram-ab": "node tools/staging/deepgram-keyword-ab.js",
     "lint": "turbo type-check",
     "type-check": "turbo type-check",
     "format": "prettier --write \"**/*.{ts,json,md,yaml,yml}\" --ignore-path .gitignore",

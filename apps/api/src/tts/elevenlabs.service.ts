@@ -25,7 +25,9 @@ const TTS_RESPELLINGS: Array<[RegExp, string]> = [
   [/\bbrochures?\b/gi, "ब्रोशर"],
   // "exceptional" appears in nearly every property pitch mid-Hindi sentence;
   // the Hindi engine mangles the Latin word — respell phonetically.
-  [/\bexceptional\b/gi, "एक्सेप्शनल"],
+  // "इक्सेप्शनल" (ik-sep-sh-nal) not "एक्सेप्शनल": starting with एक (the Hindi
+  // word for "one") causes the engine to pause after it, which sounds like a stretch.
+  [/\bexceptional\b/gi, "इक्सेप्शनल"],
   // Brand suffix "Group" in "पिकोरा Group" — the Hindi engine mangles the Latin
   // word mid-sentence; respell in Devanagari so it reads as "ग्रुप".
   [/\bgroup\b/gi, "ग्रुप"],
@@ -656,6 +658,10 @@ export class ElevenlabsService {
             speed: cfg.speed,
             use_speaker_boost: true,
           },
+          // Buffer enough chars before committing to audio — prevents the engine
+          // from elongating the final phoneme of a sentence while it waits for
+          // the next one to arrive (the mid-sentence "stretch" artifact).
+          chunk_length_schedule: [120, 160, 250, 290],
           ...(cfg.languageCode ? { language_code: cfg.languageCode.split("-")[0] } : {}),
           xi_api_key: cfg.key,
         }),

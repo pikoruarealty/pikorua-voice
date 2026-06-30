@@ -1,6 +1,17 @@
 import type { IncomingMessage } from "http";
 import type { ConfigService } from "@nestjs/config";
 import type { WebSocket } from "ws";
+import { timingSafeEqual } from "crypto";
+
+// Constant-time compare so token validation doesn't leak the secret via the
+// early-exit timing of `===`.
+function safeTokenEqual(a: string | undefined, b: string | undefined): boolean {
+  if (!a || !b) return false;
+  const ab = Buffer.from(a);
+  const bb = Buffer.from(b);
+  if (ab.length !== bb.length) return false;
+  return timingSafeEqual(ab, bb);
+}
 
 export function isWebSocketAuthorized(config: ConfigService, request?: IncomingMessage): boolean {
   const token = config.get<string>("API_AUTH_TOKEN");
@@ -9,7 +20,7 @@ export function isWebSocketAuthorized(config: ConfigService, request?: IncomingM
     return true;
   }
 
-  return readToken(request) === token;
+  return safeTokenEqual(readToken(request), token);
 }
 
 export function closeUnauthorized(client: WebSocket) {

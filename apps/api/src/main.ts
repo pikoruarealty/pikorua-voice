@@ -57,9 +57,14 @@ async function bootstrap() {
     const requestId = String(req.headers["x-request-id"] ?? randomUUID());
     res.setHeader("x-request-id", requestId);
     res.on("finish", () => {
+      // Use the matched route TEMPLATE (e.g. "/calls/:callId/turns"), not the
+      // concrete path. req.path embeds dynamic ids (callId, sids) which would
+      // make this an unbounded-cardinality counter — a metrics memory leak and a
+      // Prometheus blowup. Unmatched requests collapse to a single label.
+      const route = (req as Request & { route?: { path?: string } }).route?.path;
       metrics.increment("pikorua_http_requests_total", {
         method: req.method,
-        route: req.path,
+        route: route ? `${req.baseUrl ?? ""}${route}` : "unmatched",
         status: res.statusCode,
       });
     });

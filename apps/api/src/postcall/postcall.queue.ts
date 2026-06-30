@@ -22,7 +22,15 @@ export class PostCallQueueService implements OnModuleDestroy {
 
   async enqueue(callId: string) {
     if (!this.queue) throw new Error("Postcall queue not initialized");
-    await this.queue.add("postcall", { callId });
+    // Dedupe by callId: two near-simultaneous "completed" webhooks (e.g. retries
+    // with slightly different event keys) must not spawn two post-call runs, which
+    // would emit duplicate HOT alerts (call_events has no uniqueness). BullMQ drops
+    // an add() whose jobId already exists. removeOnComplete bounds Redis growth.
+    await this.queue.add(
+      "postcall",
+      { callId },
+      { jobId: `postcall:${callId}`, removeOnComplete: true, removeOnFail: false },
+    );
   }
 
   async onModuleDestroy() {

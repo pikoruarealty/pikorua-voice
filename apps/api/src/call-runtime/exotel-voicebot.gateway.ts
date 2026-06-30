@@ -4,7 +4,7 @@ import { Injectable, Inject, Logger } from "@nestjs/common";
 import type { IncomingMessage } from "http";
 import { DeepgramLiveService, type LiveSession } from "../stt/deepgram-live.service";
 import { ElevenlabsService } from "../tts/elevenlabs.service";
-import { CallRuntimeService } from "./call-runtime.service";
+import { CallRuntimeService, isNoisyTranscript, endCallDisclaimer } from "./call-runtime.service";
 import { CallRepository } from "@pikorua/db";
 
 // Exotel's Voicebot WebSocket carries raw 16-bit linear PCM, 8 kHz, mono,
@@ -43,6 +43,12 @@ const EXOTEL_HANGUP_GRACE_MS = 9000;
 const INACTIVITY_TIMEOUT_MS = 35_000;
 // Two consecutive inactivity fires with no real utterance in between → goodbye + hang up.
 const INACTIVITY_MAX_STRIKES = 2;
+
+// Minimum partial-transcript length (chars) that counts as a barge-in. A 1–2
+// char floor fires on echo/noise blips (the caller's line carries Maya's own
+// audio back with no echo cancellation), making her interrupt herself. Three
+// still catches the shortest real interjections ("हाँ", "रुको", "stop", "नहीं").
+const BARGE_IN_MIN_CHARS = 3;
 
 class PcmReframer {
   private buf: Buffer = Buffer.alloc(0);
@@ -356,6 +362,10 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
   }
 
   private openSttSession(client: WebSocket, state: SessionState): LiveSession {
+    // NOTE: Deepgram's onSpeechStart (raw VAD) is intentionally NOT wired here.
+    // It fires before any transcript and would barge-in on a single voiced frame
+    // of echo/noise — exactly the self-interruption BARGE_IN_MIN_CHARS guards
+    // against. Barge-in is driven by transcript partials (handlePartial) instead.
     return this.deepgramLive.openSession(
       state.locale,
       EXOTEL_SAMPLE_RATE,
@@ -390,13 +400,13 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
     state.speaking = false;
   }
 
-  // Server-side barge-in (fast path): the caller starts talking over Maya. A
-  // 3-char floor filters 1-2 char noise/echo blips while still catching short
-  // interjections ("हाँ", "रुको", "stop", "नहीं"). She goes silent immediately
-  // and the completed utterance drives the next turn.
+  // Server-side barge-in (fast path): the caller starts talking over Maya. The
+  // BARGE_IN_MIN_CHARS floor filters 1-2 char noise/echo blips while still
+  // catching short interjections ("हाँ", "रुको", "stop", "नहीं"). She goes silent
+  // immediately and the completed utterance drives the next turn.
   private handlePartial(client: WebSocket, state: SessionState, text: string) {
     if (state.closing) return; // never interrupt the final closing line
-    if (this.isMayaAudible(state) && text.trim().length >= 1) {
+    if (this.isMayaAudible(state) && text.trim().length >= BARGE_IN_MIN_CHARS) {
       this.logger.log(`Barge-in (partial) callId=${state.callId} — stopping playback`);
       this.stopSpeaking(client, state);
     }
@@ -404,9 +414,13 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
 
   private enqueueTurn(client: WebSocket, state: SessionState, utterance: string) {
     this.logger.log(`Utterance callId=${state.callId}: "${utterance.slice(0, 60)}"`);
-    // Real utterance — reset inactivity so Maya doesn't ask "still there?" mid-conversation.
-    state.inactivityStrikes = 0;
-    this.resetInactivityTimer(client, state);
+    // Only a REAL utterance resets the inactivity clock. Pure noise/filler must
+    // NOT — otherwise a noisy-but-dead line keeps re-arming the timer and never
+    // reaches the goodbye, so the call only ends at the 15-min hard cap.
+    if (!isNoisyTranscript(utterance)) {
+      state.inactivityStrikes = 0;
+      this.resetInactivityTimer(client, state);
+    }
     // Reliable barge-in (commit path): a fully-formed caller utterance must stop
     // Maya even if no partial triggered the fast path above — otherwise her old
     // reply keeps playing from the pacer/Exotel buffer and this turn just queues
@@ -554,10 +568,12 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
     const isHindi = state.locale.startsWith("hi") || state.locale.startsWith("gu");
 
     if (strikes >= INACTIVITY_MAX_STRIKES) {
-      // Second strike with no response — say goodbye and hang up.
-      const goodbye = isHindi
+      // Second strike with no response — say goodbye and hang up. Include the
+      // AI-disclosure line so this system-driven ending matches a normal sign-off.
+      const goodbyeBase = isHindi
         ? "लगता है आप अभी available नहीं हैं। हमारे sales expert आपसे personally connect करेंगे। Thank you, namaste."
         : "It seems you are unavailable. Our sales expert will personally reach out to you. Thank you.";
+      const goodbye = `${goodbyeBase} ${endCallDisclaimer(state.locale)}`;
       state.queue = state.queue.then(async () => {
         if (state.inactivityStrikes < strikes || client.readyState !== WebSocket.OPEN) return;
         state.closing = true;

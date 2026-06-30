@@ -2,7 +2,18 @@ import { CanActivate, ExecutionContext, Injectable, UnauthorizedException } from
 import { ConfigService } from "@nestjs/config";
 import { Reflector } from "@nestjs/core";
 import type { Request } from "express";
+import { timingSafeEqual } from "crypto";
 import { IS_PUBLIC_ROUTE } from "./public.decorator";
+
+// Constant-time string compare so token validation doesn't leak the secret
+// length/prefix via early-exit timing of `===`. Returns false on any mismatch.
+function safeTokenEqual(a: string | undefined, b: string | undefined): boolean {
+  if (!a || !b) return false;
+  const ab = Buffer.from(a);
+  const bb = Buffer.from(b);
+  if (ab.length !== bb.length) return false;
+  return timingSafeEqual(ab, bb);
+}
 
 @Injectable()
 export class ApiAuthGuard implements CanActivate {
@@ -28,7 +39,7 @@ export class ApiAuthGuard implements CanActivate {
 
     const request = context.switchToHttp().getRequest<Request>();
     const provided = this.readToken(request);
-    if (token && provided === token) {
+    if (token && safeTokenEqual(provided, token)) {
       return true;
     }
 

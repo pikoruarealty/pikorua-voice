@@ -192,9 +192,9 @@ Exotel requires frames to be a **multiple of 320 bytes** (20 ms per frame at 8 k
 | Parameter          | Value   | Purpose                                                                  |
 | ------------------ | ------- | ------------------------------------------------------------------------ |
 | `endpointing`      | 300 ms  | VAD sensitivity (silence threshold) — set once on connect, never changed |
-| `utterance_end_ms` | 1400 ms | Hard utterance boundary; 400 ms after short acks                         |
+| `utterance_end_ms` | 1000 ms | Hard utterance boundary; 400 ms after short acks                         |
 
-After a short acknowledgment ("haan", "ok") `utterance_end_ms` is tightened to **400 ms** via a Deepgram `Configure` message, making the bot respond faster. It restores to 1400 ms on the next full utterance.
+After a short acknowledgment ("haan", "ok") `utterance_end_ms` is tightened to **400 ms** via a Deepgram `Configure` message, making the bot respond faster. It restores to 1000 ms on the next full utterance.
 
 The session reconnects up to 3 times with exponential backoff (300 → 600 → 1200 ms) on unexpected close. Audio buffers during reconnect (up to 200 chunks / ~20 s).
 
@@ -257,7 +257,7 @@ Maya is PIKORUA GROUP's AI relationship manager. Key invariants:
 
 - **Feminine Hindi verb forms only** — `बोल रही हूँ` not `बोल रहा हूँ`
 - **All Hindi in Devanagari** — never romanized in prompt output
-- **NEVER disclose prices** — pricing is for internal budget-matching only (three independent layers: prompt, hard guardrail, semantic guardrail)
+- **NEVER disclose prices** — pricing is for internal budget-matching only (prompt + synchronous hard guardrail are leak-proof; the semantic guardrail is a concurrent best-effort backstop for paraphrases — see Guardrails)
 - **"PIKORUA GROUP" pronounced "पिकोरा GROUP"** — the U is silent
 - **Sign-off is exactly "Thank you."** — never "take care", "have a nice day"
 - **One question per turn**, short spoken sentences
@@ -332,7 +332,7 @@ Turn row convention: caller turns use `turnIndex * 2`, assistant turns use `turn
 | `EXOTEL_SUBDOMAIN`            | `api.exotel.com`             |                                                             |
 | `EXOTEL_CALLER_ID`            | —                            | ExoPhone (virtual number)                                   |
 | `EXOTEL_APP_ID`               | —                            | Voicebot App ID from Exotel dashboard                       |
-| `EXOTEL_WEBHOOK_SECRET`       | —                            | HMAC secret for webhook signature verification              |
+| `EXOTEL_WEBHOOK_SECRET`       | required (prod)              | HMAC secret for webhook signature verification              |
 | `EXOTEL_STREAM_SECRET`        | —                            | Optional shared secret for `/exotel-stream` WS endpoint     |
 | `PUBLIC_BASE_URL`             | `http://localhost:4100`      | Used for Exotel status callback URL                         |
 | `CALL_LOCALE_DEFAULT`         | `hi-IN`                      | Fallback locale when none is set on the call                |
@@ -340,18 +340,19 @@ Turn row convention: caller turns use `turnIndex * 2`, assistant turns use `turn
 | `GUARDRAIL_SEMANTIC_ENABLED`  | `true`                       | Enable LLM semantic guardrail (set `false` for local demos) |
 | `STT_STREAMING_ENABLED`       | `false`                      | Use low-latency buffered STT in REST turn path              |
 | `TTS_WS_STREAMING_ENABLED`    | `false`                      | Use ElevenLabs WS streaming instead of HTTP per sentence    |
-| `LLM_TIMEOUT_MS`              | `3000`                       | Per-provider LLM timeout                                    |
-| `OPENROUTER_TIMEOUT_MS`       | `4000`                       | OpenRouter-specific timeout                                 |
+| `OPENROUTER_TIMEOUT_MS`       | `4000`                       | Per-OpenRouter-request timeout (the active LLM cap)         |
 | `TTS_TIMEOUT_MS`              | `8000`                       | ElevenLabs request timeout                                  |
 | `TURN_TIMEOUT_MS`             | `12000`                      | Per-turn watchdog; aborts LLM+TTS on overrun                |
 | `CALL_MAX_DURATION_MS`        | `900000`                     | Hard call length cap (15 min); `0` = disabled               |
+| `SILENCE_END_THRESHOLD`       | `3`                          | Consecutive silent/noise turns (45 s window) before hangup  |
 | `LLM_HISTORY_MAX_MESSAGES`    | `20`                         | Sliding-window history cap                                  |
 | `DEEPGRAM_API_KEY`            | required (prod)              |                                                             |
 | `ELEVENLABS_API_KEY`          | required (prod)              |                                                             |
 | `ELEVENLABS_VOICE_ID`         | required (prod)              | Indian multilingual voice ID                                |
 | `ELEVENLABS_STABILITY`        | `0.55`                       | Voice stability (0–1)                                       |
 | `ELEVENLABS_SIMILARITY_BOOST` | `0.9`                        | Voice similarity boost (0–1)                                |
-| `ELEVENLABS_STYLE`            | `0.1`                        | Style exaggeration (keep low)                               |
+| `ELEVENLABS_STYLE`            | `0.45`                       | Style/"smile" dial (0–1); >0.5 gets theatrical              |
+| `ELEVENLABS_SPEED`            | `1.1`                        | Playback speed (clamped 0.7–1.2)                            |
 | `ELEVENLABS_MODEL`            | `eleven_turbo_v2_5`          |                                                             |
 | `ELEVENLABS_LANGUAGE_CODE`    | `hi`                         | Forces Hindi phonetics for romanized Hindi                  |
 | `OPENROUTER_API_KEY`          | required (prod)              |                                                             |
@@ -494,16 +495,16 @@ When Exotel fires a `completed` webhook:
 
 ## Security
 
-- **REST + WS auth**: `ApiAuthGuard` / `isWebSocketAuthorized` check `Authorization: Bearer <token>`, `x-api-key` header, or `?token=` query param. Skipped in development when `API_AUTH_TOKEN` is unset.
-- **Webhook signature**: HMAC-SHA256 on `x-exotel-signature` using `EXOTEL_WEBHOOK_SECRET`. Webhooks are accepted but flagged `signatureValid: false` when no secret is configured.
+- **REST + WS auth**: both check `Authorization: Bearer <token>` and the `x-api-key` header (constant-time compared). The `?token=` query param is accepted by the **WebSocket** path only (`isWebSocketAuthorized`), since browsers can't set headers on a WS upgrade; the REST guard (`ApiAuthGuard`) does **not** read the query param. Skipped in development when `API_AUTH_TOKEN` is unset.
+- **Webhook signature**: HMAC-SHA256 on `x-exotel-signature` using `EXOTEL_WEBHOOK_SECRET`. **Required in production** — the env schema rejects a prod boot without it, so the public `/api/webhooks/exotel` endpoint can never run unauthenticated. In development, if no secret is set the webhook is accepted and flagged `signatureValid: false`.
 - **Rate limiting**: 120 requests / 60 s per IP via `ThrottlerModule` (global).
-- **Price protection**: Hard guardrail regex + LLM prompt constraint + inventory prices marked `[internal]`. Three independent layers; prices are never spoken or hinted at.
+- **Price protection**: three layers — LLM prompt constraint + synchronous hard-regex guardrail (incl. an `₹<digit>` / `[internal]` leak backstop) + a semantic LLM guardrail. The first two are leak-proof: the hard regex runs on every sentence _before_ it is sent to TTS. The semantic layer catches paraphrases the regex misses but runs **concurrently with playback**, so a paraphrased figure (e.g. spelled-out "five crore", no `₹`) can be partially spoken before `onCancel` drops the audio and the safe replacement is synthesized.
 
 ---
 
 ## IVR locale selection
 
-When Exotel sends DTMF digits via webhook:
+When Exotel reports DTMF digits **via the status webhook**, the digit is mapped to a locale and written to the call row:
 
 | Digit | Locale  |
 | ----- | ------- |
@@ -511,6 +512,8 @@ When Exotel sends DTMF digits via webhook:
 | `2`   | `hi-IN` |
 | `3`   | `gu-IN` |
 | other | `hi-IN` |
+
+> **Note:** this resolves locale at call setup (from `custom_parameters.locale` / the call row). A DTMF press arriving _mid-stream_ on the `/exotel-stream` socket is logged but does **not** hot-swap the running conversation's language — the system prompt and Deepgram language are pinned when the stream starts. Use the IVR keypad step before the voicebot applet connects.
 
 ---
 

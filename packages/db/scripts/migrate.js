@@ -20,9 +20,21 @@ const files = fs
   .filter((file) => /^\d+.*\.sql$/.test(file))
   .sort();
 
+// Fixed key for the session-level advisory lock that serialises migrations.
+// Any constant works as long as every instance uses the same one.
+const MIGRATION_LOCK_KEY = 4927412009;
+
 async function main() {
   const sql = postgres(databaseUrl, { max: 1, onnotice: () => undefined });
+  let locked = false;
   try {
+    // Serialise migrations across instances: on a rolling deploy two processes
+    // boot at once and would otherwise race to apply the same file, colliding on
+    // the schema_migrations PK / duplicate-object DDL and crashing one of them.
+    // max:1 above guarantees this lock is held on the same connection the loop uses.
+    await sql`SELECT pg_advisory_lock(${MIGRATION_LOCK_KEY})`;
+    locked = true;
+
     await sql`
       CREATE TABLE IF NOT EXISTS schema_migrations (
         filename text PRIMARY KEY,
@@ -47,6 +59,9 @@ async function main() {
       console.log(`applied ${file}`);
     }
   } finally {
+    if (locked) {
+      await sql`SELECT pg_advisory_unlock(${MIGRATION_LOCK_KEY})`.catch(() => undefined);
+    }
     await sql.end();
   }
 }

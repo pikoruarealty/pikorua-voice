@@ -36,12 +36,8 @@ export class LlmService {
   constructor(private readonly config: ConfigService) {}
 
   // Voice turns must fail fast: a slow provider is indistinguishable from dead
-  // air to the caller. Default 3s per provider (was 8s) — fallback chain still
-  // completes well under the old single-provider timeout.
-  private llmTimeoutMs(): number {
-    return Number(this.config.get("LLM_TIMEOUT_MS") ?? 3000);
-  }
-
+  // air to the caller. The active per-request cap is OPENROUTER_TIMEOUT_MS; the
+  // fallback chain still completes well under the old single-provider timeout.
   private openRouterTimeoutMs(): number {
     return Number(this.config.get("OPENROUTER_TIMEOUT_MS") ?? 4000);
   }
@@ -268,12 +264,5 @@ export class LlmService {
       );
       return null;
     }
-  }
-
-  private providerFailureMessage(provider: string, err: unknown): string {
-    const status = axios.isAxiosError(err) ? err.response?.status : undefined;
-    if (status === 429) return `${provider} quota or rate limit exceeded`;
-    if (status === 401 || status === 403) return `${provider} authentication failed`;
-    return `${provider} request failed`;
   }
 }

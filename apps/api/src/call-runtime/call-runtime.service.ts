@@ -113,7 +113,7 @@ const FILLER_INTERJECTIONS = [
 // which is longer than the 20-char noise gate and so never reaches the cue check.
 const NOISE_WORDS = new Set<string>([...FILLER_INTERJECTIONS, ...CONTINUATION_CUES]);
 
-function isNoisyTranscript(text: string): boolean {
+export function isNoisyTranscript(text: string): boolean {
   const normalized = text
     .toLowerCase()
     .replace(/[।,.!?]+/g, "")
@@ -156,7 +156,7 @@ const END_CALL_TOKEN = "<end_call/>";
 // Appended in code (not via the prompt) so it is guaranteed on every ended call
 // regardless of how the model phrased its sign-off. "ए आई" spells out "AI" so the
 // Hindi engine pronounces it correctly.
-function endCallDisclaimer(locale: string): string {
+export function endCallDisclaimer(locale: string): string {
   return locale.startsWith("en")
     ? "Just to let you know — this was an A I agent voice call, and may be recorded for quality services."
     : "बस आपको बता दूँ — यह एक ए आई agent voice call थी, और quality services के लिए record की जा सकती है।";
@@ -1080,10 +1080,13 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
       : "I'm not able to share that — our luxury sales expert will personally connect with you and share all the details.";
   }
 
+  // Spoken on the max-duration hangup. Includes the AI-disclosure line so this
+  // system-driven ending carries the same disclosure as a model-driven sign-off.
   private wrapUpText(locale: string): string {
-    return this.isHinglishLocale(locale)
+    const base = this.isHinglishLocale(locale)
       ? "हमारे luxury sales expert आपसे personally connect करेंगे। Thank you."
       : "Our luxury sales expert will personally reach out to you. Thank you.";
+    return `${base} ${endCallDisclaimer(locale)}`;
   }
 
   // TTS with outage fallback: a transient ElevenLabs failure must not drop a
@@ -1146,9 +1149,11 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
       // End the call after threshold consecutive silences within the window.
       if (state.silenceStrikes >= this.silenceEndThreshold()) {
         state.silenceStrikes = 0;
-        const goodbye = this.isHinglishLocale(locale)
+        const goodbyeBase = this.isHinglishLocale(locale)
           ? "लगता है connection ठीक नहीं है। हमारे luxury sales expert आपसे personally connect करेंगे। Thank you."
           : "It seems we have a bad connection. Our luxury sales expert will personally reach out to you. Thank you.";
+        // System-driven hangup still gets the AI-disclosure line (compliance).
+        const goodbye = `${goodbyeBase} ${endCallDisclaimer(locale)}`;
         const { audio, spokenText } = await this.synthesizeWithFallback(goodbye, locale, callId);
         this.persistState(callId, state);
         return { audio, transcript: "", reply: spokenText, endCall: true, waitForMore: false };
@@ -1367,11 +1372,16 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
         spokenReply = `${spokenReply} ${endCallDisclaimer(locale)}`;
       }
 
+      // On a terminal turn the AI-disclosure line must be spoken even when a
+      // guardrail replaces the reply — append it to whatever ends up spoken.
+      const withEndDisclosure = (t: string) =>
+        shouldEndCall ? `${t} ${endCallDisclaimer(locale)}` : t;
+
       const ttsStart = Date.now();
       let audio: Buffer;
       let ttsMs: number;
       if (hard.triggered) {
-        const tts = await this.synthesizeWithFallback(spokenReply, locale, callId);
+        const tts = await this.synthesizeWithFallback(withEndDisclosure(spokenReply), locale, callId);
         audio = tts.audio;
         ttsMs = tts.ttsMs;
         spokenReply = tts.spokenText;
@@ -1386,7 +1396,11 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
           guardrailTriggered = true;
           guardrailRule = semantic.rule;
           spokenReply = semantic.replacement?.trim() || this.guardrailFallbackText(locale);
-          const replacementTts = await this.synthesizeWithFallback(spokenReply, locale, callId);
+          const replacementTts = await this.synthesizeWithFallback(
+            withEndDisclosure(spokenReply),
+            locale,
+            callId,
+          );
           audio = replacementTts.audio;
           ttsMs = replacementTts.ttsMs;
           spokenReply = replacementTts.spokenText;
@@ -1853,8 +1867,14 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
         const replacementController = new AbortController();
         const onSinkAbort = () => replacementController.abort();
         sink.signal.addEventListener("abort", onSinkAbort);
+        // The clean-end disclosure dispatch above was either skipped (hard hit) or
+        // dropped by onCancel (semantic hit), so fold it into the replacement on a
+        // terminal turn — the AI disclosure must still be spoken before hangup.
+        const replacementSpoken = endCallDetected
+          ? `${spokenReply} ${endCallDisclaimer(locale)}`
+          : spokenReply;
         try {
-          await streamSentence(spokenReply, sentenceIndex, replacementController.signal, () => {
+          await streamSentence(replacementSpoken, sentenceIndex, replacementController.signal, () => {
             if (ttfaMs === null) ttfaMs = Date.now() - turnStart;
           });
         } finally {

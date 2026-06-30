@@ -84,7 +84,9 @@ services:
         value: "false"
       - key: STT_STREAMING_ENABLED
         value: "false"
-      - key: LLM_TIMEOUT_MS
+      # OPENROUTER_TIMEOUT_MS is the active per-request LLM cap (LLM_TIMEOUT_MS
+      # was a no-op and has been removed). Keeps the previously-intended ~5s cap.
+      - key: OPENROUTER_TIMEOUT_MS
         value: "5000"
       - key: TURN_TIMEOUT_MS
         value: "18000"

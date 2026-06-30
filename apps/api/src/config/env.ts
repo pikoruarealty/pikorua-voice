@@ -61,7 +61,6 @@ export const envSchema = z
     TTS_WS_STREAMING_ENABLED: booleanFlag.default(false),
 
     // Voice-turn latency & robustness tuning
-    LLM_TIMEOUT_MS: z.coerce.number().int().positive().default(3000),
     OPENROUTER_TIMEOUT_MS: z.coerce.number().int().positive().default(4000),
     TTS_TIMEOUT_MS: z.coerce.number().int().positive().default(8000),
     TURN_TIMEOUT_MS: z.coerce.number().int().positive().default(12000),
@@ -98,6 +97,10 @@ export const envSchema = z
       "API_AUTH_TOKEN",
       "DEEPGRAM_API_KEY",
       "ELEVENLABS_API_KEY",
+      // Without this, /api/webhooks/exotel accepts UNSIGNED webhooks (the handler
+      // only enforces the HMAC when a secret is set). Required in production so a
+      // public, unauthenticated endpoint can't mutate call/lead state.
+      "EXOTEL_WEBHOOK_SECRET",
     ];
     for (const key of required) {
       if (!env[key]) {

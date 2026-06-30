@@ -40,7 +40,7 @@ const EXOTEL_FRAME_PACING_MS = 90;
 const EXOTEL_HANGUP_GRACE_MS = 9000;
 
 // If the client says nothing for this long, Maya asks if they're still there.
-const INACTIVITY_TIMEOUT_MS = 15_000;
+const INACTIVITY_TIMEOUT_MS = 35_000;
 // Two consecutive inactivity fires with no real utterance in between → goodbye + hang up.
 const INACTIVITY_MAX_STRIKES = 2;
 

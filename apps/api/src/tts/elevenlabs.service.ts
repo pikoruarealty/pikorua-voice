@@ -23,6 +23,9 @@ const TTS_RESPELLINGS: Array<[RegExp, string]> = [
   // "brochure" is French-derived — the Hindi engine reads it with English
   // phonemes ("bro-chure") instead of the correct "BROH-shuh" sound.
   [/\bbrochures?\b/gi, "ब्रोशर"],
+  // "exceptional" appears in nearly every property pitch mid-Hindi sentence;
+  // the Hindi engine mangles the Latin word — respell phonetically.
+  [/\bexceptional\b/gi, "एक्सेप्शनल"],
   // Brand suffix "Group" in "पिकोरा Group" — the Hindi engine mangles the Latin
   // word mid-sentence; respell in Devanagari so it reads as "ग्रुप".
   [/\bgroup\b/gi, "ग्रुप"],

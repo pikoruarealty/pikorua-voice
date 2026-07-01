@@ -29,9 +29,13 @@ export const workerEnvSchema = z
     EXOTEL_APP_ID: optionalNonEmpty,
     PUBLIC_BASE_URL: z.string().url().default("http://localhost:4100"),
 
-    // CRM integration (REST only — Step 9)
+    // CRM integration (REST only — Step 9). The worker POSTs completed calls to
+    // <CRM_API_BASE_URL>/call-results, authenticated with the shared Bearer token
+    // and an HMAC-SHA256 signature over the raw body (the CRM's VOICE_API_BEARER_TOKEN
+    // and VOICE_WEBHOOK_HMAC_SECRET). Requests are sent unsigned if the secret is blank.
     CRM_API_BASE_URL: z.string().url().default("http://localhost:4000"),
     CRM_API_TOKEN: optionalNonEmpty,
+    CRM_WEBHOOK_HMAC_SECRET: optionalNonEmpty,
 
     // Optional LLM scoring configuration (falls back to heuristics if absent)
     LLM_SCORING_PROVIDER: z.enum(["openrouter", "auto"]).default("auto"),

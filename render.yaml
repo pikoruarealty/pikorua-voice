@@ -135,10 +135,14 @@ services:
         sync: false # same Render API URL — used for the StatusCallback
 
       # ── CRM (post-call sync) ──────────────────────────────────────────────
+      # Worker POSTs completed calls to <CRM_API_BASE_URL>/call-results, signed
+      # with the shared Bearer token + HMAC secret agreed with the CRM team.
       - key: CRM_API_BASE_URL
-        sync: false
+        sync: false # e.g. https://<crm-domain>/api/v1/voice
       - key: CRM_API_TOKEN
-        sync: false
+        sync: false # shared Bearer token (CRM's VOICE_API_BEARER_TOKEN)
+      - key: CRM_WEBHOOK_HMAC_SECRET
+        sync: false # shared HMAC secret (CRM's VOICE_WEBHOOK_HMAC_SECRET)
 
       # ── LLM scoring (optional — falls back to heuristics) ─────────────────
       - key: LLM_SCORING_PROVIDER

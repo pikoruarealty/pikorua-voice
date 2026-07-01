@@ -4,7 +4,8 @@ import { Worker, Job } from "bullmq";
 import { Redis } from "ioredis";
 import { CrmSyncLogRepository } from "@pikorua/db";
 import type { NewCrmSyncLogEntry } from "@pikorua/db";
-import axios, { type AxiosError } from "axios";
+import type { AxiosError } from "axios";
+import { postCallResult } from "./crm-client";
 
 @Injectable()
 export class CrmRetryWorker implements OnModuleDestroy {
@@ -41,6 +42,7 @@ export class CrmRetryWorker implements OnModuleDestroy {
           try {
             const crmBase = String(this.config.get("CRM_API_BASE_URL") ?? "");
             const crmToken = String(this.config.get("CRM_API_TOKEN") ?? "");
+            const crmHmacSecret = String(this.config.get("CRM_WEBHOOK_HMAC_SECRET") ?? "");
             if (!crmBase) {
               const patch: Partial<NewCrmSyncLogEntry> = {
                 responsePayload: { reason: "CRM not configured" },
@@ -48,13 +50,12 @@ export class CrmRetryWorker implements OnModuleDestroy {
               await this.crmLogRepo.updateStatus(entry.id, "skipped", patch);
               continue;
             }
-            const url = `${crmBase.replace(/\/$/, "")}/leads`;
-            const resp = await axios.post(url, entry.requestPayload, {
-              headers: {
-                ...(crmToken ? { Authorization: `Bearer ${crmToken}` } : {}),
-                ...(entry.idempotencyKey ? { "Idempotency-Key": entry.idempotencyKey } : {}),
-              },
-              timeout: 5000,
+            // Re-sends the exact payload stored on the original attempt; the helper
+            // re-signs it with a fresh X-Timestamp so it clears the CRM's skew window.
+            const resp = await postCallResult(crmBase, entry.requestPayload, {
+              bearerToken: crmToken || undefined,
+              hmacSecret: crmHmacSecret || undefined,
+              idempotencyKey: entry.idempotencyKey ?? undefined,
             });
             await this.crmLogRepo.updateStatus(entry.id, "success", {
               httpStatus: resp.status,

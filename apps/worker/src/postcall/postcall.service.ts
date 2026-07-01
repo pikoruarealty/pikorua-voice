@@ -1,15 +1,18 @@
 import { Injectable, Inject, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
-import axios, { type AxiosError } from "axios";
+import type { AxiosError } from "axios";
 import {
   LeadScoreRepository,
   CrmSyncLogRepository,
   CallEventRepository,
   CallRepository,
   CallTurnRepository,
+  CampaignRepository,
 } from "@pikorua/db";
 import type { NewCallEvent, NewCrmSyncLogEntry, NewLeadScore } from "@pikorua/db";
 import { LeadScoreLlmService } from "./lead-score-llm.service";
+import { buildCallResultPayload, type CrmEventInput } from "./crm-payload";
+import { postCallResult } from "./crm-client";
 
 @Injectable()
 export class PostCallProcessingService {
@@ -21,6 +24,7 @@ export class PostCallProcessingService {
     @Inject(CallEventRepository) private readonly eventRepo: CallEventRepository,
     @Inject(CallRepository) private readonly callRepo: CallRepository,
     @Inject(CallTurnRepository) private readonly turnRepo: CallTurnRepository,
+    @Inject(CampaignRepository) private readonly campaignRepo: CampaignRepository,
     private readonly scorer: LeadScoreLlmService,
     private readonly config: ConfigService,
   ) {}
@@ -136,17 +140,36 @@ export class PostCallProcessingService {
     // CRM sync: create log entry then attempt REST call if configured
     const crmBase = String(this.config.get("CRM_API_BASE_URL") ?? "");
     const crmToken = String(this.config.get("CRM_API_TOKEN") ?? "");
+    const crmHmacSecret = String(this.config.get("CRM_WEBHOOK_HMAC_SECRET") ?? "");
     const syncType = "create_lead" as const;
     const idempotencyKey = `pikorua:${syncType}:${call.id}`;
 
-    const crmPayload = {
-      callId: call.id,
-      transcript,
-      score,
-      label,
-      crmLeadId: call.crmLeadId,
-      source: signals.source,
-    };
+    const scoredAt = new Date().toISOString();
+    const events: CrmEventInput[] =
+      label === "hot" ? [{ type: "hot_alert", at: scoredAt, detail: { score } }] : [];
+
+    // Campaign name is best-effort; a lookup failure must not block the sync.
+    const campaign = call.campaignId
+      ? await this.campaignRepo.findById(call.campaignId).catch(() => null)
+      : null;
+
+    const crmPayload = buildCallResultPayload({
+      call,
+      turns,
+      campaign,
+      score: {
+        value: score,
+        label,
+        rationale,
+        timeline,
+        positive: signals.matchedPos ?? [],
+        negative: signals.matchedNeg ?? [],
+        source: signals.source,
+        scoredAt,
+      },
+      events,
+    });
+
     const logData: NewCrmSyncLogEntry = {
       callId: call.id,
       crmLeadId: call.crmLeadId ?? null,
@@ -169,13 +192,10 @@ export class PostCallProcessingService {
     }
 
     try {
-      const url = `${crmBase.replace(/\/$/, "")}/leads`;
-      const resp = await axios.post(url, crmPayload, {
-        headers: {
-          ...(crmToken ? { Authorization: `Bearer ${crmToken}` } : {}),
-          "Idempotency-Key": idempotencyKey,
-        },
-        timeout: 5000,
+      const resp = await postCallResult(crmBase, crmPayload, {
+        bearerToken: crmToken || undefined,
+        hmacSecret: crmHmacSecret || undefined,
+        idempotencyKey,
       });
       await this.crmLogRepo.updateStatus(log.id, "success", {
         httpStatus: resp.status,

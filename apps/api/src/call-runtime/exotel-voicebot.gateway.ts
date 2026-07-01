@@ -50,6 +50,10 @@ const INACTIVITY_MAX_STRIKES = 2;
 // still catches the shortest real interjections ("हाँ", "रुको", "stop", "नहीं").
 const BARGE_IN_MIN_CHARS = 3;
 
+// How long a caller may keep talking to a third party (side conversation, with
+// no real reply to Maya) before we gracefully bow out and hang up.
+const SIDE_CONVERSATION_HANGUP_MS = 35_000;
+
 class PcmReframer {
   private buf: Buffer = Buffer.alloc(0);
 
@@ -142,6 +146,14 @@ type SessionState = {
   // Inactivity: fires after INACTIVITY_TIMEOUT_MS with no client utterance.
   inactivityTimer: ReturnType<typeof setTimeout> | null;
   inactivityStrikes: number;
+  // Timestamp of the last NOISE-only utterance (background chatter, the caller
+  // speaking to someone else, line disturbance). Distinguishes a noisy/occupied
+  // line from a genuinely silent one when the inactivity timer fires.
+  lastNoiseAt: number;
+  // When the current run of side-conversation turns began (0 = not in one). The
+  // caller is speaking to a third party in clear sentences; after
+  // SIDE_CONVERSATION_HANGUP_MS of it with no real reply, the call is ended.
+  sideConversationSince: number;
 };
 
 // Exotel Voicebot WebSocket gateway.
@@ -196,6 +208,8 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
       ),
       inactivityTimer: null,
       inactivityStrikes: 0,
+      lastNoiseAt: 0,
+      sideConversationSince: 0,
     };
     this.sessions.set(client, state);
     this.logger.log("Exotel voicebot connection opened");
@@ -416,9 +430,13 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
     this.logger.log(`Utterance callId=${state.callId}: "${utterance.slice(0, 60)}"`);
     // Only a REAL utterance resets the inactivity clock. Pure noise/filler must
     // NOT — otherwise a noisy-but-dead line keeps re-arming the timer and never
-    // reaches the goodbye, so the call only ends at the 15-min hard cap.
-    if (!isNoisyTranscript(utterance)) {
+    // reaches the goodbye. Instead we remember when noise last arrived so the
+    // inactivity handler can tell a noisy/occupied line from a silent one.
+    if (isNoisyTranscript(utterance)) {
+      state.lastNoiseAt = Date.now();
+    } else {
       state.inactivityStrikes = 0;
+      state.lastNoiseAt = 0;
       this.resetInactivityTimer(client, state);
     }
     // Reliable barge-in (commit path): a fully-formed caller utterance must stop
@@ -485,6 +503,37 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
       if (!result.waitForMore && !result.canceled) {
         state.stt?.clearBuffer();
         state.turnIndex += 1;
+      }
+
+      // Side-conversation escape: the caller is talking to a third party, not to
+      // Maya (she stayed silent this turn). Give it one SIDE_CONVERSATION_HANGUP_MS
+      // window; if side chatter is still going with no real reply, bow out and
+      // hang up. Any genuine reply below resets the window.
+      if (result.sideConversation) {
+        const now = Date.now();
+        if (state.sideConversationSince === 0) {
+          state.sideConversationSince = now;
+          this.logger.log(
+            `Side conversation started callId=${state.callId} — ${SIDE_CONVERSATION_HANGUP_MS}ms escape window`,
+          );
+        } else if (now - state.sideConversationSince >= SIDE_CONVERSATION_HANGUP_MS && !state.closing) {
+          this.logger.log(`Side conversation exceeded window callId=${state.callId} — hanging up`);
+          state.closing = true;
+          const isHindi = state.locale.startsWith("hi") || state.locale.startsWith("gu");
+          const goodbyeBase = isHindi
+            ? "कोई बात नहीं, लगता है आप अभी थोड़ा busy हैं। हमारे sales expert आपसे personally connect करेंगे। Thank you."
+            : "No problem, it seems you're a little busy right now. Our sales expert will personally reach out to you. Thank you.";
+          const goodbye = `${goodbyeBase} ${endCallDisclaimer(state.locale)}`;
+          await this.playDirectTts(state, goodbye);
+          await this.waitForPacerDrain(state, 10_000);
+          await new Promise<void>((r) => setTimeout(r, EXOTEL_HANGUP_GRACE_MS));
+          try {
+            client.close();
+          } catch {}
+        }
+      } else if (!result.canceled && !isNoisyTranscript(utterance)) {
+        // A real reply (or a mid-thought fragment-hold) — reset the escape window.
+        state.sideConversationSince = 0;
       }
 
       if (result.endCall) {
@@ -563,18 +612,35 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
       );
       return;
     }
-    state.inactivityStrikes += 1;
-    const strikes = state.inactivityStrikes;
     const isHindi = state.locale.startsWith("hi") || state.locale.startsWith("gu");
+    // Noisy line / caller talking to someone else: audio has been arriving (noise
+    // utterances) for the whole window but none of it was a real reply to Maya.
+    // Don't keep the line open or bother with a check-in — after this single 35s
+    // window, say a brief goodbye and hang up. A genuinely SILENT line (no noise)
+    // still gets the gentle "are you still there?" nudge first.
+    const noisyWindow =
+      state.lastNoiseAt > 0 && Date.now() - state.lastNoiseAt < INACTIVITY_TIMEOUT_MS;
+    if (noisyWindow) {
+      state.inactivityStrikes = INACTIVITY_MAX_STRIKES;
+    } else {
+      state.inactivityStrikes += 1;
+    }
+    const strikes = state.inactivityStrikes;
 
     if (strikes >= INACTIVITY_MAX_STRIKES) {
-      // Second strike with no response — say goodbye and hang up. Include the
-      // AI-disclosure line so this system-driven ending matches a normal sign-off.
-      const goodbyeBase = isHindi
-        ? "लगता है आप अभी available नहीं हैं। हमारे sales expert आपसे personally connect करेंगे। Thank you, namaste."
-        : "It seems you are unavailable. Our sales expert will personally reach out to you. Thank you.";
+      // Final strike (or a noisy/occupied line) — say goodbye and hang up. Include
+      // the AI-disclosure line so this system-driven ending matches a normal sign-off.
+      const goodbyeBase = noisyWindow
+        ? isHindi
+          ? "लगता है line पर कुछ disturbance है या आप अभी busy हैं। हमारे sales expert आपसे personally connect करेंगे। Thank you."
+          : "It seems the line is disturbed or you're occupied right now. Our sales expert will personally reach out to you. Thank you."
+        : isHindi
+          ? "लगता है आप अभी available नहीं हैं। हमारे sales expert आपसे personally connect करेंगे। Thank you, namaste."
+          : "It seems you are unavailable. Our sales expert will personally reach out to you. Thank you.";
       const goodbye = `${goodbyeBase} ${endCallDisclaimer(state.locale)}`;
       state.queue = state.queue.then(async () => {
+        // A real utterance arriving in the meantime resets inactivityStrikes to 0,
+        // cancelling this hangup; continued noise leaves strikes at the max.
         if (state.inactivityStrikes < strikes || client.readyState !== WebSocket.OPEN) return;
         state.closing = true;
         await this.playDirectTts(state, goodbye);
@@ -583,7 +649,7 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
         try { client.close(); } catch {}
       });
     } else {
-      // First strike — ask if they're still there.
+      // First strike on a silent line — ask if they're still there.
       const checkIn = isHindi
         ? "Hello? क्या आप अभी भी line पर हैं?"
         : "Hello? Are you still there?";
@@ -593,7 +659,7 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
         if (client.readyState !== WebSocket.OPEN) return;
         await this.playDirectTts(state, checkIn);
       });
-      // Re-arm: another 15 s with no response → second strike.
+      // Re-arm: another INACTIVITY_TIMEOUT_MS with no response → second strike.
       this.resetInactivityTimer(client, state);
     }
   }

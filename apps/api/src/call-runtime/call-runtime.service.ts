@@ -152,6 +152,10 @@ function looksIncomplete(text: string): boolean {
 // sentence-by-sentence into TTS, a JSON wrapper cannot.
 const END_CALL_TOKEN = "<end_call/>";
 
+// Emitted alone (no spoken words) when the caller is addressing a third party
+// rather than Maya. Kept in sync with SIDE_CONVO_SOURCE below.
+const SIDE_CONVERSATION_TOKEN = "<side_conversation/>";
+
 // Spoken as the very last line before hangup, after the model's "Thank you."
 // Appended in code (not via the prompt) so it is guaranteed on every ended call
 // regardless of how the model phrased its sign-off. "ए आई" spells out "AI" so the
@@ -174,6 +178,20 @@ function hasEndCall(text: string): boolean {
 }
 function stripEndCall(text: string): string {
   return text.replace(new RegExp(END_CALL_SOURCE, "gi"), "");
+}
+
+// Side-conversation sentinel. STT only transcribes words — it can't tell WHO the
+// caller is addressing — so the addressee judgment is delegated to the LLM: when
+// the caller is clearly talking to a third party (not to Maya), the model emits
+// ONLY this token and no spoken words. The runtime then stays silent, and the
+// transport runs a short escape window so a sustained side conversation hangs up.
+// Built fresh per call for the same stateless reason as the end-call regex.
+const SIDE_CONVO_SOURCE = "<\\s*side_conversation\\s*/?\\s*>";
+function hasSideConversation(text: string): boolean {
+  return new RegExp(SIDE_CONVO_SOURCE, "i").test(text);
+}
+function stripSideConversation(text: string): string {
+  return text.replace(new RegExp(SIDE_CONVO_SOURCE, "gi"), "");
 }
 
 // Sentence boundary for streaming dispatch: ., !, ?, or Devanagari danda,
@@ -204,6 +222,8 @@ export type TurnResult = {
   reply: string;
   endCall: boolean;
   waitForMore: boolean;
+  // True when the caller was talking to a third party (Maya stayed silent).
+  sideConversation?: boolean;
 };
 
 // Carries the output of a speculative LLM run so processUtteranceStream can
@@ -733,7 +753,7 @@ CALL FLOW — move through these stages in order, naturally, ONE question per tu
 6. NAME: Once they confirm a time, immediately ask for their name — "और Sir, आपका नाम क्या है?" (if they already gave their name earlier, skip this step).
 7. CONFIRM: After getting their name, confirm the booking — always echo the exact time they gave: "Perfect, [Name] Sir. आपकी [time] बजे का appointment confirm कर रही हूँ — उस time पर कोई और appointment नहीं लूँगी, आपको wait नहीं करना पड़ेगा। हमारे luxury sales expert आपको WhatsApp पे confirmation code, Google Maps location, और sample apartment का reminder भेजेंगे।"
 8. KNOW THEM (after confirmation, casually, ONE at a time): "Sir, just to know you well — आप क्या business या profession में हैं?" → then "Ahmedabad में कहाँ रहते हैं आप?" NEVER ask where their office, clinic, or workplace is. If the customer mentions a location you don't recognise, just acknowledge naturally ("Alright.", "बढ़िया।", "Got it.") and move to the next question — never probe or ask for clarification on a location name.
-9. CLOSE: Re-confirm the time, then add ONE warm parting line before the sign-off — something gracious and personal like "Our whole team looks forward to welcoming you and your family — you'll be very well taken care of." or "It was lovely speaking with you — we'll make sure your visit is a wonderful one." Vary it; never the same line twice. Then sign off: "See you at [time]. Thank you." → then end the call with ${END_CALL_TOKEN}.
+9. CLOSE: Re-confirm the time, then add ONE warm parting line before the sign-off — something gracious and personal like "It was lovely speaking with you — we'll make sure your visit is a wonderful one." Vary it; never the same line twice. Then sign off: "See you at [time]. Thank you." → then end the call with ${END_CALL_TOKEN}.
 
 If they're NOT interested at any stage: no pressure — add one gracious line before the sign-off, e.g. "It was truly a pleasure speaking with you — do reach out whenever you'd like to explore, our doors are always open for you." then close warmly with "Thank you." → end the call with ${END_CALL_TOKEN}.
 If they deflect scheduling ("WhatsApp pe bhejo", "main baad mein call karunga/karungi", or go silent on timing): don't push. Say "बिल्कुल — हमारे luxury sales expert आपसे personally connect करेंगे और सारी details share करेंगे। Thank you." → end the call warmly with ${END_CALL_TOKEN}.
@@ -750,6 +770,7 @@ HOW YOU TALK:
 - Use ONLY real, common Hindi words. NEVER invent or mash up words — if unsure, use the English word.
 - If their sentence seems cut off or incomplete, do NOT guess — say "हाँ जी, बोलिए?" and let them finish.
 - If their input is a single filler sound, background noise, or completely unclear — say ONLY "हाँ जी, बोलिए?" NEVER say "Sorry, आवाज़ कट गई" or any variation about call quality.
+- SIDE CONVERSATION — CRITICAL: अगर caller साफ़ तौर पर आपसे नहीं, बल्कि अपने पास किसी और से बात कर रहा है — किसी दूसरे व्यक्ति, बच्चे, staff या family को कुछ कह रहा है ("हाँ बेटा अभी आता हूँ", "एक मिनट रुको", "चाय ले आओ", "मैं अभी phone पे हूँ", "इनसे बाद में बात करता हूँ") — तो उसका जवाब बिलकुल न दें, न greet करें, न कोई सवाल पूछें। सिर्फ़ यह token output करें और कुछ नहीं: ${SIDE_CONVERSATION_TOKEN} — कोई spoken शब्द नहीं। यह token सिर्फ़ तभी दें जब आप वाकई sure हों कि वो किसी third party से बात कर रहे हैं; अगर हो सकता है वो आपको ही जवाब दे रहे हों, तो normally respond करें।
 
 WORDS:
 - USE these: curated residences, select portfolio, gated community, elegant luxury apartments, club class amenities, ultra-luxury residence, signature residence, exceptional address, world-class lifestyle, grand clubhouse, private cinema, low-density community, exclusive address, resident profile, distinguished community, rest assured.
@@ -773,7 +794,7 @@ EXAMPLES of correct replies (note: composed tone, brief acknowledgments, luxury 
 - Perfect, 4 बजे. और Sir, आपका नाम क्या है?
 - Rahul Sir, आपको confirmation और Google Maps location WhatsApp पे मिल जाएगी. वैसे just to know you — आप किस profession में हैं?
 - Oh, a doctor. और आप Ahmedabad में कहाँ रहते हैं?
-- Rahul Sir, आपकी 4 बजे का appointment confirm कर रही हूँ — उस time पर कोई और appointment नहीं लूँगी, आपको wait नहीं करना पड़ेगा। हमारी पूरी team आपका और आपकी family का स्वागत करने के लिए उत्सुक है — see you at 4. Thank you.${END_CALL_TOKEN}
+- Rahul Sir, आपकी 4 बजे का appointment confirm कर रही हूँ — उस time पर कोई और appointment नहीं लूँगी, आपको wait नहीं करना पड़ेगा। see you at 4. Thank you.${END_CALL_TOKEN}
 - बिल्कुल Sir, कोई बात नहीं — आपसे बात करके बहुत अच्छा लगा। Thank you.${END_CALL_TOKEN}
 
 PROPERTY INVENTORY — REASONING GUIDE:
@@ -881,7 +902,7 @@ CALL FLOW — move through these stages in order, naturally, ONE question per tu
 6. NAME: Once they confirm a time, immediately ask for their name — "And may I know your good name, Sir?" (skip if they already gave it).
 7. CONFIRM: After getting their name, confirm the time explicitly: "Perfect, [Name]. I'll keep your [time] appointment confirmed — I won't take any other appointment at that time so that you don't have to wait. Our luxury sales expert will send you the confirmation code, Google Maps location, and a reminder on WhatsApp."
 8. KNOW THEM (after confirmation, casually, ONE at a time): "Just to know you well — what business or profession are you into?" → then "and which area of Ahmedabad do you stay in?" NEVER ask where their office, clinic, or workplace is. If the customer mentions a location you don't recognise, just acknowledge naturally ("Alright.", "Got it.", "Understood.") and move to the next question — never probe or ask for clarification on a location name.
-9. CLOSE: Re-confirm the time, then add ONE warm parting line before the sign-off — something gracious and personal like "Our whole team looks forward to welcoming you and your family — you'll be very well taken care of." or "It was lovely speaking with you — we'll make sure your visit is a wonderful one." Vary it; never the same line twice. Then sign off: "See you at [time]. Thank you." → then end the call with ${END_CALL_TOKEN}.
+9. CLOSE: Re-confirm the time, then add ONE warm parting line before the sign-off — something gracious and personal like "It was lovely speaking with you — we'll make sure your visit is a wonderful one." Vary it; never the same line twice. Then sign off: "See you at [time]. Thank you." → then end the call with ${END_CALL_TOKEN}.
 
 If they're NOT interested at any stage: no pressure — add one gracious line before the sign-off, e.g. "It was truly a pleasure speaking with you — do reach out whenever you'd like to explore, our doors are always open for you." then close warmly with "Thank you." → end the call with ${END_CALL_TOKEN}.
 If they deflect scheduling ("send it on WhatsApp", "I'll call you back", or go silent on timing): don't push. Say "Of course — our luxury sales expert will personally reach out to you and share all the details. Thank you." → end the call warmly with ${END_CALL_TOKEN}.
@@ -897,6 +918,7 @@ HOW YOU TALK:
 - REACTIONS: Brief and composed, not excitable. "Oh, a doctor." / "Bodakdev — understood." / "Alright." — then continue. Never "Wow!", "That's great!", "Excellent choice!".
 - If their sentence seems cut off, do NOT guess — say "Please go on." and let them finish.
 - If their input is noise or completely unclear — say ONLY "Please go on." or "I'm listening." NEVER mention call quality or audio.
+- SIDE CONVERSATION — CRITICAL: If the caller is clearly talking to someone else near them, not to you — giving instructions to another person, a child, staff, or family ("hold on, I'm on a call", "one minute", "yes beta, coming", "bring me the file", "I'll talk to them later") — do NOT answer it, greet, or ask anything. Output EXACTLY this token and nothing else: ${SIDE_CONVERSATION_TOKEN} — no spoken words. Only use it when you are genuinely sure they are addressing a third party; if they might be answering you, respond normally.
 - UNITS: Say "square feet" and "square yards" in full — never abbreviate as "sq ft" or "sq yd".
 - BHK NUMBERS — CRITICAL: always write as digit + space + BHK — "4 BHK", "5 BHK", "3 BHK". NEVER join them ("4BHK") and NEVER spell the number as a word. Keep the digit as an English numeral so the voice engine speaks it in English.
 
@@ -921,7 +943,7 @@ EXAMPLES of correct replies (note: composed tone, brief acknowledgments, luxury 
 - Perfect, 4 PM. And may I know your good name, Sir?
 - Rahul Sir, you'll receive the confirmation and Google Maps location on WhatsApp shortly. Just to know you a little better — what business or profession are you in?
 - Oh, a doctor. And which area of Ahmedabad do you stay in?
-- Rahul Sir, I'll keep your 4 PM appointment confirmed — I won't take any other appointment at that time so that you don't have to wait. Our team looks forward to welcoming you and your family — see you at 4. Thank you.${END_CALL_TOKEN}
+- Rahul Sir, I'll keep your 4 PM appointment confirmed — I won't take any other appointment at that time so that you don't have to wait. See you at 4. Thank you.${END_CALL_TOKEN}
 - Of course, no problem at all — it was a pleasure speaking with you. Thank you.${END_CALL_TOKEN}
 
 PROPERTY INVENTORY — REASONING GUIDE:
@@ -1046,7 +1068,9 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
     }
 
     const endCall = hasEndCall(stripped);
-    return { reply: stripEndCall(stripped).trim(), endCall };
+    // Safety net: strip any stray side-conversation token so it can never be
+    // spoken, even if the streaming detector above was bypassed.
+    return { reply: stripSideConversation(stripEndCall(stripped)).trim(), endCall };
   }
 
   // Token-budget guard: keep the most recent turns. The system prompt carries
@@ -1346,6 +1370,22 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
         throw new ServiceUnavailableException("LLM provider returned no reply");
       }
 
+      // Side conversation: caller addressed a third party — return a silent turn
+      // (empty audio) so the token is never spoken. The transport treats this
+      // like a non-answer (waitForMore) and runs its escape window if telephony.
+      if (hasSideConversation(rawLlmText)) {
+        state.history.push({ role: "assistant", content: SIDE_CONVERSATION_TOKEN });
+        this.persistState(callId, state);
+        return {
+          audio: Buffer.alloc(0),
+          transcript: utterance,
+          reply: "",
+          endCall: false,
+          waitForMore: true,
+          sideConversation: true,
+        };
+      }
+
       const parsed = this.parseLlmReply(rawLlmText, callId);
       const reply = parsed.reply;
       let shouldEndCall = parsed.endCall;
@@ -1506,6 +1546,8 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
     endCall: boolean;
     waitForMore: boolean;
     canceled: boolean;
+    // True when the caller was talking to a third party (Maya stayed silent).
+    sideConversation?: boolean;
   }> {
     // Mirror the noise guard from the HTTP path so background audio / short
     // fillers don't trigger an LLM call on the live Exotel path either.
@@ -1597,6 +1639,9 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
     let jsonMode: boolean | null = null;
     let pendingText = "";
     let endCallDetected = false;
+    // Set when the model signals the caller is addressing a third party. Once set,
+    // nothing is dispatched to TTS — Maya stays silent for the whole turn.
+    let sideConversationDetected = false;
     // Call once when end-call is first detected — notifies the transport to
     // lock out barge-in immediately so the closing statement isn't cut off.
     const markEndCall = () => {
@@ -1687,6 +1732,16 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
       }
       if (jsonMode) return; // buffer everything; parse at end
 
+      // Side-conversation token: suppress all audio for this turn the moment it
+      // appears. It streams in fragments ("<side", "_conversation/>"), so nothing
+      // is dispatched before the whole token lands (it carries no sentence
+      // boundary), and once detected we drop the buffer so no words are spoken.
+      if (sideConversationDetected || hasSideConversation(pendingText)) {
+        sideConversationDetected = true;
+        pendingText = "";
+        return;
+      }
+
       // Strip a complete end-call sentinel anywhere in the buffer.
       if (hasEndCall(pendingText)) {
         markEndCall();
@@ -1776,6 +1831,26 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
       }
       const llmEnd = Date.now();
       const llmElapsed = llmResolved.llmMs ?? Math.max(0, llmEnd - llmStart);
+
+      // Side conversation: the caller was addressing a third party. Maya said
+      // nothing (no audio dispatched). Record the model's token so history stays
+      // coherent, close any TTS session, and signal the transport to run its
+      // escape window. Not a real turn — waitForMore keeps the turn index put.
+      if (sideConversationDetected || hasSideConversation(llmResolved.text)) {
+        state.history.push({ role: "assistant", content: SIDE_CONVERSATION_TOKEN });
+        this.persistState(callId, state);
+        wsSession?.close();
+        this.metrics.increment("pikorua_turns_total", { result: "side_conversation" });
+        this.logger.log(`Side conversation detected call=${callId} — staying silent`);
+        return {
+          transcript: utterance,
+          reply: "",
+          endCall: false,
+          waitForMore: true,
+          canceled: false,
+          sideConversation: true,
+        };
+      }
 
       // Resolve the full reply text. JSON mode parses the buffered envelope;
       // plain mode flushes whatever didn't end on a sentence boundary.

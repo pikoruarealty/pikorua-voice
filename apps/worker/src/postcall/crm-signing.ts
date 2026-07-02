@@ -18,6 +18,15 @@ export interface CrmAuthOptions {
  *
  * When `hmacSecret` is blank the request is sent unsigned (useful for local dev
  * against a mock); a real CRM will reject it with 403.
+ *
+ * SECURITY NOTE (integration contract): the signature covers ONLY the body, not
+ * `X-Timestamp` or `Idempotency-Key`. An attacker who captures one signed request
+ * can therefore replay it as a NEW lead by rewriting those two unsigned headers —
+ * a fresh timestamp clears the CRM's skew window and a new idempotency key evades
+ * dedup, while the body-only signature still validates. This matches the CRM's
+ * agreed scheme, so fully closing it requires a CHANGE ON THE CRM SIDE (sign over
+ * `timestamp + "." + body`); do not unilaterally change signing here or every
+ * request will 403. Tracked for the CRM team.
  */
 export function buildCrmHeaders(rawBody: string, opts: CrmAuthOptions): Record<string, string> {
   const headers: Record<string, string> = {

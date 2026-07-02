@@ -84,6 +84,18 @@ export class FluxLiveService {
     let reconnects = 0;
     const pendingChunks: Buffer[] = [];
 
+    // Deepgram closes idle sockets after ~10s. Exotel streams continuous audio so
+    // the socket normally isn't idle, but a brief gap in inbound media (network
+    // hiccup, upstream pause) could trip that timeout — keep it alive defensively,
+    // matching DeepgramLiveService.
+    const keepAlive = setInterval(() => {
+      if (open && !closedByUser && ws) {
+        try {
+          ws.send(JSON.stringify({ type: "KeepAlive" }));
+        } catch {}
+      }
+    }, 6000);
+
     const connect = () => {
       const socket = new WebSocket(url, {
         headers: { Authorization: `Token ${apiKey}` },
@@ -144,7 +156,10 @@ export class FluxLiveService {
       socket.on("close", (code: number, reason: Buffer) => {
         open = false;
         if (ws !== socket) return; // superseded by a newer socket
-        if (closedByUser) return;
+        if (closedByUser) {
+          clearInterval(keepAlive);
+          return;
+        }
         const detail = `code=${code}${reason.length ? ` reason="${reason.toString("utf8").slice(0, 80)}"` : ""}`;
         // Unexpected close mid-call: reconnect with backoff so the session doesn't
         // go deaf. Audio keeps buffering into pendingChunks meanwhile.
@@ -159,6 +174,7 @@ export class FluxLiveService {
           }, delay);
           return;
         }
+        clearInterval(keepAlive);
         this.logger.error(
           `Flux live session failed permanently (${detail}) after ${MAX_RECONNECTS} reconnect(s)`,
         );
@@ -190,6 +206,7 @@ export class FluxLiveService {
       close: () => {
         if (closedByUser) return;
         closedByUser = true;
+        clearInterval(keepAlive);
         try {
           ws?.send(JSON.stringify({ type: "CloseStream" }));
         } catch {}

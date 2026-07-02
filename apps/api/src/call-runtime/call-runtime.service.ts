@@ -1309,6 +1309,14 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
     const watchdog = setTimeout(() => turnController.abort(), this.turnTimeoutMs());
 
     try {
+      // Snapshot history so a side-conversation turn rolls back cleanly (see the
+      // streaming path for the rationale — keeps third-party words out of context).
+      const historyBeforeTurn = state.history.slice();
+      const lastIdxBefore = state.history.length - 1;
+      const mergedContentBefore =
+        lastIdxBefore >= 0 && state.history[lastIdxBefore]?.role === "user"
+          ? state.history[lastIdxBefore].content
+          : null;
       this.appendUserMessage(state, utterance);
 
       const llmStart = Date.now();
@@ -1372,10 +1380,12 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
       }
 
       // Side conversation: caller addressed a third party — return a silent turn
-      // (empty audio) so the token is never spoken. The transport treats this
-      // like a non-answer (waitForMore) and runs its escape window if telephony.
+      // (empty audio) so the token is never spoken. Roll history back so the side
+      // utterance never enters Maya's context. The transport treats this like a
+      // non-answer (waitForMore) and runs its escape window if telephony.
       if (hasSideConversation(rawLlmText)) {
-        state.history.push({ role: "assistant", content: SIDE_CONVERSATION_TOKEN });
+        state.history = historyBeforeTurn;
+        if (mergedContentBefore !== null) state.history[lastIdxBefore].content = mergedContentBefore;
         this.persistState(callId, state);
         return {
           audio: Buffer.alloc(0),
@@ -1763,6 +1773,18 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
     };
 
     try {
+      // Snapshot history so a side conversation (only detectable AFTER the LLM
+      // replies) rolls back cleanly. The third party's words must never enter
+      // Maya's context — otherwise a sustained side conversation evicts the real
+      // exchange (BHK/budget/…) under the LLM_HISTORY_MAX_MESSAGES cap and she
+      // "forgets" what was already collected. Covers both the append-push and the
+      // consecutive-user merge that appendUserMessage may perform.
+      const historyBeforeTurn = state.history.slice();
+      const lastIdxBefore = state.history.length - 1;
+      const mergedContentBefore =
+        lastIdxBefore >= 0 && state.history[lastIdxBefore]?.role === "user"
+          ? state.history[lastIdxBefore].content
+          : null;
       this.appendUserMessage(state, utterance);
 
       const llmStart = Date.now();
@@ -1835,11 +1857,13 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
       const llmElapsed = llmResolved.llmMs ?? Math.max(0, llmEnd - llmStart);
 
       // Side conversation: the caller was addressing a third party. Maya said
-      // nothing (no audio dispatched). Record the model's token so history stays
-      // coherent, close any TTS session, and signal the transport to run its
-      // escape window. Not a real turn — waitForMore keeps the turn index put.
+      // nothing (no audio dispatched). Roll history back to before this turn so
+      // the side utterance never enters Maya's context, close any TTS session, and
+      // signal the transport to run its escape window. Not a real turn —
+      // waitForMore keeps the turn index put.
       if (sideConversationDetected || hasSideConversation(llmResolved.text)) {
-        state.history.push({ role: "assistant", content: SIDE_CONVERSATION_TOKEN });
+        state.history = historyBeforeTurn;
+        if (mergedContentBefore !== null) state.history[lastIdxBefore].content = mergedContentBefore;
         this.persistState(callId, state);
         wsSession?.close();
         this.metrics.increment("pikorua_turns_total", { result: "side_conversation" });

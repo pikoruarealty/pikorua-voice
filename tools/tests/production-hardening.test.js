@@ -133,6 +133,7 @@ test("post-call scoring prefers caller turns over assistant turns", async () => 
         { role: "caller", content: "Yes, schedule a demo today." },
       ],
     },
+    { findById: async () => null }, // campaignRepo (best-effort campaign name for CRM payload)
     { evaluate: async () => null },
     { get: () => "" },
   );
@@ -152,7 +153,10 @@ test("post-call scoring prefers caller turns over assistant turns", async () => 
 
 test("CRM retry worker uses retryable failed/pending logs and idempotency headers", () => {
   assert.match(read("apps/worker/src/postcall/crm-retry.worker.ts"), /findRetryable\(25, 5\)/);
-  assert.match(read("apps/worker/src/postcall/crm-retry.worker.ts"), /Idempotency-Key/);
+  // Idempotency now flows through the shared CRM client/signing helper: the retry
+  // worker passes the stored idempotencyKey, and crm-signing emits the header.
+  assert.match(read("apps/worker/src/postcall/crm-retry.worker.ts"), /idempotencyKey/);
+  assert.match(read("apps/worker/src/postcall/crm-signing.ts"), /Idempotency-Key/);
   assert.match(read("packages/db/src/repositories/crm-sync-log.repository.ts"), /findRetryable/);
 });
 

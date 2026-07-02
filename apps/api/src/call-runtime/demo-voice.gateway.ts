@@ -161,7 +161,10 @@ export class DemoVoiceGateway implements OnGatewayConnection, OnGatewayDisconnec
   private handlePartial(client: WebSocket, state: ClientState, text: string) {
     // Server-side barge-in: the caller is talking over the assistant. Abort
     // generation/synthesis and tell the client to drop queued audio. A short
-    // length guard filters echo blips that survive the browser's AEC.
+    // length guard filters echo blips that survive the browser's AEC. NOTE: 4
+    // here vs BARGE_IN_MIN_CHARS=3 on the telephony gateway is intentional — the
+    // browser has acoustic echo cancellation, the phone line does not, so the two
+    // floors are tuned independently and should not be "unified".
     if (state.streaming && (state.active || state.speaking) && text.trim().length >= 4) {
       if (state.active) {
         this.logger.log("Barge-in — aborting active turn");

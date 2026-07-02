@@ -17,6 +17,25 @@ async function bootstrap() {
   const logger = new Logger(SERVICE.WORKER);
   const config = app.get(ConfigService);
 
+  // CRM sync is optional at boot (it can be staged in later), so a misconfigured
+  // prod deploy would otherwise fail silently: the worker runs, but every
+  // /call-results POST is unsigned/misrouted and the real CRM 403s, leaving leads
+  // stuck as "failed" forever. Warn loudly instead of hiding it.
+  if (String(config.get("NODE_ENV") ?? "development") === "production") {
+    const crmBase = String(config.get("CRM_API_BASE_URL") ?? "");
+    const problems: string[] = [];
+    if (!crmBase || /localhost|127\.0\.0\.1/.test(crmBase))
+      problems.push("CRM_API_BASE_URL is unset or points at localhost");
+    if (!String(config.get("CRM_API_TOKEN") ?? "")) problems.push("CRM_API_TOKEN is blank");
+    if (!String(config.get("CRM_WEBHOOK_HMAC_SECRET") ?? ""))
+      problems.push("CRM_WEBHOOK_HMAC_SECRET is blank — requests are unsigned and the CRM will 403");
+    if (problems.length > 0) {
+      logger.warn(
+        `CRM sync misconfigured for production — call-result POSTs will fail: ${problems.join("; ")}`,
+      );
+    }
+  }
+
   const redisUrl = String(config.get("REDIS_URL"));
   const redis = new Redis(redisUrl, { maxRetriesPerRequest: null, lazyConnect: true });
 

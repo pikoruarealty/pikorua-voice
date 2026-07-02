@@ -52,6 +52,13 @@ export class SttRouterService {
     // Flux primary with a Nova-3 connect-time fallback. `active` points at the
     // session currently receiving audio; on permanent Flux failure we swap it for
     // a fresh Nova-3 session wired to the caller's original callbacks.
+    //
+    // Rolling buffer of the most recent audio (~3s) so the utterance in progress
+    // when Flux dies is replayed to Nova-3 rather than lost. Kept short so we don't
+    // re-feed (and re-transcribe) speech Flux already handled before failing.
+    const RECENT_AUDIO_CHUNKS = 30; // ~3s at 100ms/frame
+    const recentAudio: Buffer[] = [];
+
     let failedOver = false;
     const fluxCallbacks: LiveSessionCallbacks = {
       ...callbacks,
@@ -69,6 +76,7 @@ export class SttRouterService {
           active.close();
         } catch {}
         active = this.deepgramLive.openSession(locale, sampleRate, callbacks, opts);
+        for (const chunk of recentAudio) active.sendAudio(chunk);
       },
     };
 
@@ -77,7 +85,11 @@ export class SttRouterService {
     // Delegate every call to whichever session is currently active. After a
     // failover, `active` is the Nova-3 session — including for close().
     return {
-      sendAudio: (chunk) => active.sendAudio(chunk),
+      sendAudio: (chunk) => {
+        recentAudio.push(chunk);
+        if (recentAudio.length > RECENT_AUDIO_CHUNKS) recentAudio.shift();
+        active.sendAudio(chunk);
+      },
       clearBuffer: () => active.clearBuffer(),
       setEndpointing: (ms) => active.setEndpointing(ms),
       close: () => active.close(),

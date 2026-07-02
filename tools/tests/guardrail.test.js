@@ -69,7 +69,7 @@ test("hard guardrail does NOT flag Maya's legitimate spoken budget tiers", () =>
   // Maya offers budget tiers in spoken Hindi — no ₹ symbol, no [internal] marker.
   // This must stay clean, otherwise the budget step breaks on every vague answer.
   const tiers = svc.checkHard(
-    "कोई बात नहीं — 3 करोड़, 5 करोड़, 10 करोड़, 15 करोड़, या 25 करोड़ — इनमें से कौन-सा comfortable रहेगा?",
+    "कोई बात नहीं — 3 करोड़, 5 करोड़, 10 करोड़, 15 करोड़, 25 करोड़, या उससे ऊपर — इनमें से कौन-सा comfortable रहेगा?",
   );
   assert.equal(tiers.triggered, false);
   assert.equal(tiers.rule, null);

@@ -182,14 +182,27 @@ function stripEndCall(text: string): string {
 }
 
 // Side-conversation sentinel. STT only transcribes words — it can't tell WHO the
-// caller is addressing — so the addressee judgment is delegated to the LLM: when
+// caller is addressing — so the addressee judgment was delegated to the LLM: when
 // the caller is clearly talking to a third party (not to Maya), the model emits
-// ONLY this token and no spoken words. The runtime then stays silent, and the
-// transport runs a short escape window so a sustained side conversation hangs up.
+// ONLY this token and no spoken words.
+//
+// TEMPORARILY DISABLED (2026-07-02). In production it false-fired on ordinary,
+// slightly garbled caller audio — the STT heard "Hello, guys, Ampli." and the
+// model tagged it a third-party aside — so Maya went silent and looked deaf, and
+// the 35s escape window risked hanging up genuine callers. Until we have a more
+// reliable addressee signal, the whole path is switched off:
+//   1. the SIDE CONVERSATION prompt bullets (HI + EN) were removed, so the model
+//      should no longer emit the token;
+//   2. hasSideConversation() returns false, so the stay-silent + escape-window
+//      logic is inert even if a stray token appears;
+//   3. stripSideConversation() STILL runs everywhere, so a stray token is scrubbed
+//      from anything spoken or stored rather than voiced.
+// To re-enable: restore the prompt bullets and make hasSideConversation() test the
+// token again.
 // Built fresh per call for the same stateless reason as the end-call regex.
 const SIDE_CONVO_SOURCE = "<\\s*side_conversation\\s*/?\\s*>";
-function hasSideConversation(text: string): boolean {
-  return new RegExp(SIDE_CONVO_SOURCE, "i").test(text);
+function hasSideConversation(_text: string): boolean {
+  return false;
 }
 function stripSideConversation(text: string): string {
   return text.replace(new RegExp(SIDE_CONVO_SOURCE, "gi"), "");
@@ -777,7 +790,6 @@ HOW YOU TALK:
 - Use ONLY real, common Hindi words. NEVER invent or mash up words — if unsure, use the English word.
 - If their sentence seems cut off or incomplete, do NOT guess — say "हाँ जी, बोलिए?" and let them finish.
 - If their input is a single filler sound, background noise, or completely unclear — say ONLY "हाँ जी, बोलिए?" NEVER say "Sorry, आवाज़ कट गई" or any variation about call quality.
-- SIDE CONVERSATION — CRITICAL: अगर caller साफ़ तौर पर आपसे नहीं, बल्कि अपने पास किसी और से बात कर रहा है — किसी दूसरे व्यक्ति, बच्चे, staff या family को कुछ कह रहा है ("हाँ बेटा अभी आता हूँ", "एक मिनट रुको", "चाय ले आओ", "मैं अभी phone पे हूँ", "इनसे बाद में बात करता हूँ") — तो उसका जवाब बिलकुल न दें, न greet करें, न कोई सवाल पूछें। सिर्फ़ यह token output करें और कुछ नहीं: ${SIDE_CONVERSATION_TOKEN} — कोई spoken शब्द नहीं। यह token सिर्फ़ तभी दें जब आप वाकई sure हों कि वो किसी third party से बात कर रहे हैं; अगर हो सकता है वो आपको ही जवाब दे रहे हों, तो normally respond करें।
 
 WORDS:
 - USE these: curated residences, select portfolio, gated community, elegant luxury apartments, club class amenities, ultra-luxury residence, signature residence, exceptional address, world-class lifestyle, grand clubhouse, private cinema, low-density community, exclusive address, resident profile, distinguished community, rest assured.
@@ -925,7 +937,6 @@ HOW YOU TALK:
 - REACTIONS: Brief and composed, not excitable. "Oh, a doctor." / "Bodakdev — understood." / "Alright." — then continue. Never "Wow!", "That's great!", "Excellent choice!".
 - If their sentence seems cut off, do NOT guess — say "Please go on." and let them finish.
 - If their input is noise or completely unclear — say ONLY "Please go on." or "I'm listening." NEVER mention call quality or audio.
-- SIDE CONVERSATION — CRITICAL: If the caller is clearly talking to someone else near them, not to you — giving instructions to another person, a child, staff, or family ("hold on, I'm on a call", "one minute", "yes beta, coming", "bring me the file", "I'll talk to them later") — do NOT answer it, greet, or ask anything. Output EXACTLY this token and nothing else: ${SIDE_CONVERSATION_TOKEN} — no spoken words. Only use it when you are genuinely sure they are addressing a third party; if they might be answering you, respond normally.
 - UNITS: Say "square feet" and "square yards" in full — never abbreviate as "sq ft" or "sq yd".
 - BHK NUMBERS — CRITICAL: always write as digit + space + BHK — "4 BHK", "5 BHK", "3 BHK". NEVER join them ("4BHK") and NEVER spell the number as a word. Keep the digit as an English numeral so the voice engine speaks it in English.
 
@@ -1782,6 +1793,9 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
         pendingText = "";
         return;
       }
+      // Feature disabled (see hasSideConversation): the block above is inert, so
+      // scrub any stray token defensively before sentence dispatch — never voiced.
+      pendingText = stripSideConversation(pendingText);
 
       // Strip a complete end-call sentinel anywhere in the buffer.
       if (hasEndCall(pendingText)) {
@@ -1928,6 +1942,8 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
           markEndCall();
           pendingText = stripEndCall(pendingText);
         }
+        // Defensive: never voice a stray side-conversation token (feature disabled).
+        pendingText = stripSideConversation(pendingText);
         if (pendingText.trim()) dispatchSentence(pendingText);
         pendingText = "";
         const parsed = this.parseLlmReply(llmResolved.text, callId);

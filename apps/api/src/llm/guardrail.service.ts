@@ -22,8 +22,8 @@ const HARD_RULES: Array<{ rule: string; pattern: RegExp; replacement: string }> 
     // price sheet. Every inventory price in the system prompt carries a "₹"
     // figure and an "[internal]" marker, neither of which ever appears in a
     // legitimate spoken reply (Maya never quotes any rupee amount; she only asks
-    // the caller's budget and offers spoken tiers like "3-4 करोड़" — no ₹, no
-    // marker). So "₹<digit>" or "[internal]" in a REPLY is a near-certain leak.
+    // the caller's budget and offers spoken tiers like "3 करोड़, 5 करोड़" — no ₹,
+    // no marker). So "₹<digit>" or "[internal]" in a REPLY is a near-certain leak.
     rule: "internal_pricing_leak",
     pattern: /₹\s*\d|\[\s*internal\s*\]/i,
     replacement:

@@ -2,7 +2,8 @@ import { WebSocketGateway, OnGatewayConnection, OnGatewayDisconnect } from "@nes
 import { WebSocket, RawData } from "ws";
 import { Injectable, Inject, Logger } from "@nestjs/common";
 import type { IncomingMessage } from "http";
-import { DeepgramLiveService, type LiveSession } from "../stt/deepgram-live.service";
+import { type LiveSession } from "../stt/deepgram-live.service";
+import { SttRouterService } from "../stt/stt-router.service";
 import { ElevenlabsService } from "../tts/elevenlabs.service";
 import { CallRuntimeService, isNoisyTranscript, endCallDisclaimer } from "./call-runtime.service";
 import { CallRepository } from "@pikorua/db";
@@ -176,7 +177,7 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
   private readonly sessions = new Map<WebSocket, SessionState>();
 
   constructor(
-    private readonly deepgramLive: DeepgramLiveService,
+    private readonly sttRouter: SttRouterService,
     private readonly tts: ElevenlabsService,
     private readonly runtime: CallRuntimeService,
     @Inject(CallRepository) private readonly callRepo: CallRepository,
@@ -380,7 +381,7 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
     // It fires before any transcript and would barge-in on a single voiced frame
     // of echo/noise — exactly the self-interruption BARGE_IN_MIN_CHARS guards
     // against. Barge-in is driven by transcript partials (handlePartial) instead.
-    return this.deepgramLive.openSession(
+    return this.sttRouter.openSession(
       state.locale,
       EXOTEL_SAMPLE_RATE,
       {

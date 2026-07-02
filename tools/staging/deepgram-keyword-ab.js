@@ -1,11 +1,11 @@
 /**
- * Deepgram keyword-boost A/B harness (settles open question in
- * deepgram-live.service.ts: do Latin keyword boosts help nova-2 on Hindi audio,
+ * Deepgram keyterm-boost A/B harness (settles open question in
+ * deepgram-live.service.ts: do Latin keyterm boosts help Nova-3 on Hindi audio,
  * where the model emits Devanagari?).
  *
- * Runs ONE recorded audio file through Deepgram's pre-recorded nova-2 endpoint
- * under several keyword configurations and prints the transcripts side by side.
- * The pre-recorded path uses the same model + `keywords` mechanism as the live
+ * Runs ONE recorded audio file through Deepgram's pre-recorded nova-3 endpoint
+ * under several keyterm configurations and prints the transcripts side by side.
+ * The pre-recorded path uses the same model + `keyterm` mechanism as the live
  * gateway, so it is a faithful, repeatable proxy for streaming behaviour without
  * real-time pacing. Compare how each variant renders the local area names.
  *
@@ -17,7 +17,8 @@
  *        (pass --rate, default 8000 — matches Exotel pcm_8000).
  *
  * Options:
- *   --lang <code>       Deepgram language (default: hi)
+ *   --lang <code>       Deepgram language (default: multi — matches production
+ *                       Hindi/English code-switch routing; use `gu` for Gujarati)
  *   --rate <hz>         sample rate for RAW audio only (default: 8000)
  *   --expect "a,b,c"    comma-separated area terms you EXPECT to hear; the script
  *                       reports how many each variant recovered (crude recall).
@@ -31,27 +32,29 @@
 const fs = require("node:fs");
 const path = require("node:path");
 
-// ── Keyword sets ────────────────────────────────────────────────────────────
+// ── Keyterm sets ─────────────────────────────────────────────────────────────
+// Nova-3 Keyterm Prompting has no `:intensifier` suffix (that was Nova-2's
+// `keywords`); terms are passed verbatim and multi-word phrases are allowed.
 // English property terms stay Latin in EVERY variant — they are English words
-// and nova-2 emits them in Latin regardless of audio language.
-const ENGLISH_TERMS = ["bungalow:2", "bungalows:2", "penthouse:1", "duplex:1"];
+// and the model emits them in Latin regardless of audio language.
+const ENGLISH_TERMS = ["bungalow", "bungalows", "penthouse", "duplex"];
 
-// Production list (mirror of exotel-voicebot gateway's keywords) — all Latin.
-const ALIASES_LATIN = ["Iskcon:2", "Ambli:2", "Bopal:2", "Bodakdev:1"];
+// Production list (mirror of deepgram-live.service.ts keyterms) — all Latin.
+const ALIASES_LATIN = ["Iskcon", "Ambli", "Bopal", "Ambli-Bopal Road", "Bodakdev"];
 const AREAS_LATIN = [
-  "Sindhu:2", "Bhavan:2", "Rajpath:2", "Rangoli:2",
-  "Thaltej:2", "Vastrapur:2", "Nehrunagar:2", "Vaishnodevi:2", "Gota:1",
-  "Shilaj:2", "Nandoli:2",
+  "Sindhu", "Bhavan", "Rajpath", "Rangoli",
+  "Thaltej", "Vastrapur", "Nehrunagar", "Vaishnodevi", "Gota",
+  "Shilaj", "Nandoli",
 ];
 
 // Devanagari spellings — taken from the system prompt's canonical spellings.
-// (Whether these match nova-2's exact output tokens is precisely what the A/B
+// (Whether these match Nova-3's exact output tokens is precisely what the A/B
 // reveals; a near-miss spelling silently fails to bias.)
-const ALIASES_DEVA = ["इस्कॉन:2", "अंबली:2", "बोपल:2", "बोडकदेव:1"];
+const ALIASES_DEVA = ["इस्कॉन", "अंबली", "बोपल", "बोडकदेव"];
 const AREAS_DEVA = [
-  "सिंधु:2", "भवन:2", "राजपथ:2", "रंगोली:2",
-  "थलतेज:2", "वस्त्रापुर:2", "नेहरूनगर:2", "वैष्णोदेवी:2", "गोता:1",
-  "शिलज:2", "नंदोली:2",
+  "सिंधु", "भवन", "राजपथ", "रंगोली",
+  "थलतेज", "वस्त्रापुर", "नेहरूनगर", "वैष्णोदेवी", "गोता",
+  "शिलज", "नंदोली",
 ];
 
 const VARIANTS = {
@@ -83,7 +86,7 @@ function loadEnv() {
 }
 
 function parseArgs(argv) {
-  const opts = { lang: "hi", rate: "8000", expect: [], variants: Object.keys(VARIANTS) };
+  const opts = { lang: "multi", rate: "8000", expect: [], variants: Object.keys(VARIANTS) };
   const positional = [];
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
@@ -112,15 +115,15 @@ function audioRequestParams(audioPath, opts) {
   return { contentType: CONTENT_TYPES[ext] ?? "application/octet-stream", extraQuery: {} };
 }
 
-async function transcribe(audioBytes, keywords, opts, reqParams) {
+async function transcribe(audioBytes, keyterms, opts, reqParams) {
   const params = new URLSearchParams({
-    model: "nova-2",
+    model: "nova-3",
     language: opts.lang,
     punctuate: "true",
     smart_format: "true",
     ...reqParams.extraQuery,
   });
-  for (const kw of keywords) params.append("keywords", kw);
+  for (const term of keyterms) params.append("keyterm", term);
 
   const started = Date.now();
   const res = await fetch(`https://api.deepgram.com/v1/listen?${params.toString()}`, {
@@ -169,7 +172,7 @@ async function main() {
   for (const variant of opts.variants) {
     try {
       const { transcript, ms } = await transcribe(audioBytes, VARIANTS[variant], opts, reqParams);
-      console.log(`── ${variant} ${"─".repeat(Math.max(2, 40 - variant.length))} (${ms}ms, ${VARIANTS[variant].length} keywords)`);
+      console.log(`── ${variant} ${"─".repeat(Math.max(2, 40 - variant.length))} (${ms}ms, ${VARIANTS[variant].length} keyterms)`);
       console.log(transcript || "(empty transcript)");
       if (opts.expect.length) {
         const r = recall(transcript, opts.expect);
@@ -186,7 +189,7 @@ async function main() {
     "Read the area names across variants. If 'latin' and 'devanagari'/'latinDevanagari'\n" +
       "render them identically, the Latin boosts are doing the work and no change is needed.\n" +
       "If a Devanagari variant recovers names the Latin-only run mangles, add those exact\n" +
-      "spellings to the gateway keyword list (Hindi/Gujarati sessions only).",
+      "spellings to the gateway keyterm list (Hindi/Gujarati sessions only).",
   );
 }
 

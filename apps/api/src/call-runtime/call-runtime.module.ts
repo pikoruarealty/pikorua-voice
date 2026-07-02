@@ -1,6 +1,8 @@
 import { Module } from "@nestjs/common";
 import { DeepgramService } from "../stt/deepgram.service";
 import { DeepgramLiveService } from "../stt/deepgram-live.service";
+import { FluxLiveService } from "../stt/flux-live.service";
+import { SttRouterService } from "../stt/stt-router.service";
 import { DemoVoiceGateway } from "./demo-voice.gateway";
 import { ExotelVoicebotGateway } from "./exotel-voicebot.gateway";
 import { LlmService } from "../llm/llm.service";
@@ -21,6 +23,8 @@ import { IvrService } from "../ivr/ivr.service";
   providers: [
     DeepgramService,
     DeepgramLiveService,
+    FluxLiveService,
+    SttRouterService,
     DemoVoiceGateway,
     ExotelVoicebotGateway,
     LlmService,

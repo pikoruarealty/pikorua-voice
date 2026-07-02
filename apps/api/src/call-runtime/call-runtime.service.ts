@@ -20,6 +20,7 @@ import {
 import type { NewCallTurn } from "@pikorua/db";
 import { ConfigService } from "@nestjs/config";
 import { MetricsService } from "../metrics/metrics.service";
+import { resolveSttProvider, parseFluxLocales } from "../stt/stt-routing";
 import { REDIS_CLIENT } from "../redis/redis.module";
 
 // Per-call state: conversation history + resolved context for prompt building.
@@ -1501,6 +1502,7 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
         totalMs,
         ttfaMs: null,
         result: guardrailTriggered ? "guardrail" : "ok",
+        sttProvider: this.sttProviderLabel(state.locale),
       });
 
       if (shouldEndCall) {
@@ -2000,6 +2002,7 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
         totalMs,
         ttfaMs,
         result: guardrailTriggered ? "guardrail" : "ok",
+        sttProvider: this.sttProviderLabel(state.locale),
       });
 
       if (endCallDetected) {
@@ -2044,6 +2047,18 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
     };
   }
 
+  // The STT provider actually serving this call's locale, for the Flux-vs-Nova-3
+  // latency A/B. Derived from the same pure routing function the SttRouterService
+  // uses, so the label matches the session that was opened. (On a rare Flux→Nova-3
+  // failover the label still reads "flux"; the router's failover counter captures
+  // those separately.)
+  private sttProviderLabel(locale: string): string {
+    return resolveSttProvider(
+      locale,
+      parseFluxLocales(String(this.config.get("STT_FLUX_LOCALES") ?? "")),
+    );
+  }
+
   private recordTurnMetrics(t: {
     sttMs: number;
     llmMs: number;
@@ -2051,13 +2066,15 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
     totalMs: number;
     ttfaMs: number | null;
     result: string;
+    sttProvider: string;
   }) {
     this.metrics.increment("pikorua_turns_total", { result: t.result });
-    this.metrics.observe("pikorua_turn_stt_ms", t.sttMs);
-    this.metrics.observe("pikorua_turn_llm_ms", t.llmMs);
-    this.metrics.observe("pikorua_turn_tts_ms", t.ttsMs);
-    this.metrics.observe("pikorua_turn_total_ms", t.totalMs);
-    if (t.ttfaMs !== null) this.metrics.observe("pikorua_turn_ttfa_ms", t.ttfaMs);
+    const stt = { stt_provider: t.sttProvider };
+    this.metrics.observe("pikorua_turn_stt_ms", t.sttMs, stt);
+    this.metrics.observe("pikorua_turn_llm_ms", t.llmMs, stt);
+    this.metrics.observe("pikorua_turn_tts_ms", t.ttsMs, stt);
+    this.metrics.observe("pikorua_turn_total_ms", t.totalMs, stt);
+    if (t.ttfaMs !== null) this.metrics.observe("pikorua_turn_ttfa_ms", t.ttfaMs, stt);
   }
 
   // Called by webhook handler when a call reaches a terminal state.

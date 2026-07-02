@@ -16,17 +16,20 @@ export class DeepgramService {
   }
 
   // Transcribe a pre-recorded audio buffer (low-latency variant). Returns
-  // { text, latencyMs }
-  // Deepgram language codes differ from BCP-47: hi-IN → hi, en-IN → en-IN is fine,
-  // but nova-2 is required for any non-English language.
+  // { text, latencyMs }.
+  // Nova-3 covers all Indian languages this product uses. Hindi and English route
+  // to the `multi` code-switching model (Hinglish); Gujarati/Tamil/Telugu/Marathi
+  // are standalone Nova-3 languages, not in the `multi` set. Mirrors the routing
+  // in DeepgramLiveService — keep the two in sync.
   private dgLanguage(locale: string): { language: string; model: string } {
     const lang = locale.toLowerCase();
-    if (lang.startsWith("hi")) return { language: "hi", model: "nova-2" };
-    if (lang.startsWith("gu")) return { language: "gu", model: "nova-2" };
-    if (lang.startsWith("ta")) return { language: "ta", model: "nova-2" };
-    if (lang.startsWith("te")) return { language: "te", model: "nova-2" };
-    if (lang.startsWith("mr")) return { language: "mr", model: "nova-2" };
-    return { language: locale, model: "nova-2" };
+    if (lang.startsWith("hi") || lang.startsWith("en"))
+      return { language: "multi", model: "nova-3" };
+    if (lang.startsWith("gu")) return { language: "gu", model: "nova-3" };
+    if (lang.startsWith("ta")) return { language: "ta", model: "nova-3" };
+    if (lang.startsWith("te")) return { language: "te", model: "nova-3" };
+    if (lang.startsWith("mr")) return { language: "mr", model: "nova-3" };
+    return { language: lang.split("-")[0], model: "nova-3" };
   }
 
   async transcribeBuffer(buffer: Buffer, mime = "audio/wav", language = "en-IN") {

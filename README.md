@@ -65,7 +65,7 @@ Outbound AI voice concierge for ultra-luxury real estate. The system places call
 | Database  | PostgreSQL via Neon (serverless)                 |
 | ORM       | Drizzle ORM                                      |
 | Queue     | BullMQ on Redis (Upstash)                        |
-| STT       | Deepgram Nova-2 (WebSocket live streaming)       |
+| STT       | Deepgram Nova-3 (WebSocket live streaming)       |
 | LLM       | OpenRouter → Claude Haiku 4-5 (streaming SSE)    |
 | TTS       | ElevenLabs Turbo v2.5 (HTTP stream or WebSocket) |
 | Telephony | Exotel Voicebot WebSocket                        |
@@ -187,7 +187,9 @@ Exotel requires frames to be a **multiple of 320 bytes** (20 ms per frame at 8 k
 
 ## STT — Deepgram Live
 
-`DeepgramLiveService` opens a persistent WebSocket to Deepgram Nova-2 per call.
+`DeepgramLiveService` opens a persistent WebSocket to Deepgram **Nova-3** per call.
+
+**Language routing** (`dgLanguage`): Hindi and English callers code-switch (Hinglish), so both use Nova-3's `language=multi` code-switching model — mixed Hindi+English is transcribed in one stream. Gujarati, Tamil, Telugu, and Marathi are standalone Nova-3 languages (not in the `multi` set) and use their own language code. Proper-noun boosting uses Nova-3 **Keyterm Prompting** (`keyterm`), which replaces Nova-2's `keyword:intensifier` mechanism (no intensifier suffix; multi-word phrases supported).
 
 | Parameter          | Value   | Purpose                                                                  |
 | ------------------ | ------- | ------------------------------------------------------------------------ |
@@ -339,6 +341,7 @@ Turn row convention: caller turns use `turnIndex * 2`, assistant turns use `turn
 | `LLM_PROVIDER_OVERRIDE`       | —                            | `openrouter` or `auto` (leave blank for auto)               |
 | `GUARDRAIL_SEMANTIC_ENABLED`  | `true`                       | Enable LLM semantic guardrail (set `false` for local demos) |
 | `STT_STREAMING_ENABLED`       | `false`                      | Use low-latency buffered STT in REST turn path              |
+| `STT_FLUX_LOCALES`            | —                            | Locales routed to Deepgram Flux (only `en`/`hi` eligible); others + fallback use Nova-3. Empty = all Nova-3 |
 | `TTS_WS_STREAMING_ENABLED`    | `false`                      | Use ElevenLabs WS streaming instead of HTTP per sentence    |
 | `OPENROUTER_TIMEOUT_MS`       | `4000`                       | Per-OpenRouter-request timeout (the active LLM cap)         |
 | `TTS_TIMEOUT_MS`              | `8000`                       | ElevenLabs request timeout                                  |

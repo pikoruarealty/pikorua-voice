@@ -58,6 +58,11 @@ export const envSchema = z
     LLM_PROVIDER_OVERRIDE: optionalLlmProvider,
     GUARDRAIL_SEMANTIC_ENABLED: booleanFlag.default(true),
     STT_STREAMING_ENABLED: booleanFlag.default(false),
+    // Comma-separated locales (e.g. "en-IN,hi-IN") routed to Deepgram Flux —
+    // built-in turn detection, lower turn latency — instead of Nova-3. Only en/hi
+    // are Flux-eligible; any other locale stays on Nova-3 regardless of this list.
+    // Empty/unset ⇒ every call uses Nova-3 (this is the Flux-experiment rollback).
+    STT_FLUX_LOCALES: optionalNonEmpty,
     TTS_WS_STREAMING_ENABLED: booleanFlag.default(false),
 
     // Voice-turn latency & robustness tuning

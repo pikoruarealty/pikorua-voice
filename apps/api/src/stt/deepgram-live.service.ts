@@ -1,6 +1,7 @@
 import { Injectable, Logger, ServiceUnavailableException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import WebSocket, { RawData } from "ws";
+import { PROPER_NOUN_KEYTERMS } from "./keyterms";
 
 export type LiveSessionCallbacks = {
   // Interim (non-final) transcript — fires while the caller is mid-sentence.
@@ -52,14 +53,22 @@ export class DeepgramLiveService {
 
   constructor(private readonly config: ConfigService) {}
 
+  // Maps our BCP-47 locale to the Deepgram Nova-3 `language` parameter.
+  // Hindi and English callers routinely code-switch (Hinglish), so both route to
+  // Nova-3's `multi` code-switching model, which transcribes mixed Hindi+English
+  // in a single stream. (Nova-2 was mono-lingual per request and mangled the
+  // embedded language.) Gujarati/Tamil/Telugu/Marathi are supported by Nova-3 as
+  // standalone languages but are NOT in the `multi` code-switch set, so they use
+  // their own code. NOTE (needs live validation): if Deepgram adds gu/ta/te/mr to
+  // `multi`, route them here too for regional code-switching (e.g. Gujarati-English).
   private dgLanguage(locale: string): string {
     const lang = locale.toLowerCase();
-    if (lang.startsWith("hi")) return "hi";
+    if (lang.startsWith("hi") || lang.startsWith("en")) return "multi";
     if (lang.startsWith("gu")) return "gu";
     if (lang.startsWith("ta")) return "ta";
     if (lang.startsWith("te")) return "te";
     if (lang.startsWith("mr")) return "mr";
-    return locale;
+    return lang.split("-")[0];
   }
 
   openSession(
@@ -74,7 +83,7 @@ export class DeepgramLiveService {
     }
 
     const params = new URLSearchParams({
-      model: "nova-2",
+      model: "nova-3",
       language: this.dgLanguage(locale),
       encoding: opts.encoding ?? "linear16",
       sample_rate: String(sampleRate),
@@ -92,33 +101,14 @@ export class DeepgramLiveService {
       utterance_end_ms: "1000",
       vad_events: "true",
     });
-    // Boost recognition of local project/area proper nouns and property terms
-    // that nova-2 otherwise mangles or drops entirely — most notably the
-    // "Ambli-Bopal Road" area and "bungalow". Format is term:intensifier
-    // (higher = stronger bias toward that spelling). Old aliases (Iskcon, Ambli)
-    // are kept so callers who still say them are recognised and mapped.
-    //
-    // Param choice is correct for the pinned model: `keywords` is the nova-2
-    // boosting mechanism; `keyterm` (Keyterm Prompting) is nova-3-only, so it is
-    // intentionally NOT used here.
-    //
-    // OPEN QUESTION (needs a live A/B, can't be settled from code): on a Hindi
-    // session nova-2 emits Devanagari (सिंधु, थलतेज), but these boosts are Latin.
-    // The English-word terms (bungalow/penthouse/duplex) and caller aliases
-    // (Iskcon/Ambli/Bopal) are correct as Latin in every mode; the area proper
-    // nouns may be no-ops in Hindi mode. To validate: run a batch of recorded
-    // Hindi calls with (a) Latin-only, (b) Latin + Devanagari area spellings,
-    // (c) Devanagari-only, and compare area-name WER. Only add Devanagari
-    // spellings once they are confirmed to match nova-2's exact output tokens —
-    // a near-miss spelling silently fails to bias and just adds request noise.
-    for (const kw of [
-      "Ambli:2", "Bopal:2", "Iskcon:2",
-      "bungalow:2", "bungalows:2", "penthouse:1", "duplex:1",
-      "Sindhu:2", "Bhavan:2", "Rajpath:2", "Rangoli:2",
-      "Thaltej:2", "Vastrapur:2", "Nehrunagar:2", "Vaishnodevi:2", "Gota:1",
-      "Shilaj:2", "Nandoli:2", "Bodakdev:1",
-    ]) {
-      params.append("keywords", kw);
+    // Boost recognition of local project/area proper nouns and property terms via
+    // Nova-3 Keyterm Prompting (`keyterm`), which supersedes Nova-2's
+    // `keyword:intensifier` mechanism. Keyterm works for both `multi` (code-switch)
+    // and standalone-language Nova-3 sessions; `keywords` is a Nova-2-only param
+    // and is silently ignored by Nova-3. The shared list is used by FluxLiveService
+    // too — see keyterms.ts for the Latin-vs-Devanagari rationale and open A/B.
+    for (const term of PROPER_NOUN_KEYTERMS) {
+      params.append("keyterm", term);
     }
     const url = `wss://api.deepgram.com/v1/listen?${params.toString()}`;
 

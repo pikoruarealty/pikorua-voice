@@ -584,9 +584,22 @@ export class ElevenlabsService {
   }
 
   // Fire-and-forget warm-up so the first filler/apology of a call is cached.
+  // Runs with a small concurrency cap: firing every clip at once at call start
+  // slammed ElevenLabs' per-key concurrency limit and drew 429s — and the live
+  // greeting's own TTS was competing for the same budget, so the opening line
+  // was delayed by retries. Warm-ups aren't latency-critical, so a cap of 2
+  // fills the cache without starving the greeting.
   prewarmClips(texts: string[], opts?: SynthesizeOptions) {
-    for (const text of texts) {
-      void this.getClip(text, opts).catch(() => undefined);
+    const CONCURRENCY = 2;
+    const queue = [...texts];
+    const pump = async (): Promise<void> => {
+      const text = queue.shift();
+      if (text === undefined) return;
+      await this.getClip(text, opts).catch(() => undefined);
+      return pump();
+    };
+    for (let i = 0; i < Math.min(CONCURRENCY, queue.length); i += 1) {
+      void pump();
     }
   }
 

@@ -253,6 +253,12 @@ export class CallRuntimeService implements OnApplicationShutdown {
   // to Redis so state survives restarts and is visible across instances.
   private readonly calls = new Map<string, CallState>();
 
+  // Calls whose `calls` row never existed (the stream started before the webhook
+  // inserted it, so the gateway fell back to the raw callSid as the key). Every
+  // turn insert for such a call fails the FK; once we see the first failure we
+  // record it here and stop trying, instead of erroring on every single turn.
+  private readonly unpersistableCalls = new Set<string>();
+
   // In-flight turns, drained on shutdown so SIGTERM doesn't cut a caller off
   // mid-reply.
   private activeTurns = 0;
@@ -1249,8 +1255,20 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
 
   // Off the hot path: the caller hears audio without waiting on Postgres.
   private persistTurns(callerTurn: NewCallTurn, assistantTurn: NewCallTurn) {
+    const callId = callerTurn.callId;
+    // Skip a call already known to have no `calls` row — its turns can never
+    // satisfy the FK, so retrying every turn just spams errors and burns queries.
+    if (callId && this.unpersistableCalls.has(callId)) return;
     void Promise.all([this.turnRepo.create(callerTurn), this.turnRepo.create(assistantTurn)]).catch(
       (err) => {
+        if (callId && this.isMissingCallRow(err)) {
+          this.unpersistableCalls.add(callId);
+          this.logger.warn(
+            `Turn persistence disabled for call=${callId} — no matching calls row (FK). ` +
+              "Turns for this call won't be saved (stream started before the webhook created it).",
+          );
+          return;
+        }
         this.logger.warn(
           "Failed to persist call turn",
           err instanceof Error ? err.stack : String(err),
@@ -1259,9 +1277,20 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
     );
   }
 
+  // A Postgres foreign-key violation (23503) on a turn insert means the parent
+  // `calls` row is missing — distinct from a transient DB error, which we still
+  // want to log every time so it isn't silently swallowed.
+  private isMissingCallRow(err: unknown): boolean {
+    const code = (err as { code?: string } | null)?.code;
+    if (code === "23503") return true;
+    const msg = err instanceof Error ? err.message : String(err);
+    return /foreign key constraint|violates foreign key/i.test(msg);
+  }
+
   private async completeCall(callId: string) {
     this.logger.log(`Call ${callId} ending — lead details collected`);
     this.calls.delete(callId);
+    this.unpersistableCalls.delete(callId);
     void this.deleteStateFromRedis(callId);
     try {
       await this.callRepo.update(callId, { status: "completed" });
@@ -2104,12 +2133,14 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
   // Called by webhook handler when a call reaches a terminal state.
   clearHistory(callId: string) {
     this.calls.delete(callId);
+    this.unpersistableCalls.delete(callId);
     void this.deleteStateFromRedis(callId);
   }
 
   private async failCall(callId: string, reason: string) {
     this.logger.error(`Call ${callId} failed: ${reason}`);
     this.calls.delete(callId);
+    this.unpersistableCalls.delete(callId);
     void this.deleteStateFromRedis(callId);
     try {
       await this.callRepo.update(callId, { status: "failed" });
@@ -2124,6 +2155,7 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
     for (const [callId, state] of this.calls.entries()) {
       if (state.lastActivityAt < cutoff) {
         this.calls.delete(callId);
+        this.unpersistableCalls.delete(callId);
         evicted += 1;
       }
     }

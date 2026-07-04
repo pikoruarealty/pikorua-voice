@@ -65,14 +65,18 @@ const SIDE_CONVERSATION_HANGUP_MS = 35_000;
 // isn't amplified into phantom speech and a hard limiter so boosted peaks don't
 // clip-distort. Kill-switch: STT_INBOUND_AGC=0 sends raw audio through unchanged.
 const INBOUND_AGC_ENABLED = process.env.STT_INBOUND_AGC !== "0";
-// Target RMS for boosted speech (~-19 dBFS at 16-bit full scale) — loud enough to
+// Target RMS for boosted speech (~-18 dBFS at 16-bit full scale) — loud enough to
 // engage the STT VAD reliably, with headroom before clipping.
-const INBOUND_AGC_TARGET_RMS = Number(process.env.STT_INBOUND_AGC_TARGET_RMS ?? 3500);
-// Cap on boost so a near-silent line isn't blown wide open.
-const INBOUND_AGC_MAX_GAIN = Number(process.env.STT_INBOUND_AGC_MAX_GAIN ?? 6);
-// Frames quieter than this RMS are treated as silence/hiss and held near 1× so
-// the AGC never manufactures "speech" out of background noise.
-const INBOUND_AGC_NOISE_GATE_RMS = Number(process.env.STT_INBOUND_AGC_NOISE_GATE_RMS ?? 180);
+const INBOUND_AGC_TARGET_RMS = Number(process.env.STT_INBOUND_AGC_TARGET_RMS ?? 4000);
+// Cap on boost. Aggressive because a very soft caller (RMS ~100) needs a large
+// multiple to become audible to STT; peaks are caught by the hard limiter. This
+// audio only ever feeds STT, never a human ear, so over-boost is harmless.
+const INBOUND_AGC_MAX_GAIN = Number(process.env.STT_INBOUND_AGC_MAX_GAIN ?? 14);
+// Frames quieter than this RMS are treated as pure silence/hiss and held near 1×.
+// Kept LOW so genuinely soft speech (RMS ~80–170 on a quiet handset) is still
+// boosted rather than mistaken for hiss — that misclassification was why soft
+// callers were being dropped. Idle-line hiss sits well below this.
+const INBOUND_AGC_NOISE_GATE_RMS = Number(process.env.STT_INBOUND_AGC_NOISE_GATE_RMS ?? 55);
 
 class InboundAgc {
   // Smoothed gain carried across frames so it adapts gradually (no pumping).
@@ -95,9 +99,11 @@ class InboundAgc {
         ? 1
         : Math.min(INBOUND_AGC_MAX_GAIN, Math.max(1, INBOUND_AGC_TARGET_RMS / rms));
 
-    // Fast attack (boost quickly when a quiet talker starts), slower release, so
-    // the level settles without audible pumping between frames.
-    const coeff = desired > this.gain ? 0.5 : 0.2;
+    // Near-instant attack so the very first frames of a soft caller's onset are
+    // already boosted — a slow ramp left the onset quiet and the STT VAD never
+    // triggered, dropping the whole utterance. Slower release avoids yanking the
+    // gain down between words. Pumping is irrelevant here (STT-only, not a human ear).
+    const coeff = desired > this.gain ? 0.9 : 0.15;
     this.gain += (desired - this.gain) * coeff;
 
     // Near unity — skip the per-sample rewrite entirely.

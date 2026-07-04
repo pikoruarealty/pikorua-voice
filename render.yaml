@@ -82,6 +82,15 @@ services:
         value: "false"
       - key: STT_STREAMING_ENABLED
         value: "false"
+      # Pipeline TTS: audio for sentence N+1 generates while N still plays, so
+      # multi-sentence replies finish faster. Roll back to "false" if a call
+      # regresses. (Latency tuning #3.)
+      - key: TTS_WS_STREAMING_ENABLED
+        value: "true"
+      # Sliding-window history cap. 12 (~6 turns) is ample for Maya's linear
+      # 9-step flow and trims LLM input tokens → faster time-to-first-token.
+      - key: LLM_HISTORY_MAX_MESSAGES
+        value: "12"
       # OPENROUTER_TIMEOUT_MS is the active per-request LLM cap (LLM_TIMEOUT_MS
       # was a no-op and has been removed). Keeps the previously-intended ~5s cap.
       - key: OPENROUTER_TIMEOUT_MS

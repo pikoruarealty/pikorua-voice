@@ -91,12 +91,16 @@ export class DeepgramLiveService {
       punctuate: "true",
       smart_format: "true",
       interim_results: "true",
-      // endpointing: ms of silence after speech before is_final fires
-      endpointing: "300",
+      // endpointing: ms of silence after speech before is_final fires. 250ms
+      // (was 300) shaves a little more dead air off the end of each turn; the
+      // runtime's fragment-hold (looksIncomplete) still catches a genuine
+      // mid-thought pause, so a slightly earlier finalize rarely clips a caller.
+      // Roll back to 300 if callers get cut off. (Latency tuning #5.)
+      endpointing: "250",
       // utterance_end_ms: hard fallback utterance boundary when no speech_final
       // fires. 1000ms responds noticeably faster than the old 1400ms while still
       // tolerating short thinking pauses (the runtime's fragment-hold catches
-      // genuine mid-thought cut-offs). speech_final (endpointing=300) remains the
+      // genuine mid-thought cut-offs). speech_final (endpointing=250) remains the
       // primary, faster trigger for most utterances.
       utterance_end_ms: "1000",
       vad_events: "true",

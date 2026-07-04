@@ -12,10 +12,13 @@ test("LlmService passes the system prompt to OpenRouter as a system-role message
   );
 
   assert.match(src, /systemPrompt/, "systemPrompt option must be present in LlmService.generate");
+  // Built in buildOrMessages(): a system-role message whose content is the
+  // systemPrompt — either a plain string, or a cached content-part (text: systemPrompt).
+  assert.match(src, /role:\s*"system"/, "system prompt must be sent as a system-role message");
   assert.match(
     src,
-    /role:\s*"system",\s*content:\s*opts[.?]*\.systemPrompt/,
-    "system prompt must be sent as a system-role message to OpenRouter",
+    /content:\s*systemPrompt|text:\s*systemPrompt/,
+    "the systemPrompt must be the system message content",
   );
 });
 
@@ -33,8 +36,25 @@ test("LlmService returns promptTokens and completionTokens from OpenRouter usage
     require("path").join(process.cwd(), "apps/api/src/llm/llm.service.ts"),
     "utf8",
   );
-  assert.match(src, /usage\?\.prompt_tokens/, "OpenRouter prompt_tokens consumed");
-  assert.match(src, /usage\?\.completion_tokens/, "OpenRouter completion_tokens consumed");
+  // Usage parsing is centralized in readUsage() and consumed by both request paths.
+  assert.match(src, /prompt_tokens\?:/, "OpenRouter prompt_tokens consumed");
+  assert.match(src, /completion_tokens\?:/, "OpenRouter completion_tokens consumed");
+  assert.match(src, /this\.readUsage\(/, "both request paths normalize usage via readUsage");
+});
+
+test("LlmService caches the system prompt with an Anthropic cache_control breakpoint", () => {
+  const src = require("fs").readFileSync(
+    require("path").join(process.cwd(), "apps/api/src/llm/llm.service.ts"),
+    "utf8",
+  );
+  // The static system prefix carries an ephemeral cache breakpoint (latency + cost win).
+  assert.match(src, /cache_control:\s*\{\s*type:\s*"ephemeral"\s*\}/, "system prompt is cached");
+  // Cache-control is Anthropic-specific — only attach it for Claude models.
+  assert.match(src, /anthropic\|claude/i, "caching gated to Claude models");
+  // Streaming path requests usage so cache hits are observable in logs.
+  assert.match(src, /stream_options:\s*\{\s*include_usage:\s*true\s*\}/, "usage requested on stream");
+  // Cache-read token count is surfaced (OpenAI-shaped or Anthropic-native).
+  assert.match(src, /cached_tokens|cache_read_input_tokens/, "cache-read tokens parsed");
 });
 
 test("CallRuntimeService stores state per callId and clears on completion", () => {

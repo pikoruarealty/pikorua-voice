@@ -28,6 +28,11 @@ const BREAKER_OPEN_MS = 30_000;
 
 type ProviderHealth = { consecutiveFailures: number; openUntil: number };
 
+// OpenRouter/OpenAI-compatible message shape. The system message may use the
+// content-parts form so we can attach an Anthropic `cache_control` breakpoint.
+type OrContentPart = { type: "text"; text: string; cache_control?: { type: "ephemeral" } };
+type OrMessage = { role: string; content: string | OrContentPart[] };
+
 @Injectable()
 export class LlmService {
   private readonly logger = new Logger("LlmService");
@@ -58,6 +63,61 @@ export class LlmService {
 
   private recordSuccess(provider: string) {
     this.health.set(provider, { consecutiveFailures: 0, openUntil: 0 });
+  }
+
+  // Build the OpenRouter messages array. Anthropic prompt caching: the system
+  // prompt (full Maya persona + inventory, ~3–4k tokens) is static for the whole
+  // call but was re-ingested on every turn. Marking it with an ephemeral cache
+  // breakpoint lets Anthropic (via OpenRouter) reuse the already-processed prefix
+  // on later turns within its 5-min TTL — cutting time-to-first-token and ~90% of
+  // the input-token cost. The breakpoint sits ONLY on the static system prefix;
+  // conversation history (which changes each turn) follows it and stays uncached.
+  // cache_control is Anthropic-specific, so it's attached only for Claude models;
+  // other models (e.g. the free fallback) get a plain string system message.
+  private buildOrMessages(
+    messages: LlmMessage[],
+    systemPrompt: string | undefined,
+    model: string,
+  ): OrMessage[] {
+    const out: OrMessage[] = [];
+    if (systemPrompt) {
+      const supportsCaching = /anthropic|claude/i.test(model);
+      out.push(
+        supportsCaching
+          ? {
+              role: "system",
+              content: [{ type: "text", text: systemPrompt, cache_control: { type: "ephemeral" } }],
+            }
+          : { role: "system", content: systemPrompt },
+      );
+    }
+    for (const m of messages) out.push({ role: m.role, content: m.content });
+    return out;
+  }
+
+  // Normalize the OpenRouter usage object, tolerating both the OpenAI-shaped
+  // fields (prompt_tokens, prompt_tokens_details.cached_tokens) and Anthropic's
+  // native cache_{read,creation}_input_tokens, so cache hits are visible whatever
+  // the upstream reports.
+  private readUsage(usage: Record<string, unknown> | null): {
+    promptTokens: number | null;
+    completionTokens: number | null;
+    cachedRead: number | null;
+    cacheWrite: number | null;
+  } {
+    const u = (usage ?? {}) as {
+      prompt_tokens?: number;
+      completion_tokens?: number;
+      prompt_tokens_details?: { cached_tokens?: number };
+      cache_read_input_tokens?: number;
+      cache_creation_input_tokens?: number;
+    };
+    return {
+      promptTokens: u.prompt_tokens ?? null,
+      completionTokens: u.completion_tokens ?? null,
+      cachedRead: u.prompt_tokens_details?.cached_tokens ?? u.cache_read_input_tokens ?? null,
+      cacheWrite: u.cache_creation_input_tokens ?? null,
+    };
   }
 
   async generate(messages: LlmMessage[], opts?: LlmOptions): Promise<LlmResult> {
@@ -141,9 +201,7 @@ export class LlmService {
     const model =
       modelOverride ?? String(this.config.get("OPENROUTER_MODEL") ?? "anthropic/claude-haiku-4-5");
     try {
-      const orMessages: Array<{ role: string; content: string }> = [];
-      if (opts.systemPrompt) orMessages.push({ role: "system", content: opts.systemPrompt });
-      for (const m of messages) orMessages.push({ role: m.role, content: m.content });
+      const orMessages = this.buildOrMessages(messages, opts.systemPrompt, model);
       const res = await axios.post(
         "https://openrouter.ai/api/v1/chat/completions",
         {
@@ -151,6 +209,9 @@ export class LlmService {
           max_tokens: maxTokens,
           messages: orMessages,
           stream: true,
+          // Emit a final usage event on the stream so we can see prompt/cache
+          // token counts (confirms the system-prompt cache is being hit).
+          stream_options: { include_usage: true },
           provider: { sort: "latency" },
         },
         {
@@ -161,6 +222,7 @@ export class LlmService {
         },
       );
       let text = "";
+      let usage: Record<string, unknown> | null = null;
       await this.consumeSse(res.data, (data) => {
         if (data === "[DONE]") return;
         try {
@@ -170,14 +232,18 @@ export class LlmService {
             text += delta;
             onDelta(delta);
           }
+          if (event.usage) usage = event.usage;
         } catch {
           // ignore non-JSON SSE payloads
         }
       });
       const ms = Date.now() - start;
-      this.logger.log(`LLM-stream(openrouter/${model}) ${ms}ms`);
+      const { promptTokens, completionTokens, cachedRead, cacheWrite } = this.readUsage(usage);
+      this.logger.log(
+        `LLM-stream(openrouter/${model}) ${ms}ms prompt=${promptTokens ?? "?"} cachedRead=${cachedRead ?? "?"} cacheWrite=${cacheWrite ?? "?"}`,
+      );
       this.recordSuccess(breakerKey);
-      return { text, llmMs: ms, model, promptTokens: null, completionTokens: null };
+      return { text, llmMs: ms, model, promptTokens, completionTokens };
     } catch (err) {
       this.recordFailure(breakerKey);
       this.logger.warn("OpenRouter stream failed", err instanceof Error ? err.stack : String(err));
@@ -222,13 +288,7 @@ export class LlmService {
       this.config.get("OPENROUTER_MODEL") ?? "anthropic/claude-haiku-4-5",
     );
     try {
-      const orMessages: Array<{ role: string; content: string }> = [];
-      if (opts?.systemPrompt) {
-        orMessages.push({ role: "system", content: opts.systemPrompt });
-      }
-      for (const m of messages) {
-        orMessages.push({ role: m.role, content: m.content });
-      }
+      const orMessages = this.buildOrMessages(messages, opts?.systemPrompt, openRouterModel);
       const res = await axios.post(
         "https://openrouter.ai/api/v1/chat/completions",
         {
@@ -249,10 +309,9 @@ export class LlmService {
       );
       const text: string = res.data?.choices?.[0]?.message?.content ?? "";
       const ms = Date.now() - start;
-      const promptTokens: number | null = res.data?.usage?.prompt_tokens ?? null;
-      const completionTokens: number | null = res.data?.usage?.completion_tokens ?? null;
+      const { promptTokens, completionTokens, cachedRead } = this.readUsage(res.data?.usage ?? null);
       this.logger.log(
-        `LLM(openrouter/${openRouterModel}) ${ms}ms prompt=${promptTokens ?? "?"} completion=${completionTokens ?? "?"}`,
+        `LLM(openrouter/${openRouterModel}) ${ms}ms prompt=${promptTokens ?? "?"} cachedRead=${cachedRead ?? "?"} completion=${completionTokens ?? "?"}`,
       );
       this.recordSuccess("openrouter");
       return { text, llmMs: ms, model: openRouterModel, promptTokens, completionTokens };

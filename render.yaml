@@ -80,8 +80,6 @@ services:
         value: openrouter
       - key: GUARDRAIL_SEMANTIC_ENABLED
         value: "false"
-      - key: STT_REALTIME_ENABLED
-        value: "false"
       - key: STT_STREAMING_ENABLED
         value: "false"
       # OPENROUTER_TIMEOUT_MS is the active per-request LLM cap (LLM_TIMEOUT_MS

@@ -200,6 +200,8 @@ After a short acknowledgment ("haan", "ok") `utterance_end_ms` is tightened to *
 
 The session reconnects up to 3 times with exponential backoff (300 → 600 → 1200 ms) on unexpected close. Audio buffers during reconnect (up to 200 chunks / ~20 s).
 
+**Inbound AGC** (telephony path only): on the Exotel gateway a soft-spoken caller arrives as low-amplitude PCM, which degrades Deepgram's VAD and ASR (missed/dropped words). `InboundAgc` lifts each inbound frame toward `STT_INBOUND_AGC_TARGET_RMS` **before** the audio reaches STT — boost-only, noise-gated (`STT_INBOUND_AGC_NOISE_GATE_RMS`), and peak-limited (`STT_INBOUND_AGC_PEAK_CEILING`) so the boosted signal can never clip. It is applied **only while Maya is not audible**, so her own echo on the caller's line is never amplified into a false barge-in. Disable with `STT_INBOUND_AGC=0`.
+
 ---
 
 ## LLM — OpenRouter
@@ -229,7 +231,7 @@ Two modes, controlled by `TTS_WS_STREAMING_ENABLED`:
 
 - Devanagari respellings for Indian proper nouns (`crore` → `करोड़`, `ISKCON` → `इस्कॉन`)
 - Romanized Hindi → Devanagari (`aapko` → `आपको`, `bilkul` → `बिल्कुल`)
-- BHK expansion: `4BHK` → `चार BHK` (Hindi) / `four BHK` (English)
+- BHK expansion: `4BHK` → `four BHK` (BHK count is always spoken in English number words, even in Hindi mode — a Hindi numeral against the English "BHK" sounds unnatural)
 - Number-to-words with Indian grouping (lakh/crore), skipping years/times/percentages
 - Hard-block: `"take care"` → `"Thank you."`
 
@@ -349,6 +351,11 @@ Turn row convention: caller turns use `turnIndex * 2`, assistant turns use `turn
 | `SILENCE_END_THRESHOLD`       | `3`                          | Consecutive silent/noise turns (45 s window) before hangup  |
 | `LLM_HISTORY_MAX_MESSAGES`    | `20`                         | Sliding-window history cap                                  |
 | `DEEPGRAM_API_KEY`            | required (prod)              |                                                             |
+| `STT_INBOUND_AGC`             | `1`                          | Inbound gain control on the Exotel path; `0` disables       |
+| `STT_INBOUND_AGC_TARGET_RMS`  | `4000`                       | Target RMS the AGC boosts soft callers toward               |
+| `STT_INBOUND_AGC_MAX_GAIN`    | `12`                         | Max boost factor (caps amplification of a near-silent line) |
+| `STT_INBOUND_AGC_PEAK_CEILING`| `29000`                      | Peak the boosted signal must never exceed (no-clip limit)   |
+| `STT_INBOUND_AGC_NOISE_GATE_RMS` | `55`                      | Frames quieter than this RMS are held near 1× (hiss gate)   |
 | `ELEVENLABS_API_KEY`          | required (prod)              |                                                             |
 | `ELEVENLABS_VOICE_ID`         | required (prod)              | Indian multilingual voice ID                                |
 | `ELEVENLABS_STABILITY`        | `0.55`                       | Voice stability (0–1)                                       |
@@ -491,7 +498,7 @@ When Exotel fires a `completed` webhook:
    - Positive: `interested`, `site visit`, `book`, `appointment`, `buy`, `purchase`, `schedule`, `when can`, `call me`, `contact me`
    - Negative: `not interested`, `don't call`, `do not call`, `stop`, `unsubscribe`, `no thanks`
 4. Score ≥ 75 → **HOT alert** written to `call_events`
-5. **CRM sync**: POST to `CRM_API_BASE_URL/leads` with idempotency key. Failures retried by `CrmRetryWorker` every 5 minutes (up to 5 attempts)
+5. **CRM sync**: POST a structured call-result payload to `CRM_API_BASE_URL/call-results`, signed with a `Bearer` token + `X-Signature` (HMAC-SHA256 over the raw body) + `X-Timestamp`, and deduped by an `Idempotency-Key`. Failures retried by `CrmRetryWorker` every 5 minutes (up to 5 attempts)
 
 ---
 

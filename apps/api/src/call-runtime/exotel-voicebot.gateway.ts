@@ -67,20 +67,30 @@ const SIDE_CONVERSATION_HANGUP_MS = 35_000;
 // never clips. (An earlier version hard-clamped overshoots to ±32767, which
 // flat-topped soft-caller peaks into square-wave distortion and GARBLED the STT —
 // "Four" heard as "Ford", Hindi turned to mush.) Kill-switch: STT_INBOUND_AGC=0.
+// Parse a positive-number env override, falling back to `fallback` for anything
+// missing, non-numeric, or ≤ 0. Without this, a typo'd value (e.g. MAX_GAIN=abc)
+// becomes NaN and poisons the gain math — every sample rounds to 0 and the caller
+// goes silent to STT. Coercing bad input to the safe default keeps a
+// misconfiguration from silently breaking the whole call.
+function agcNumber(raw: string | undefined, fallback: number): number {
+  if (raw === undefined) return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
 const INBOUND_AGC_ENABLED = process.env.STT_INBOUND_AGC !== "0";
 // Target RMS for boosted speech (~-18 dBFS at 16-bit full scale) — loud enough to
 // engage the STT VAD reliably, with headroom before the ceiling.
-const INBOUND_AGC_TARGET_RMS = Number(process.env.STT_INBOUND_AGC_TARGET_RMS ?? 4000);
+const INBOUND_AGC_TARGET_RMS = agcNumber(process.env.STT_INBOUND_AGC_TARGET_RMS, 4000);
 // Hard cap on boost, regardless of how quiet the frame is — stops a near-silent
 // line from being multiplied into amplified noise.
-const INBOUND_AGC_MAX_GAIN = Number(process.env.STT_INBOUND_AGC_MAX_GAIN ?? 12);
+const INBOUND_AGC_MAX_GAIN = agcNumber(process.env.STT_INBOUND_AGC_MAX_GAIN, 12);
 // Peak ceiling the boosted signal must never exceed (~-1 dBFS). The per-frame gain
 // is limited so peak × gain ≤ this, so the output physically cannot clip.
-const INBOUND_AGC_PEAK_CEILING = Number(process.env.STT_INBOUND_AGC_PEAK_CEILING ?? 29000);
+const INBOUND_AGC_PEAK_CEILING = agcNumber(process.env.STT_INBOUND_AGC_PEAK_CEILING, 29000);
 // Frames quieter than this RMS are treated as pure silence/hiss and held near 1×.
 // Kept LOW so genuinely soft speech (RMS ~80–170 on a quiet handset) is still
 // boosted rather than mistaken for hiss. Idle-line hiss sits well below this.
-const INBOUND_AGC_NOISE_GATE_RMS = Number(process.env.STT_INBOUND_AGC_NOISE_GATE_RMS ?? 55);
+const INBOUND_AGC_NOISE_GATE_RMS = agcNumber(process.env.STT_INBOUND_AGC_NOISE_GATE_RMS, 55);
 
 class InboundAgc {
   // Smoothed gain carried across frames so it adapts gradually (no pumping).

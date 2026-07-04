@@ -35,7 +35,7 @@ const MAX_RECONNECTS = 3;
 const RECONNECT_BACKOFF_MS = [300, 600, 1200];
 const MAX_BUFFERED_CHUNKS = 200; // ~20s of 100ms frames — drop oldest beyond this
 
-// Short ack words that don't need the full 1400ms silence window.
+// Short ack words that don't need the full 1000ms silence window.
 // After one of these fires as a complete utterance, tighten to 400ms so the
 // caller isn't forced to wait an extra second before the bot responds.
 const SHORT_ACK_PATTERN =

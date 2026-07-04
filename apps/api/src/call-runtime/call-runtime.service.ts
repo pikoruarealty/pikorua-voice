@@ -1278,11 +1278,29 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
   // A Postgres foreign-key violation (23503) on a turn insert means the parent
   // `calls` row is missing — distinct from a transient DB error, which we still
   // want to log every time so it isn't silently swallowed.
+  //
+  // Drizzle wraps the driver error in a DrizzleQueryError whose own message is
+  // just "Failed query: insert into ..." (no FK text) and whose `.code` is
+  // undefined — the real postgres.js error, carrying SQLSTATE 23503, is nested in
+  // `.cause`. Checking only the top-level error missed it entirely, so the
+  // unpersistableCalls guard never armed and every turn re-logged a full stack.
+  // Walk the cause chain (bounded) and match code OR text at any level.
   private isMissingCallRow(err: unknown): boolean {
-    const code = (err as { code?: string } | null)?.code;
-    if (code === "23503") return true;
-    const msg = err instanceof Error ? err.message : String(err);
-    return /foreign key constraint|violates foreign key/i.test(msg);
+    let cur: unknown = err;
+    for (let depth = 0; depth < 5 && cur != null; depth += 1) {
+      const e = cur as {
+        code?: unknown;
+        message?: unknown;
+        detail?: unknown;
+        constraint?: unknown;
+        cause?: unknown;
+      };
+      if (e.code === "23503") return true;
+      const text = `${e.message ?? ""} ${e.detail ?? ""} ${e.constraint ?? ""}`;
+      if (/foreign key constraint|violates foreign key|\b23503\b/i.test(text)) return true;
+      cur = e.cause;
+    }
+    return false;
   }
 
   private async completeCall(callId: string) {

@@ -16,6 +16,7 @@ import {
 import { CallRuntimeController } from "./call-runtime.controller";
 import { GuardrailService } from "../llm/guardrail.service";
 import { IvrService } from "../ivr/ivr.service";
+import { PostCallQueueService } from "../postcall/postcall.queue";
 
 @Module({
   providers: [
@@ -47,6 +48,10 @@ import { IvrService } from "../ivr/ivr.service";
       inject: ["DATABASE"],
     },
     IvrService,
+    // Own instance of the post-call producer so the Exotel gateway can guarantee
+    // every call it handles (inbound or outbound) reaches CRM post-processing,
+    // without importing WebhookModule (which would create a dependency cycle).
+    PostCallQueueService,
     CallRuntimeService,
   ],
   controllers: [CallRuntimeController],

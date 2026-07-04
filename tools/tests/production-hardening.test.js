@@ -110,7 +110,9 @@ test("post-call scoring prefers caller turns over assistant turns", async () => 
   let crmLog;
 
   const service = new PostCallProcessingService(
-    { upsert: async (lead) => (savedLead = lead) },
+    // leadRepo: findByCallId → undefined means "not yet scored", so the
+    // idempotency guard lets processing proceed and upsert records the score.
+    { findByCallId: async () => undefined, upsert: async (lead) => (savedLead = lead) },
     {
       createOrGetByIdempotencyKey: async (log) => {
         crmLog = log;
@@ -149,6 +151,60 @@ test("post-call scoring prefers caller turns over assistant turns", async () => 
   assert.deepEqual(savedLead.signals.matchedNeg, []);
   assert.equal(savedLead.signals.source, "heuristic");
   assert.match(crmLog.idempotencyKey, /^pikorua:create_lead:call-1$/);
+});
+
+test("post-call is idempotent: an already-scored call is skipped (no duplicate HOT alert / CRM sync)", async () => {
+  // Both the Exotel `completed` webhook AND the gateway drive post-call so every
+  // call reaches CRM. leadRepo.upsert and CRM sync are idempotent, but the
+  // HOT-alert insert is not — so a second run for an already-scored call MUST be
+  // a no-op. Guard: if findByCallId returns a score, processCall returns early.
+  const { PostCallProcessingService } = require("../../apps/worker/dist/postcall/postcall.service");
+
+  let upsertCalled = false;
+  let crmLogCalled = false;
+  let hotAlertCalled = false;
+
+  const service = new PostCallProcessingService(
+    // leadRepo: this call was ALREADY scored on a prior run.
+    {
+      findByCallId: async () => ({ id: "score-1", callId: "call-1", score: 90, label: "hot" }),
+      upsert: async () => {
+        upsertCalled = true;
+      },
+    },
+    {
+      createOrGetByIdempotencyKey: async () => {
+        crmLogCalled = true;
+        return { id: "crm-log-1", status: "pending", attempts: 0 };
+      },
+      updateStatus: async () => undefined,
+    },
+    // eventRepo: a second HOT alert here would be the duplicate we must avoid.
+    {
+      create: async () => {
+        hotAlertCalled = true;
+      },
+    },
+    { findById: async () => ({ id: "call-1", campaignId: null, locale: "en-IN" }) },
+    {
+      findByCallId: async () => {
+        throw new Error("turns must not be fetched once we know the call is already scored");
+      },
+    },
+    { findById: async () => null },
+    {
+      evaluate: async () => {
+        throw new Error("scorer must not run for an already-scored call");
+      },
+    },
+    { get: () => "" },
+  );
+
+  await service.processCall("call-1");
+
+  assert.equal(upsertCalled, false, "must not re-upsert the lead score");
+  assert.equal(crmLogCalled, false, "must not re-sync to CRM");
+  assert.equal(hotAlertCalled, false, "must not emit a duplicate HOT alert");
 });
 
 test("CRM retry worker uses retryable failed/pending logs and idempotency headers", () => {

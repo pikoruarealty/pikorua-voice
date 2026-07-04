@@ -6,7 +6,8 @@ import { type LiveSession } from "../stt/deepgram-live.service";
 import { DeepgramLiveService } from "../stt/deepgram-live.service";
 import { ElevenlabsService } from "../tts/elevenlabs.service";
 import { CallRuntimeService, isNoisyTranscript } from "./call-runtime.service";
-import { CallRepository } from "@pikorua/db";
+import { CallRepository, type NewCall } from "@pikorua/db";
+import { PostCallQueueService } from "../postcall/postcall.queue";
 
 // Exotel's Voicebot WebSocket carries raw 16-bit linear PCM, 8 kHz, mono,
 // little-endian (slin/s16le) in BOTH directions — confirmed against Exotel's
@@ -54,6 +55,13 @@ const BARGE_IN_MIN_CHARS = 3;
 // How long a caller may keep talking to a third party (side conversation, with
 // no real reply to Maya) before we gracefully bow out and hang up.
 const SIDE_CONVERSATION_HANGUP_MS = 35_000;
+
+// Delay before the gateway's post-call BACKSTOP fires for webhook-managed
+// (outbound) calls. Long enough that Exotel's `completed` webhook — which
+// enqueues immediately and wins via the shared jobId — normally beats it; the
+// backstop only runs if that webhook never arrives, so the call still reaches
+// the CRM. Post-call is idempotent, so an overlap is harmless.
+const POSTCALL_BACKSTOP_DELAY_MS = 120_000;
 
 // --- Inbound Automatic Gain Control (AGC) -----------------------------------
 // Exotel delivers the caller's 16-bit PCM at whatever level their handset/line
@@ -246,6 +254,17 @@ type SessionState = {
   // caller is speaking to a third party in clear sentences; after
   // SIDE_CONVERSATION_HANGUP_MS of it with no real reply, the call is ended.
   sideConversationSince: number;
+  // True once the session is bound to a real `calls` row — only then can turns
+  // persist and post-call processing run.
+  hasDbRow: boolean;
+  // True when THIS gateway created the row (an inbound / unmatched call with no
+  // pre-existing record). It then owns marking the call completed + driving
+  // post-call; a pre-existing row is instead managed by the status webhook.
+  gatewayCreatedRow: boolean;
+  // Guards finalizeCall so post-call is enqueued at most once per session.
+  finalized: boolean;
+  // Wall-clock start, for a best-effort durationSeconds on gateway-owned calls.
+  startedAtMs: number;
 };
 
 // Exotel Voicebot WebSocket gateway.
@@ -272,6 +291,7 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
     private readonly tts: ElevenlabsService,
     private readonly runtime: CallRuntimeService,
     @Inject(CallRepository) private readonly callRepo: CallRepository,
+    private readonly postcallQueue: PostCallQueueService,
   ) {}
 
   handleConnection(client: WebSocket, request?: IncomingMessage) {
@@ -303,6 +323,10 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
       inactivityStrikes: 0,
       lastNoiseAt: 0,
       sideConversationSince: 0,
+      hasDbRow: false,
+      gatewayCreatedRow: false,
+      finalized: false,
+      startedAtMs: Date.now(),
     };
     this.sessions.set(client, state);
     this.logger.log("Exotel voicebot connection opened");
@@ -324,11 +348,55 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
       state.stt?.close();
       state.pacer.clear();
       this.clearInactivityTimer(state);
+      // The socket closing is the definitive end of the call (normal hang-up,
+      // caller drop, or our own client.close() after end-call). Guarantee the
+      // call reaches post-call processing → CRM. Fire-and-forget; runs once.
+      void this.finalizeCall(state);
     }
     this.sessions.delete(client);
     this.logger.log(
       `Exotel voicebot disconnected${state?.callSid ? ` callSid=${state.callSid}` : ""}`,
     );
+  }
+
+  // Ensure a call the gateway handled reaches post-call processing (→ CRM). Both
+  // inbound and outbound calls flow through this gateway, so it's the one place
+  // that always knows a call happened. Runs at most once per session.
+  //   - gatewayCreatedRow (inbound, no webhook manages it): mark the row
+  //     completed and enqueue post-call immediately.
+  //   - pre-existing row (outbound, webhook-managed): enqueue a DELAYED backstop
+  //     so the `completed` webhook normally wins (shared jobId dedupes the two);
+  //     if the webhook never fires, the backstop still delivers the call to CRM.
+  //   - no DB row (couldn't create one): nothing to persist or process.
+  private async finalizeCall(state: SessionState): Promise<void> {
+    if (state.finalized || !state.hasDbRow || !state.callId) return;
+    state.finalized = true;
+    const callId = state.callId;
+
+    if (state.gatewayCreatedRow) {
+      try {
+        const durationSeconds = Math.max(0, Math.round((Date.now() - state.startedAtMs) / 1000));
+        await this.callRepo.update(callId, {
+          status: "completed",
+          endedAt: new Date(),
+          durationSeconds,
+        });
+      } catch (err) {
+        this.logger.warn(`Failed to mark gateway call completed callId=${callId}: ${String(err)}`);
+      }
+      try {
+        await this.postcallQueue.enqueue(callId);
+        this.logger.log(`Post-call enqueued (gateway-owned) callId=${callId}`);
+      } catch (err) {
+        this.logger.warn(`Failed to enqueue post-call callId=${callId}: ${String(err)}`);
+      }
+    } else {
+      try {
+        await this.postcallQueue.enqueue(callId, { delayMs: POSTCALL_BACKSTOP_DELAY_MS });
+      } catch (err) {
+        this.logger.warn(`Failed to enqueue post-call backstop callId=${callId}: ${String(err)}`);
+      }
+    }
   }
 
   private async handleEvent(client: WebSocket, state: SessionState, msg: Record<string, unknown>) {
@@ -353,12 +421,14 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
         // by Exotel's CallSid when no explicit mapping is provided.
         if (custom.callId) {
           state.callId = custom.callId;
+          state.hasDbRow = true; // outbound: worker created the row; webhook manages it
           if (custom.locale) state.locale = custom.locale;
         } else if (callSid) {
           try {
             const call = await this.callRepo.findByProviderCallSid(callSid);
             if (call) {
               state.callId = call.id;
+              state.hasDbRow = true;
               if (call.locale) state.locale = call.locale;
             }
           } catch (err) {
@@ -367,12 +437,47 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
         }
 
         if (!state.callId) {
-          // No DB record yet — use callSid as a stable key so the session
-          // still works; the webhook will create the real record shortly.
-          state.callId = callSid || `exotel-${Date.now()}`;
-          this.logger.warn(
-            `No callId resolved for callSid=${callSid} — using fallback key=${state.callId}`,
-          );
+          // No pre-existing calls row (an inbound call, or the applet didn't pass
+          // a callId). Create one now so (a) call_turns persist against a real FK
+          // and (b) post-call processing has a row to read — otherwise the call
+          // never reaches the CRM. This gateway then owns finalizing it.
+          if (callSid) {
+            const newCall: NewCall = {
+              providerCallSid: callSid,
+              direction: "inbound",
+              status: "in_progress",
+              answeredAt: new Date(),
+              locale: state.locale,
+            };
+            try {
+              const created = await this.callRepo.create(newCall);
+              state.callId = created.id;
+              state.hasDbRow = true;
+              state.gatewayCreatedRow = true;
+              this.logger.log(
+                `Created calls row id=${created.id} for unmatched callSid=${callSid}`,
+              );
+            } catch (err) {
+              // Most likely a unique-index race with the status webhook inserting
+              // the same providerCallSid — re-fetch and adopt that row.
+              const existing = await this.callRepo
+                .findByProviderCallSid(callSid)
+                .catch(() => undefined);
+              if (existing) {
+                state.callId = existing.id;
+                state.hasDbRow = true;
+                if (existing.locale) state.locale = existing.locale;
+              } else {
+                state.callId = callSid;
+                this.logger.warn(
+                  `Could not create/resolve calls row for callSid=${callSid}: ${String(err)} — turns won't persist`,
+                );
+              }
+            }
+          } else {
+            state.callId = `exotel-${Date.now()}`;
+            this.logger.warn(`No callSid on start — using ephemeral key=${state.callId}`);
+          }
         }
 
         this.logger.log(

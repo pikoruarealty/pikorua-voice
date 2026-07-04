@@ -20,7 +20,13 @@ export class PostCallQueueService implements OnModuleDestroy {
     }
   }
 
-  async enqueue(callId: string) {
+  // `delayMs` schedules the job for later — used by the gateway as a BACKSTOP for
+  // webhook-managed (outbound) calls: the `completed` webhook normally enqueues
+  // immediately and, via the shared jobId, wins; the delayed gateway add is
+  // dropped as a duplicate. Only if the webhook never arrives does the delayed
+  // job run, so every call still reaches the CRM. (Post-call is idempotent, so a
+  // rare double-run after the job was removed is harmless.)
+  async enqueue(callId: string, opts?: { delayMs?: number }) {
     if (!this.queue) throw new Error("Postcall queue not initialized");
     // Dedupe by callId: two near-simultaneous "completed" webhooks (e.g. retries
     // with slightly different event keys) must not spawn two post-call runs, which
@@ -29,7 +35,12 @@ export class PostCallQueueService implements OnModuleDestroy {
     await this.queue.add(
       "postcall",
       { callId },
-      { jobId: `postcall:${callId}`, removeOnComplete: true, removeOnFail: false },
+      {
+        jobId: `postcall:${callId}`,
+        removeOnComplete: true,
+        removeOnFail: false,
+        ...(opts?.delayMs && opts.delayMs > 0 ? { delay: opts.delayMs } : {}),
+      },
     );
   }
 

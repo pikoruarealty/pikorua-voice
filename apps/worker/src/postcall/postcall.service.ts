@@ -37,6 +37,18 @@ export class PostCallProcessingService {
       return;
     }
 
+    // Idempotency: this call may be enqueued more than once — the Exotel
+    // `completed` webhook AND the gateway both drive post-call so every call
+    // reaches the CRM even if one signal is missing. `leadRepo.upsert` and the
+    // CRM sync are already idempotent, but the HOT-alert insert (call_events)
+    // is not, so a second run would emit a duplicate alert. If this call was
+    // already scored, it's fully processed — stop here.
+    const existingScore = await this.leadRepo.findByCallId(callId).catch(() => undefined);
+    if (existingScore) {
+      this.logger.log(`Call ${callId} already scored — skipping duplicate post-call run`);
+      return;
+    }
+
     const turns = await this.turnRepo.findByCallId(callId);
     const callerTurns = turns.filter((t) => t.role === "caller");
     const transcriptSource = callerTurns.length > 0 ? callerTurns : turns;

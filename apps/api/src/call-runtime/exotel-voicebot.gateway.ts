@@ -5,7 +5,7 @@ import type { IncomingMessage } from "http";
 import { type LiveSession } from "../stt/deepgram-live.service";
 import { SttRouterService } from "../stt/stt-router.service";
 import { ElevenlabsService } from "../tts/elevenlabs.service";
-import { CallRuntimeService, isNoisyTranscript, endCallDisclaimer } from "./call-runtime.service";
+import { CallRuntimeService, isNoisyTranscript } from "./call-runtime.service";
 import { CallRepository } from "@pikorua/db";
 
 // Exotel's Voicebot WebSocket carries raw 16-bit linear PCM, 8 kHz, mono,
@@ -54,6 +54,65 @@ const BARGE_IN_MIN_CHARS = 3;
 // How long a caller may keep talking to a third party (side conversation, with
 // no real reply to Maya) before we gracefully bow out and hang up.
 const SIDE_CONVERSATION_HANGUP_MS = 35_000;
+
+// --- Inbound Automatic Gain Control (AGC) -----------------------------------
+// Exotel delivers the caller's 16-bit PCM at whatever level their handset/line
+// produces. A soft-spoken caller arrives as low-amplitude audio, and Deepgram's
+// turn-detection VAD + ASR both degrade on quiet input — Maya mishears or drops
+// words entirely. The AGC lifts each inbound frame toward a target RMS so quiet
+// callers reach a consistent level BEFORE the audio hits STT. Boost-only
+// (already-loud callers pass through near 1×), with a noise gate so line hiss
+// isn't amplified into phantom speech and a hard limiter so boosted peaks don't
+// clip-distort. Kill-switch: STT_INBOUND_AGC=0 sends raw audio through unchanged.
+const INBOUND_AGC_ENABLED = process.env.STT_INBOUND_AGC !== "0";
+// Target RMS for boosted speech (~-19 dBFS at 16-bit full scale) — loud enough to
+// engage the STT VAD reliably, with headroom before clipping.
+const INBOUND_AGC_TARGET_RMS = Number(process.env.STT_INBOUND_AGC_TARGET_RMS ?? 3500);
+// Cap on boost so a near-silent line isn't blown wide open.
+const INBOUND_AGC_MAX_GAIN = Number(process.env.STT_INBOUND_AGC_MAX_GAIN ?? 6);
+// Frames quieter than this RMS are treated as silence/hiss and held near 1× so
+// the AGC never manufactures "speech" out of background noise.
+const INBOUND_AGC_NOISE_GATE_RMS = Number(process.env.STT_INBOUND_AGC_NOISE_GATE_RMS ?? 180);
+
+class InboundAgc {
+  // Smoothed gain carried across frames so it adapts gradually (no pumping).
+  private gain = 1;
+
+  process(pcm: Buffer): Buffer {
+    const sampleCount = pcm.length >> 1; // whole 16-bit LE samples
+    if (sampleCount === 0) return pcm;
+
+    let sumSq = 0;
+    for (let i = 0; i < sampleCount; i++) {
+      const s = pcm.readInt16LE(i << 1);
+      sumSq += s * s;
+    }
+    const rms = Math.sqrt(sumSq / sampleCount);
+
+    // Below the noise floor, aim for unity so silence/hiss isn't amplified.
+    const desired =
+      rms < INBOUND_AGC_NOISE_GATE_RMS
+        ? 1
+        : Math.min(INBOUND_AGC_MAX_GAIN, Math.max(1, INBOUND_AGC_TARGET_RMS / rms));
+
+    // Fast attack (boost quickly when a quiet talker starts), slower release, so
+    // the level settles without audible pumping between frames.
+    const coeff = desired > this.gain ? 0.5 : 0.2;
+    this.gain += (desired - this.gain) * coeff;
+
+    // Near unity — skip the per-sample rewrite entirely.
+    if (this.gain <= 1.02) return pcm;
+
+    const out = Buffer.allocUnsafe(sampleCount << 1);
+    for (let i = 0; i < sampleCount; i++) {
+      let v = Math.round(pcm.readInt16LE(i << 1) * this.gain);
+      if (v > 32767) v = 32767;
+      else if (v < -32768) v = -32768;
+      out.writeInt16LE(v, i << 1);
+    }
+    return out;
+  }
+}
 
 class PcmReframer {
   private buf: Buffer = Buffer.alloc(0);
@@ -134,6 +193,8 @@ type SessionState = {
   locale: string;
   turnIndex: number;
   stt: LiveSession | null;
+  // Per-call inbound gain control — normalizes the caller's level before STT.
+  agc: InboundAgc;
   // Serialises turn processing so overlapping utterances stay in order.
   queue: Promise<void>;
   speaking: boolean;
@@ -200,6 +261,7 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
       locale: "hi-IN",
       turnIndex: 0,
       stt: null,
+      agc: new InboundAgc(),
       queue: Promise.resolve(),
       speaking: false,
       active: null,
@@ -298,7 +360,14 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
       case "media": {
         const payload = (msg.media as Record<string, unknown> | undefined)?.payload;
         if (typeof payload === "string" && state.stt) {
-          state.stt.sendAudio(Buffer.from(payload, "base64"));
+          const pcm = Buffer.from(payload, "base64");
+          // Only boost when Maya is NOT audible — during her playback the caller's
+          // line carries her own echo back (no echo cancellation), and amplifying
+          // that would risk transcribing echo into a false barge-in. When it's the
+          // caller's turn to speak, lift a soft-spoken caller toward a level STT
+          // can reliably hear.
+          const boost = INBOUND_AGC_ENABLED && !this.isMayaAudible(state);
+          state.stt.sendAudio(boost ? state.agc.process(pcm) : pcm);
         }
         break;
       }
@@ -521,10 +590,9 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
           this.logger.log(`Side conversation exceeded window callId=${state.callId} — hanging up`);
           state.closing = true;
           const isHindi = state.locale.startsWith("hi") || state.locale.startsWith("gu");
-          const goodbyeBase = isHindi
+          const goodbye = isHindi
             ? "कोई बात नहीं, लगता है आप अभी थोड़ा busy हैं। हमारे sales expert आपसे personally connect करेंगे। Thank you."
             : "No problem, it seems you're a little busy right now. Our sales expert will personally reach out to you. Thank you.";
-          const goodbye = `${goodbyeBase} ${endCallDisclaimer(state.locale)}`;
           await this.playDirectTts(state, goodbye);
           await this.waitForPacerDrain(state, 10_000);
           await new Promise<void>((r) => setTimeout(r, EXOTEL_HANGUP_GRACE_MS));
@@ -631,14 +699,13 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
     if (strikes >= INACTIVITY_MAX_STRIKES) {
       // Final strike (or a noisy/occupied line) — say goodbye and hang up. Include
       // the AI-disclosure line so this system-driven ending matches a normal sign-off.
-      const goodbyeBase = noisyWindow
+      const goodbye = noisyWindow
         ? isHindi
           ? "लगता है line पर कुछ disturbance है या आप अभी busy हैं। हमारे sales expert आपसे personally connect करेंगे। Thank you."
           : "It seems the line is disturbed or you're occupied right now. Our sales expert will personally reach out to you. Thank you."
         : isHindi
           ? "लगता है आप अभी available नहीं हैं। हमारे sales expert आपसे personally connect करेंगे। Thank you, namaste."
           : "It seems you are unavailable. Our sales expert will personally reach out to you. Thank you.";
-      const goodbye = `${goodbyeBase} ${endCallDisclaimer(state.locale)}`;
       state.queue = state.queue.then(async () => {
         // A real utterance arriving in the meantime resets inactivityStrikes to 0,
         // cancelling this hangup; continued noise leaves strikes at the max.

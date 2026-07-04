@@ -341,7 +341,6 @@ Turn row convention: caller turns use `turnIndex * 2`, assistant turns use `turn
 | `LLM_PROVIDER_OVERRIDE`       | —                            | `openrouter` or `auto` (leave blank for auto)               |
 | `GUARDRAIL_SEMANTIC_ENABLED`  | `true`                       | Enable LLM semantic guardrail (set `false` for local demos) |
 | `STT_STREAMING_ENABLED`       | `false`                      | Use low-latency buffered STT in REST turn path              |
-| `STT_FLUX_LOCALES`            | —                            | Locales routed to Deepgram Flux (only `en`/`hi` eligible); others + fallback use Nova-3. Empty = all Nova-3 |
 | `TTS_WS_STREAMING_ENABLED`    | `false`                      | Use ElevenLabs WS streaming instead of HTTP per sentence    |
 | `OPENROUTER_TIMEOUT_MS`       | `4000`                       | Per-OpenRouter-request timeout (the active LLM cap)         |
 | `TTS_TIMEOUT_MS`              | `8000`                       | ElevenLabs request timeout                                  |

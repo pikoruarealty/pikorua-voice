@@ -3,7 +3,7 @@ import { WebSocket, RawData } from "ws";
 import { Injectable, Inject, Logger } from "@nestjs/common";
 import type { IncomingMessage } from "http";
 import { type LiveSession } from "../stt/deepgram-live.service";
-import { SttRouterService } from "../stt/stt-router.service";
+import { DeepgramLiveService } from "../stt/deepgram-live.service";
 import { ElevenlabsService } from "../tts/elevenlabs.service";
 import { CallRuntimeService, isNoisyTranscript } from "./call-runtime.service";
 import { CallRepository } from "@pikorua/db";
@@ -59,23 +59,27 @@ const SIDE_CONVERSATION_HANGUP_MS = 35_000;
 // Exotel delivers the caller's 16-bit PCM at whatever level their handset/line
 // produces. A soft-spoken caller arrives as low-amplitude audio, and Deepgram's
 // turn-detection VAD + ASR both degrade on quiet input — Maya mishears or drops
-// words entirely. The AGC lifts each inbound frame toward a target RMS so quiet
-// callers reach a consistent level BEFORE the audio hits STT. Boost-only
-// (already-loud callers pass through near 1×), with a noise gate so line hiss
-// isn't amplified into phantom speech and a hard limiter so boosted peaks don't
-// clip-distort. Kill-switch: STT_INBOUND_AGC=0 sends raw audio through unchanged.
+// words. The AGC lifts each inbound frame toward a target RMS so quiet callers
+// reach a consistent level BEFORE the audio hits STT. Boost-only (already-loud
+// callers pass through near 1×), with a noise gate so line hiss isn't amplified
+// into phantom speech. CRITICAL: the gain is PEAK-LIMITED — it is capped per frame
+// so the loudest sample never crosses the ceiling, guaranteeing the boosted signal
+// never clips. (An earlier version hard-clamped overshoots to ±32767, which
+// flat-topped soft-caller peaks into square-wave distortion and GARBLED the STT —
+// "Four" heard as "Ford", Hindi turned to mush.) Kill-switch: STT_INBOUND_AGC=0.
 const INBOUND_AGC_ENABLED = process.env.STT_INBOUND_AGC !== "0";
 // Target RMS for boosted speech (~-18 dBFS at 16-bit full scale) — loud enough to
-// engage the STT VAD reliably, with headroom before clipping.
+// engage the STT VAD reliably, with headroom before the ceiling.
 const INBOUND_AGC_TARGET_RMS = Number(process.env.STT_INBOUND_AGC_TARGET_RMS ?? 4000);
-// Cap on boost. Aggressive because a very soft caller (RMS ~100) needs a large
-// multiple to become audible to STT; peaks are caught by the hard limiter. This
-// audio only ever feeds STT, never a human ear, so over-boost is harmless.
-const INBOUND_AGC_MAX_GAIN = Number(process.env.STT_INBOUND_AGC_MAX_GAIN ?? 14);
+// Hard cap on boost, regardless of how quiet the frame is — stops a near-silent
+// line from being multiplied into amplified noise.
+const INBOUND_AGC_MAX_GAIN = Number(process.env.STT_INBOUND_AGC_MAX_GAIN ?? 12);
+// Peak ceiling the boosted signal must never exceed (~-1 dBFS). The per-frame gain
+// is limited so peak × gain ≤ this, so the output physically cannot clip.
+const INBOUND_AGC_PEAK_CEILING = Number(process.env.STT_INBOUND_AGC_PEAK_CEILING ?? 29000);
 // Frames quieter than this RMS are treated as pure silence/hiss and held near 1×.
 // Kept LOW so genuinely soft speech (RMS ~80–170 on a quiet handset) is still
-// boosted rather than mistaken for hiss — that misclassification was why soft
-// callers were being dropped. Idle-line hiss sits well below this.
+// boosted rather than mistaken for hiss. Idle-line hiss sits well below this.
 const INBOUND_AGC_NOISE_GATE_RMS = Number(process.env.STT_INBOUND_AGC_NOISE_GATE_RMS ?? 55);
 
 class InboundAgc {
@@ -86,32 +90,42 @@ class InboundAgc {
     const sampleCount = pcm.length >> 1; // whole 16-bit LE samples
     if (sampleCount === 0) return pcm;
 
+    // One pass for both loudness (RMS) and the clip limit (peak).
     let sumSq = 0;
+    let peak = 1; // avoid divide-by-zero
     for (let i = 0; i < sampleCount; i++) {
       const s = pcm.readInt16LE(i << 1);
       sumSq += s * s;
+      const a = s < 0 ? -s : s;
+      if (a > peak) peak = a;
     }
     const rms = Math.sqrt(sumSq / sampleCount);
 
-    // Below the noise floor, aim for unity so silence/hiss isn't amplified.
+    // Gain that reaches the loudness target, but never enough to push this frame's
+    // peak past the ceiling (no clipping), and never above the hard cap. Below the
+    // noise floor, aim for unity so silence/hiss isn't amplified.
+    const gainNoClip = INBOUND_AGC_PEAK_CEILING / peak;
     const desired =
       rms < INBOUND_AGC_NOISE_GATE_RMS
         ? 1
-        : Math.min(INBOUND_AGC_MAX_GAIN, Math.max(1, INBOUND_AGC_TARGET_RMS / rms));
+        : Math.max(1, Math.min(INBOUND_AGC_MAX_GAIN, INBOUND_AGC_TARGET_RMS / rms, gainNoClip));
 
     // Near-instant attack so the very first frames of a soft caller's onset are
     // already boosted — a slow ramp left the onset quiet and the STT VAD never
     // triggered, dropping the whole utterance. Slower release avoids yanking the
-    // gain down between words. Pumping is irrelevant here (STT-only, not a human ear).
+    // gain down between words.
     const coeff = desired > this.gain ? 0.9 : 0.15;
     this.gain += (desired - this.gain) * coeff;
 
-    // Near unity — skip the per-sample rewrite entirely.
-    if (this.gain <= 1.02) return pcm;
+    // Even after smoothing, never let THIS frame clip: cap the applied gain to the
+    // frame's own no-clip limit.
+    const applied = Math.min(this.gain, gainNoClip);
+    if (applied <= 1.02) return pcm;
 
     const out = Buffer.allocUnsafe(sampleCount << 1);
     for (let i = 0; i < sampleCount; i++) {
-      let v = Math.round(pcm.readInt16LE(i << 1) * this.gain);
+      let v = Math.round(pcm.readInt16LE(i << 1) * applied);
+      // Final safety clamp — should never trigger given the peak limit above.
       if (v > 32767) v = 32767;
       else if (v < -32768) v = -32768;
       out.writeInt16LE(v, i << 1);
@@ -244,7 +258,7 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
   private readonly sessions = new Map<WebSocket, SessionState>();
 
   constructor(
-    private readonly sttRouter: SttRouterService,
+    private readonly deepgramLive: DeepgramLiveService,
     private readonly tts: ElevenlabsService,
     private readonly runtime: CallRuntimeService,
     @Inject(CallRepository) private readonly callRepo: CallRepository,
@@ -456,7 +470,7 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
     // It fires before any transcript and would barge-in on a single voiced frame
     // of echo/noise — exactly the self-interruption BARGE_IN_MIN_CHARS guards
     // against. Barge-in is driven by transcript partials (handlePartial) instead.
-    return this.sttRouter.openSession(
+    return this.deepgramLive.openSession(
       state.locale,
       EXOTEL_SAMPLE_RATE,
       {

@@ -20,7 +20,6 @@ import {
 import type { NewCallTurn } from "@pikorua/db";
 import { ConfigService } from "@nestjs/config";
 import { MetricsService } from "../metrics/metrics.service";
-import { resolveSttProvider, parseFluxLocales } from "../stt/stt-routing";
 import { REDIS_CLIENT } from "../redis/redis.module";
 
 // Per-call state: conversation history + resolved context for prompt building.
@@ -1524,7 +1523,7 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
         totalMs,
         ttfaMs: null,
         result: guardrailTriggered ? "guardrail" : "ok",
-        sttProvider: this.sttProviderLabel(state.locale),
+        sttProvider: "nova-3",
       });
 
       if (shouldEndCall) {
@@ -2031,7 +2030,7 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
         totalMs,
         ttfaMs,
         result: guardrailTriggered ? "guardrail" : "ok",
-        sttProvider: this.sttProviderLabel(state.locale),
+        sttProvider: "nova-3",
       });
 
       if (endCallDetected) {
@@ -2074,18 +2073,6 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
       waitForMore: false,
       canceled: true,
     };
-  }
-
-  // The STT provider actually serving this call's locale, for the Flux-vs-Nova-3
-  // latency A/B. Derived from the same pure routing function the SttRouterService
-  // uses, so the label matches the session that was opened. (On a rare Flux→Nova-3
-  // failover the label still reads "flux"; the router's failover counter captures
-  // those separately.)
-  private sttProviderLabel(locale: string): string {
-    return resolveSttProvider(
-      locale,
-      parseFluxLocales(String(this.config.get("STT_FLUX_LOCALES") ?? "")),
-    );
   }
 
   private recordTurnMetrics(t: {

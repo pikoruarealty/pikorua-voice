@@ -1,10 +1,9 @@
 // Local project/area proper nouns and property terms that Deepgram otherwise
 // mangles or drops — most notably the "Ambli-Bopal Road" area and "bungalow".
 //
-// Shared by DeepgramLiveService (Nova-3 Keyterm Prompting) and FluxLiveService
-// (multilingual biasing) so the two boost lists never drift. Nova-3 keyterm
-// takes terms verbatim — no `:intensifier` suffix (that was Nova-2's `keywords`)
-// — and supports multi-word phrases directly.
+// Used by DeepgramLiveService for Nova-3 Keyterm Prompting. Nova-3 keyterm takes
+// terms verbatim — no `:intensifier` suffix (that was Nova-2's `keywords`) — and
+// supports multi-word phrases directly.
 //
 // Terms are Latin-scripted. In `multi`/multilingual mode Hindi is emitted in
 // Devanagari, but English words / proper nouns spoken in English stay Latin, so

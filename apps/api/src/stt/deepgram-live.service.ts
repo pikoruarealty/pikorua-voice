@@ -105,8 +105,8 @@ export class DeepgramLiveService {
     // Nova-3 Keyterm Prompting (`keyterm`), which supersedes Nova-2's
     // `keyword:intensifier` mechanism. Keyterm works for both `multi` (code-switch)
     // and standalone-language Nova-3 sessions; `keywords` is a Nova-2-only param
-    // and is silently ignored by Nova-3. The shared list is used by FluxLiveService
-    // too — see keyterms.ts for the Latin-vs-Devanagari rationale and open A/B.
+    // and is silently ignored by Nova-3. See keyterms.ts for the Latin-vs-Devanagari
+    // rationale.
     for (const term of PROPER_NOUN_KEYTERMS) {
       params.append("keyterm", term);
     }

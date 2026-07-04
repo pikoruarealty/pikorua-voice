@@ -45,12 +45,6 @@ services:
       # ── STT · Deepgram ───────────────────────────────────────────────────
       - key: DEEPGRAM_API_KEY
         sync: false
-      # Locales routed to Deepgram Flux (built-in turn detection, lower latency)
-      # instead of Nova-3. Only en/hi are Flux-eligible; other locales always use
-      # Nova-3, which is also the automatic fallback. Empty ⇒ every call on Nova-3
-      # (instant rollback — override to "" in the dashboard for a staged rollout).
-      - key: STT_FLUX_LOCALES
-        value: "en-IN,hi-IN"
 
       # ── TTS · ElevenLabs ─────────────────────────────────────────────────
       - key: ELEVENLABS_API_KEY

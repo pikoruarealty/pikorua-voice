@@ -1,8 +1,8 @@
 /**
  * LIVE smoke test against the real Deepgram API — validates the exact request
  * configs this service now uses, with your DEEPGRAM_API_KEY. It confirms auth,
- * endpoints (v1 vs v2), model names, `language=multi`, `keyterm`, and Flux's
- * TurnInfo handshake actually work — the things a typecheck/offline test can't.
+ * the Nova-3 endpoint, model name, `language=multi`, and `keyterm` actually work
+ * — the things a typecheck/offline test can't.
  *
  * It sends a short synthetic tone (not speech), so it does NOT verify transcript
  * accuracy — it verifies the request is ACCEPTED and the stream behaves. Real
@@ -176,25 +176,6 @@ function testNova3Live(language) {
   });
 }
 
-function testFluxLive(model, languageHint) {
-  const params = new URLSearchParams({
-    model, encoding: "linear16", sample_rate: String(RATE), eot_threshold: "0.7", eot_timeout_ms: "5000",
-  });
-  if (languageHint) params.set("language_hint", languageHint);
-  if (model === "flux-general-multi") for (const t of KEYTERMS) params.append("keyterm", t);
-  return runWs({
-    label: `Flux live WS (model=${model}${languageHint ? ` hint=${languageHint}` : ""})`,
-    url: `wss://api.deepgram.com/v2/listen?${params}`,
-    closeMsg: { type: "CloseStream" },
-    classify: (m) => {
-      if (m.type === "Connected") return { event: "Connected" };
-      if (m.type === "TurnInfo") return { event: `TurnInfo:${m.event}`, transcript: m.transcript || null };
-      if (m.type === "Error" || m.error) return { error: JSON.stringify(m).slice(0, 160) };
-      return { event: m.type || "unknown" };
-    },
-  });
-}
-
 async function main() {
   loadEnv();
   if (!KEY()) throw new Error("DEEPGRAM_API_KEY is not set (env or .env).");
@@ -206,9 +187,6 @@ async function main() {
   results.push(await testNova3Rest("gu"));
   results.push(await testNova3Live("multi"));
   results.push(await testNova3Live("gu"));
-  // Flux (the experiment). multi = Hinglish; en = English-only model.
-  results.push(await testFluxLive("flux-general-multi", "hi"));
-  results.push(await testFluxLive("flux-general-en"));
 
   console.log("");
   let failed = 0;

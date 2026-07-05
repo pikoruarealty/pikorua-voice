@@ -1,4 +1,4 @@
-import { and, eq, lt, or } from "drizzle-orm";
+import { and, eq, lt, or, sql } from "drizzle-orm";
 import type { Database } from "../client";
 import { crmSyncLog } from "../schema";
 import type { CrmSyncLogEntry, NewCrmSyncLogEntry } from "../schema";
@@ -63,7 +63,16 @@ export class CrmSyncLogRepository {
     const [row] = await this.db
       .insert(crmSyncLog)
       .values(data)
-      .onConflictDoNothing({ target: crmSyncLog.idempotencyKey })
+      // The unique index is PARTIAL (WHERE idempotency_key IS NOT NULL — see
+      // migration 0003). Postgres will not accept a partial index as an ON CONFLICT
+      // arbiter unless the predicate is repeated here, so this `where` is required —
+      // without it every insert raises "no unique or exclusion constraint matching".
+      // (For onConflictDoNothing this `where` is the arbiter/index predicate, rendering
+      // `ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING`.)
+      .onConflictDoNothing({
+        target: crmSyncLog.idempotencyKey,
+        where: sql`${crmSyncLog.idempotencyKey} IS NOT NULL`,
+      })
       .returning();
     return row ?? (await this.findByIdempotencyKey(data.idempotencyKey))!;
   }

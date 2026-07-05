@@ -416,6 +416,23 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
 
         state.callSid = callSid || null;
 
+        // Caller/callee numbers for the (inbound) row we may create below. Outbound
+        // rows already carry these from the dial worker, but an inbound first-time
+        // caller has no crm_lead_id, and the CRM rejects a phone-less new lead (422).
+        // Capture whatever Exotel provides — natively on `start` or via applet
+        // custom_parameters. The raw `start` is logged once per call so we can confirm
+        // the exact field names this Exotel account sends and tighten this if needed.
+        this.logger.log(`Exotel start payload: ${JSON.stringify(start)}`);
+        const pickNumber = (...keys: string[]): string | null => {
+          for (const key of keys) {
+            const value = start[key] ?? (custom as Record<string, unknown>)[key];
+            if (typeof value === "string" && value.trim()) return value.trim();
+          }
+          return null;
+        };
+        const fromNumber = pickNumber("from", "From", "CallFrom", "caller", "caller_id");
+        const toNumber = pickNumber("to", "To", "CallTo", "called", "dialed_number");
+
         // Prefer callId passed explicitly via the applet's custom parameters so
         // we avoid an extra DB round-trip on every call. Fall back to a lookup
         // by Exotel's CallSid when no explicit mapping is provided.
@@ -448,6 +465,8 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
               status: "in_progress",
               answeredAt: new Date(),
               locale: state.locale,
+              fromNumber,
+              toNumber,
             };
             try {
               const created = await this.callRepo.create(newCall);

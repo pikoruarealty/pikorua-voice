@@ -325,6 +325,62 @@ function areaNumbersToEnglish(text: string): string {
   return out;
 }
 
+// English words for a possibly-decimal figure: "3" -> "three", "3.5" ->
+// "three point five". Used by the distance normalizer.
+function englishNumberPhrase(numStr: string): string {
+  if (numStr.includes(".")) {
+    const [intPart, fracPart] = numStr.split(".");
+    const whole = englishNumberWords(parseInt(intPart, 10));
+    const digits = fracPart
+      .split("")
+      .map((d) => englishNumberWords(parseInt(d, 10)))
+      .join(" ");
+    return `${whole} point ${digits}`;
+  }
+  return englishNumberWords(parseInt(numStr, 10));
+}
+
+// Distances always read in English, in BOTH modes — the Hindi engine mangles the
+// "km" token AND reads the number in Hindi. Spell the number in English words and
+// expand the unit: "3 km" -> "three kilometers", "1 km" -> "one kilometer",
+// "7-8 km" -> "seven to eight kilometers". Must run before the general number
+// pass. Handles a single figure (incl. one decimal) and a hyphenated range.
+const KM_UNIT_SRC = "(?:kms?|kilometers?|कि\\.?\\s*मी\\.?|किमी|किलोमीटर)";
+const KM_RANGE_RE = new RegExp(`\\b(\\d+)\\s*[-–—]\\s*(\\d+)\\s*${KM_UNIT_SRC}\\b`, "gi");
+const KM_SINGLE_RE = new RegExp(`\\b(\\d+(?:\\.\\d+)?)\\s*${KM_UNIT_SRC}\\b`, "gi");
+
+function distancesToEnglish(text: string): string {
+  let out = text.replace(
+    KM_RANGE_RE,
+    (_m, a, b) =>
+      `${englishNumberWords(parseInt(a, 10))} to ${englishNumberWords(parseInt(b, 10))} kilometers`,
+  );
+  out = out.replace(KM_SINGLE_RE, (_m, num) => {
+    const n = parseFloat(num);
+    const unit = n === 1 ? "kilometer" : "kilometers";
+    return `${englishNumberPhrase(num)} ${unit}`;
+  });
+  return out;
+}
+
+// Clock times spoken in English words so they read correctly in Hindi mode too
+// (the Hindi engine reads bare digits like "3:02 PM" in Hindi). "3:02 PM" ->
+// "three oh two PM", "11:30 AM" -> "eleven thirty AM", "3:00 PM" -> "three PM",
+// "4 PM" -> "four PM". Distinct from the scheduling "N बजे" form, which stays in
+// Hindi ("ग्यारह बजे") and is handled by the general pass.
+function clockToEnglishWords(hour: number, minute: number | null, ampm?: string): string {
+  const hourWord = englishNumberWords(hour);
+  let minutePart = "";
+  if (minute && minute > 0) {
+    minutePart =
+      minute < 10 ? ` oh ${englishNumberWords(minute)}` : ` ${englishNumberWords(minute)}`;
+  }
+  const suffix = ampm ? ` ${ampm.toUpperCase()}` : "";
+  return `${hourWord}${minutePart}${suffix}`;
+}
+const CLOCK_COLON_RE = /\b(\d{1,2}):(\d{2})(?:\s*(am|pm))?\b/gi;
+const CLOCK_AMPM_RE = /\b(\d{1,2})\s*(am|pm)\b/gi;
+
 // Normalize reply text for the voice engine. Locale-aware: Hindi/Gujarati
 // modes respell Indian words and large numbers in Devanagari and transliterate
 // leaked romanized Hindi; English modes only expand large numbers to words.
@@ -335,6 +391,10 @@ export function normalizeForTts(text: string, languageCode = "hi"): string {
   // Property sizes: number spoken in English in every mode. Runs first so the
   // unit respelling and general number pass below see English words, not digits.
   out = areaNumbersToEnglish(out);
+
+  // Distances: number + unit spoken in English in every mode ("3 km" -> "three
+  // kilometers"). Runs before the general pass so the figure isn't Hindi-worded.
+  out = distancesToEnglish(out);
 
   if (hindi) {
     for (const [pattern, replacement] of TTS_RESPELLINGS) {
@@ -364,6 +424,26 @@ export function normalizeForTts(text: string, languageCode = "hi"): string {
       Number.isInteger(whole) && whole < 100 ? englishNumberWords(whole) : String(whole);
     return half ? `${wordWhole} and a half BHK` : `${wordWhole} BHK`;
   });
+
+  // Clock times → English words in Hindi mode (English mode already reads the
+  // digits in English, so leave those as digits). The scheduling "N बजे" form is
+  // untouched here and stays Hindi ("ग्यारह बजे") via the general pass below.
+  if (hindi) {
+    out = out.replace(CLOCK_COLON_RE, (_m, h, m, ap) =>
+      clockToEnglishWords(parseInt(h, 10), parseInt(m, 10), ap),
+    );
+    out = out.replace(CLOCK_AMPM_RE, (_m, h, ap) =>
+      clockToEnglishWords(parseInt(h, 10), null, ap),
+    );
+  }
+
+  // "see you at 4" → "see you at four": the sign-off time is spoken as an English
+  // number in both modes (never the Hindi "चार"). Skips colon / AM-PM forms —
+  // those are handled by the clock rules above.
+  out = out.replace(
+    /\b(see you at)\s+(\d{1,2})(?!\s*(?::|am|pm))\b/gi,
+    (_m, phrase, num) => `${phrase} ${englishNumberWords(parseInt(num, 10))}`,
+  );
 
   // Convert numbers to words so the engine doesn't mispronounce them.
   // Exclusions (kept as digits — engine handles these natively or word-form is worse):

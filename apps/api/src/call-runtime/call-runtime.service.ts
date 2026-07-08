@@ -446,8 +446,20 @@ export class CallRuntimeService implements OnApplicationShutdown {
     };
   }
 
+  // Maya's opening line is formulaic (self-intro + the BHK question) and depends
+  // only on locale, so it's a fixed template rather than an LLM generation. This
+  // removes the ~1.8-2.6s LLM round-trip that used to precede her very first word.
+  // The wording is kept IDENTICAL to the intro example in the system prompt so
+  // that later turns — which read the greeting back from history — stay coherent.
+  private greetingText(locale: string): string {
+    if (this.isHinglishLocale(locale)) {
+      return "Hello, मैं Maya बोल रही हूँ पिकोरा Group से। आपकी enquiry मिली थी, तो आपको personally invite करना चाहती थी — एक exceptional ultra-luxury project की site visit के लिए। आप 4 BHK देख रहे हैं या 5 BHK.";
+    }
+    return "Hello, this is Maya calling from PIKORA Group. We received your enquiry and I wanted to personally reach out — I'd love to invite you for a site visit of an exceptional ultra-luxury project in Ahmedabad. Are you looking at a 4 BHK or a 5 BHK.";
+  }
+
   // Generates and streams Maya's opening greeting the moment a call connects.
-  // The LLM speaks first — no caller utterance needed. A synthetic "Begin the call."
+  // The opening is templated (see greetingText) — no LLM call. A synthetic "Begin the call."
   // user message is used as the LLM trigger (providers require history to start with
   // a user role) but is never spoken. Both the trigger and Maya's reply are committed
   // to history so subsequent turns know step 1 (intro) is already done.
@@ -475,9 +487,6 @@ export class CallRuntimeService implements OnApplicationShutdown {
     let ttsMsTotal = 0;
     let ttsQueue: Promise<void> = Promise.resolve();
     let ttfaMs: number | null = null;
-    let jsonMode: boolean | null = null;
-    let pendingText = "";
-    let endCallDetected = false;
 
     const streamSentence = async (text: string, idx: number) => {
       let first = true;
@@ -513,84 +522,27 @@ export class CallRuntimeService implements OnApplicationShutdown {
         .catch(() => {});
     };
 
-    const feedDelta = (delta: string) => {
-      pendingText += delta;
-      if (jsonMode === null) {
-        const head = pendingText.trimStart();
-        if (!head) return;
-        jsonMode = head.startsWith("{") || head.startsWith("`");
-      }
-      if (jsonMode) return;
-      if (hasEndCall(pendingText)) {
-        endCallDetected = true;
-        pendingText = stripEndCall(pendingText);
-      }
-      let match: RegExpExecArray | null;
-      while ((match = SENTENCE_BOUNDARY.exec(pendingText))) {
-        const end = match.index + match[1].length;
-        if (/<[^>]*$/.test(pendingText.slice(0, end))) break;
-        dispatchSentence(pendingText.slice(0, end));
-        pendingText = pendingText.slice(end).replace(/^\s+/, "");
-      }
-    };
-
     // Synthetic trigger — never spoken, just satisfies the provider requirement
-    // that a conversation history must begin with a user message.
+    // that a conversation history must begin with a user message. Kept in history
+    // so subsequent turns know step 1 (intro) is already done.
     const GREETING_TRIGGER: LlmMessage = { role: "user", content: "Begin the call." };
+
+    // The opening is a fixed template (no LLM call) — identical to the intro
+    // example in the system prompt, so downstream turns reading it back from
+    // history stay coherent.
+    const reply = this.greetingText(state.locale);
 
     this.activeTurns += 1;
     try {
-      let llmResolved: Awaited<ReturnType<typeof this.llm.generateStream>>;
-      try {
-        llmResolved = await this.llm.generateStream(
-          [GREETING_TRIGGER],
-          {
-            provider: state.provider,
-            systemPrompt: state.systemPrompt,
-            maxTokens: 1000,
-            signal: turnController.signal,
-          },
-          feedDelta,
-        );
-      } catch (err) {
-        if (sink.signal.aborted || turnController.signal.aborted) {
-          return { reply: dispatchedText, canceled: true, skipped: false };
-        }
-        this.logger.warn(
-          `Greeting LLM failed call=${callId}`,
-          err instanceof Error ? err.message : String(err),
-        );
-        return { reply: "", canceled: false, skipped: true };
+      // Split into sentences so the first clause reaches TTS immediately.
+      let rest = reply;
+      let m: RegExpExecArray | null;
+      while ((m = SENTENCE_BOUNDARY.exec(rest))) {
+        const end = m.index + m[1].length;
+        dispatchSentence(rest.slice(0, end));
+        rest = rest.slice(end).replace(/^\s+/, "");
       }
-
-      let reply: string;
-      if (jsonMode) {
-        const parsed = this.parseLlmReply(llmResolved.text, callId);
-        reply = parsed.reply;
-        endCallDetected = endCallDetected || parsed.endCall;
-        let rest = reply;
-        let m: RegExpExecArray | null;
-        while ((m = SENTENCE_BOUNDARY.exec(rest))) {
-          const end = m.index + m[1].length;
-          dispatchSentence(rest.slice(0, end));
-          rest = rest.slice(end).replace(/^\s+/, "");
-        }
-        if (rest.trim()) dispatchSentence(rest);
-      } else {
-        if (hasEndCall(pendingText)) {
-          endCallDetected = true;
-          pendingText = stripEndCall(pendingText);
-        }
-        if (pendingText.trim()) dispatchSentence(pendingText);
-        pendingText = "";
-        const parsed = this.parseLlmReply(llmResolved.text, callId);
-        reply = parsed.reply;
-        endCallDetected = endCallDetected || parsed.endCall;
-      }
-
-      if (!reply.trim()) {
-        return { reply: "", canceled: false, skipped: true };
-      }
+      if (rest.trim()) dispatchSentence(rest);
 
       // Commit trigger + greeting to history before TTS drains so a barge-in
       // that arrives during playback still sees a complete greeting in context.
@@ -604,7 +556,7 @@ export class CallRuntimeService implements OnApplicationShutdown {
       }
 
       this.logger.log(
-        `Greeting call=${callId} llm=${llmResolved.llmMs ?? 0}ms ttfa=${ttfaMs ?? "?"}ms tts=${ttsMsTotal}ms endCall=${endCallDetected}`,
+        `Greeting call=${callId} templated ttfa=${ttfaMs ?? "?"}ms tts=${ttsMsTotal}ms`,
       );
       return { reply: dispatchedText || reply, canceled: false, skipped: false };
     } finally {

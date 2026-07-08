@@ -39,13 +39,20 @@ function loadEnv() {
   }
 }
 
-// Shared proper-noun keyterms (mirror of apps/api/src/stt/keyterms.ts).
+// Shared proper-noun keyterms (mirror of apps/api/src/stt/keyterms.ts). Both
+// scripts on purpose: Latin biases English-spoken names, Devanagari biases the
+// same names spoken inside Hindi. Keep in sync with keyterms.ts.
 const KEYTERMS = [
+  // Latin
   "Ambli", "Bopal", "Ambli-Bopal Road", "Iskcon",
   "bungalow", "bungalows", "penthouse", "duplex",
   "Sindhu", "Bhavan", "Rajpath", "Rangoli",
   "Thaltej", "Vastrapur", "Nehrunagar", "Vaishnodevi", "Gota",
   "Shilaj", "Nandoli", "Bodakdev",
+  // Devanagari
+  "वैष्णोदेवी", "थलतेज", "वस्त्रापुर", "नेहरूनगर", "गोता",
+  "सिंधु भवन", "राजपथ", "रंगोली", "अंबली", "बोपल",
+  "बोडकदेव", "शिलज", "नंदोली", "बंगला",
 ];
 
 const RATE = 8000; // Exotel pcm_8000
@@ -157,7 +164,7 @@ function runWs({ label, url, closeMsg, classify }) {
 function testNova3Live(language) {
   const params = new URLSearchParams({
     model: "nova-3", language, encoding: "linear16", sample_rate: String(RATE), channels: "1",
-    punctuate: "true", smart_format: "true", interim_results: "true", endpointing: "300",
+    punctuate: "true", smart_format: "true", interim_results: "true", endpointing: "250",
     utterance_end_ms: "1000", vad_events: "true",
   });
   for (const t of KEYTERMS) params.append("keyterm", t);

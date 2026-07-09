@@ -88,19 +88,66 @@ export class PostCallProcessingService {
     for (const p of positive) if (lc.includes(p)) matchedPos.push(p);
     for (const n of negative) if (lc.includes(n)) matchedNeg.push(n);
 
+    // Broker / agent self-identification → not a genuine buyer. Mirrors the LLM
+    // scorer's hard "broker → 0" override so the rule STILL holds on the
+    // keyword-only fallback (when the LLM scorer is unavailable). Kept to
+    // unambiguous real-estate terms: bare "agent" is deliberately excluded
+    // (insurance / travel agents are not brokers) while "estate agent" and
+    // "property agent" are caught. Devanagari variants cover Hinglish transcripts.
+    const BROKER_TERMS = [
+      "broker",
+      "realtor",
+      "dalal",
+      "dalaal",
+      "estate agent",
+      "property dealer",
+      "property agent",
+      "real estate agent",
+      "channel partner",
+      "दलाल",
+      "ब्रोकर",
+    ];
+    const matchedBroker = BROKER_TERMS.filter((t) => lc.includes(t));
+    const isBrokerHeuristic = matchedBroker.length > 0;
+
     const timelineHeuristic: NewLeadScore["timeline"] =
       lc.includes("now") || lc.includes("today") || lc.includes("immediately")
         ? "immediate"
         : "unknown";
 
     const llmScore = await this.scorer.evaluate(transcript, String(call.locale ?? "en-IN"));
-    const score =
-      llmScore?.score ??
-      Math.max(0, Math.min(100, Math.round(50 + matchedPos.length * 12 - matchedNeg.length * 20)));
+
+    // Heuristic fallback score. A broker/agent self-ID forces 0 (matching the LLM
+    // override); otherwise base 50 nudged by positive/negative keyword hits.
+    const heuristicScore = isBrokerHeuristic
+      ? 0
+      : Math.max(0, Math.min(100, Math.round(50 + matchedPos.length * 12 - matchedNeg.length * 20)));
+    const score = llmScore?.score ?? heuristicScore;
     const label: NewLeadScore["label"] =
       llmScore?.label ?? (score >= 75 ? "hot" : score >= 45 ? "warm" : "cold");
-    const rationale = llmScore?.rationale ?? `pos=${matchedPos.length} neg=${matchedNeg.length}`;
+    const rationale =
+      llmScore?.rationale ??
+      (isBrokerHeuristic
+        ? `broker/agent self-identified (${matchedBroker.join(", ")})`
+        : `pos=${matchedPos.length} neg=${matchedNeg.length}`);
     const timeline: NewLeadScore["timeline"] = llmScore?.timeline ?? timelineHeuristic;
+
+    // A minimal breakdown for the broker fallback keeps the CRM "why" surface
+    // consistent with the LLM path — profession shows as broker even on fallback.
+    const heuristicBreakdown: LeadBreakdown | null = isBrokerHeuristic
+      ? {
+          professionCategory: "broker",
+          profession: matchedBroker[0] ?? null,
+          budget: null,
+          requirements: null,
+          location: null,
+          currentResidence: null,
+          siteVisit: { intent: false, when: null, gapDays: null },
+          sampleHouseInterest: null,
+        }
+      : null;
+    const breakdown: LeadBreakdown | null = llmScore?.breakdown ?? heuristicBreakdown;
+
     const signals = llmScore
       ? {
           source: "llm",
@@ -108,7 +155,7 @@ export class PostCallProcessingService {
           matchedNeg: llmScore.matchedNeg,
           breakdown: llmScore.breakdown,
         }
-      : { source: "heuristic", matchedPos, matchedNeg };
+      : { source: "heuristic", matchedPos, matchedNeg, matchedBroker, breakdown };
 
     // Upsert lead score
     try {
@@ -182,7 +229,7 @@ export class PostCallProcessingService {
         timeline,
         positive: signals.matchedPos ?? [],
         negative: signals.matchedNeg ?? [],
-        breakdown: llmScore?.breakdown ?? null,
+        breakdown,
         source: signals.source,
         scoredAt,
       },

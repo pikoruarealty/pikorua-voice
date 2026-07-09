@@ -271,6 +271,46 @@ test("post-call carries the LLM score breakdown into the lead score and CRM payl
   assert.deepEqual(crmLog.requestPayload.score.breakdown, breakdown);
 });
 
+test("post-call heuristic fallback forces score 0 when the caller self-IDs as a broker", async () => {
+  // The LLM scorer's "broker → 0" hard override must still hold on the keyword
+  // fallback (scorer unavailable), so a broker never slips through as a warm lead.
+  const { PostCallProcessingService } = require("../../apps/worker/dist/postcall/postcall.service");
+
+  let savedLead;
+  let crmLog;
+
+  const service = new PostCallProcessingService(
+    { findByCallId: async () => undefined, upsert: async (lead) => (savedLead = lead) },
+    {
+      createOrGetByIdempotencyKey: async (log) => {
+        crmLog = log;
+        return { id: "crm-log-1", status: "pending", attempts: 0 };
+      },
+      updateStatus: async () => undefined,
+    },
+    { create: async () => undefined },
+    { findById: async () => ({ id: "call-1", campaignId: null, crmLeadId: "lead-1", locale: "en-IN" }) },
+    // A broker would otherwise trip the positive keyword "site visit" → warm.
+    {
+      findByCallId: async () => [
+        { role: "caller", content: "I'm a property dealer, I can arrange a site visit for buyers." },
+      ],
+    },
+    { findById: async () => null },
+    { evaluate: async () => null }, // LLM scorer unavailable → heuristic path
+    { get: () => "" },
+  );
+
+  await service.processCall("call-1");
+
+  assert.equal(savedLead.score, 0, "broker self-ID must force score 0");
+  assert.equal(savedLead.label, "cold");
+  assert.equal(savedLead.signals.source, "heuristic");
+  assert.deepEqual(savedLead.signals.matchedBroker, ["property dealer"]);
+  // The minimal breakdown reaches the CRM so it shows profession = broker.
+  assert.equal(crmLog.requestPayload.score.breakdown.professionCategory, "broker");
+});
+
 test("CRM retry worker uses retryable failed/pending logs and idempotency headers", () => {
   assert.match(read("apps/worker/src/postcall/crm-retry.worker.ts"), /findRetryable\(25, 5\)/);
   // Idempotency now flows through the shared CRM client/signing helper: the retry

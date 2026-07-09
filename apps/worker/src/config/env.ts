@@ -30,8 +30,9 @@ export const workerEnvSchema = z
     PUBLIC_BASE_URL: z.string().url().default("http://localhost:4100"),
 
     // This worker's OWN public Render URL. When set, a self-ping to its /health
-    // every 10 min keeps the free-tier web service from idling out (see
-    // KeepAliveScheduler). Optional — unset disables the keep-alive.
+    // every 13 min keeps the free-tier web service from idling out (see
+    // KeepAliveScheduler). Base URL or a full ".../health" URL both work.
+    // Optional — unset disables the keep-alive.
     WORKER_PUBLIC_URL: z.preprocess(
       (value) => (value === "" ? undefined : value),
       z.string().url().optional(),

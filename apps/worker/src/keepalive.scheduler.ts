@@ -3,10 +3,10 @@ import { ConfigService } from "@nestjs/config";
 
 // Render's free web-service tier spins the worker down after ~15 min without
 // inbound HTTP traffic; the next dial then pays a ~30s cold start. Pinging our
-// own public /health every 10 min keeps inbound traffic flowing so the instance
+// own public /health every 13 min keeps inbound traffic flowing so the instance
 // never idles out. Set WORKER_PUBLIC_URL to this service's own Render URL to
 // enable it; leaving it unset (e.g. local dev) disables the self-ping cleanly.
-const KEEPALIVE_INTERVAL_MS = 10 * 60_000; // 10 min < Render's ~15 min idle window
+const KEEPALIVE_INTERVAL_MS = 13 * 60_000; // 13 min < Render's ~15 min idle window
 const PING_TIMEOUT_MS = 10_000;
 
 @Injectable()
@@ -17,7 +17,7 @@ export class KeepAliveScheduler implements OnModuleInit, OnModuleDestroy {
   constructor(private readonly config: ConfigService) {}
 
   onModuleInit() {
-    const base = String(this.config.get("WORKER_PUBLIC_URL") ?? "").replace(/\/+$/, "");
+    const base = String(this.config.get("WORKER_PUBLIC_URL") ?? "").trim().replace(/\/+$/, "");
     if (!base) {
       this.logger.warn("WORKER_PUBLIC_URL not set; keep-alive self-ping disabled");
       return;
@@ -27,7 +27,8 @@ export class KeepAliveScheduler implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    const url = `${base}/health`;
+    // Accept either the base URL or a full ".../health" URL — don't double it up.
+    const url = /\/health$/i.test(base) ? base : `${base}/health`;
     this.timer = setInterval(() => void this.ping(url), KEEPALIVE_INTERVAL_MS);
     // Don't let the keep-alive timer hold the event loop open on shutdown.
     this.timer.unref();

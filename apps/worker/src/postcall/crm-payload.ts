@@ -1,4 +1,5 @@
 import type { Call, CallTurn, Campaign } from "@pikorua/db";
+import type { LeadBreakdown } from "./lead-score.schema";
 
 /** Score fields as computed by post-call processing, shaped for the CRM payload. */
 export interface CrmScoreInput {
@@ -8,6 +9,9 @@ export interface CrmScoreInput {
   timeline: string;
   positive: string[];
   negative: string[];
+  // Per-criterion facts (profession, budget, location, site-visit gap, …) so the
+  // CRM can show WHY a lead scored as it did. Null when the LLM scorer didn't run.
+  breakdown: LeadBreakdown | null;
   source: string;
   scoredAt: string;
 }
@@ -99,6 +103,7 @@ export function buildCallResultPayload(params: BuildCallResultParams) {
         positive: score.positive,
         negative: score.negative,
       },
+      breakdown: score.breakdown,
       source: score.source,
       scoredAt: score.scoredAt,
     },

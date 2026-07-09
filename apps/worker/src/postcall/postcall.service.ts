@@ -11,6 +11,7 @@ import {
 } from "@pikorua/db";
 import type { NewCallEvent, NewCrmSyncLogEntry, NewLeadScore } from "@pikorua/db";
 import { LeadScoreLlmService } from "./lead-score-llm.service";
+import type { LeadBreakdown } from "./lead-score.schema";
 import { buildCallResultPayload, type CrmEventInput } from "./crm-payload";
 import { postCallResult } from "./crm-client";
 
@@ -101,7 +102,12 @@ export class PostCallProcessingService {
     const rationale = llmScore?.rationale ?? `pos=${matchedPos.length} neg=${matchedNeg.length}`;
     const timeline: NewLeadScore["timeline"] = llmScore?.timeline ?? timelineHeuristic;
     const signals = llmScore
-      ? { source: "llm", matchedPos: llmScore.matchedPos, matchedNeg: llmScore.matchedNeg }
+      ? {
+          source: "llm",
+          matchedPos: llmScore.matchedPos,
+          matchedNeg: llmScore.matchedNeg,
+          breakdown: llmScore.breakdown,
+        }
       : { source: "heuristic", matchedPos, matchedNeg };
 
     // Upsert lead score
@@ -176,6 +182,7 @@ export class PostCallProcessingService {
         timeline,
         positive: signals.matchedPos ?? [],
         negative: signals.matchedNeg ?? [],
+        breakdown: llmScore?.breakdown ?? null,
         source: signals.source,
         scoredAt,
       },

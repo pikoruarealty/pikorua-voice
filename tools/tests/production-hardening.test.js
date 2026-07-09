@@ -207,6 +207,70 @@ test("post-call is idempotent: an already-scored call is skipped (no duplicate H
   assert.equal(hotAlertCalled, false, "must not emit a duplicate HOT alert");
 });
 
+test("post-call carries the LLM score breakdown into the lead score and CRM payload", async () => {
+  // The per-criterion breakdown (profession, budget, location, site-visit gap …)
+  // is what the CRM shows to explain WHY a lead scored as it did. It must survive
+  // the trip from the scorer → lead_scores.signals → the /call-results payload.
+  const { PostCallProcessingService } = require("../../apps/worker/dist/postcall/postcall.service");
+
+  let savedLead;
+  let crmLog;
+
+  const breakdown = {
+    professionCategory: "end_user",
+    profession: "doctor",
+    budget: "5 crore",
+    requirements: "4 BHK",
+    location: "SBR",
+    currentResidence: "Bodakdev",
+    siteVisit: { intent: true, when: "this Sunday", gapDays: 3 },
+    sampleHouseInterest: true,
+  };
+
+  const service = new PostCallProcessingService(
+    { findByCallId: async () => undefined, upsert: async (lead) => (savedLead = lead) },
+    {
+      createOrGetByIdempotencyKey: async (log) => {
+        crmLog = log;
+        return { id: "crm-log-1", status: "pending", attempts: 0 };
+      },
+      updateStatus: async () => undefined,
+    },
+    { create: async () => undefined },
+    {
+      findById: async () => ({
+        id: "call-1",
+        campaignId: null,
+        crmLeadId: "lead-1",
+        locale: "en-IN",
+      }),
+    },
+    { findByCallId: async () => [{ role: "caller", content: "I'm a doctor, budget 5 crore." }] },
+    { findById: async () => null },
+    // LLM scorer returns a full result including the structured breakdown.
+    {
+      evaluate: async () => ({
+        score: 82,
+        label: "hot",
+        rationale: "Specific budget, clear config, near-term visit.",
+        timeline: "short_term",
+        matchedPos: ["5 crore", "this Sunday"],
+        matchedNeg: [],
+        breakdown,
+      }),
+    },
+    { get: () => "" },
+  );
+
+  await service.processCall("call-1");
+
+  // Stored on the lead score row for the agent UI / analytics.
+  assert.equal(savedLead.signals.source, "llm");
+  assert.deepEqual(savedLead.signals.breakdown, breakdown);
+  // And forwarded in the structured /call-results payload sent to the CRM.
+  assert.deepEqual(crmLog.requestPayload.score.breakdown, breakdown);
+});
+
 test("CRM retry worker uses retryable failed/pending logs and idempotency headers", () => {
   assert.match(read("apps/worker/src/postcall/crm-retry.worker.ts"), /findRetryable\(25, 5\)/);
   // Idempotency now flows through the shared CRM client/signing helper: the retry

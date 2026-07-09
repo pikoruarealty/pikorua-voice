@@ -128,6 +128,23 @@ test("distances speak the number + unit in English in both modes", () => {
   );
 });
 
+test("durations in minutes speak the number in English in both modes", () => {
+  const { normalizeForTts } = require("../../apps/api/dist/tts/elevenlabs.service");
+
+  // "30 minutes" reads "thirty minutes" — not the Hindi "तीस minutes".
+  assert.equal(
+    normalizeForTts("visit करीब 30 minutes की होती है।", "hi"),
+    "visit करीब thirty minutes की होती है।",
+  );
+  assert.equal(
+    normalizeForTts("the visit takes about 30 minutes.", "en"),
+    "the visit takes about thirty minutes.",
+  );
+  // Singular, and the Devanagari unit form both fold to English.
+  assert.equal(normalizeForTts("bas 1 minute।", "hi"), "bas one minute।");
+  assert.equal(normalizeForTts("करीब 30 मिनट।", "hi"), "करीब thirty minutes।");
+});
+
 test("clock times speak in English words in Hindi mode, digits in English mode", () => {
   const { normalizeForTts } = require("../../apps/api/dist/tts/elevenlabs.service");
 

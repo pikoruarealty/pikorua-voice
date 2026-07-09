@@ -363,6 +363,21 @@ function distancesToEnglish(text: string): string {
   return out;
 }
 
+// Durations in minutes read in English in both modes ("30 minutes" -> "thirty
+// minutes"), like distances — in Hindi mode the engine would otherwise read the
+// number in Hindi ("तीस minutes"), which sounds off against the English "minutes".
+// Trailing guard is "(?!\w)" not "\b": \b needs an ASCII word-boundary
+// transition, which "मिनट" followed by the Devanagari danda "।" never produces
+// (both are non-word chars to JS), so \b would drop "30 मिनट।".
+const MINUTES_RE = /\b(\d+)\s*(?:mins?|minutes?|मिनट)(?!\w)/gi;
+
+function durationsToEnglish(text: string): string {
+  return text.replace(MINUTES_RE, (_m, num) => {
+    const n = parseInt(num, 10);
+    return `${englishNumberWords(n)} ${n === 1 ? "minute" : "minutes"}`;
+  });
+}
+
 // Clock times spoken in English words so they read correctly in Hindi mode too
 // (the Hindi engine reads bare digits like "3:02 PM" in Hindi). "3:02 PM" ->
 // "three oh two PM", "11:30 AM" -> "eleven thirty AM", "3:00 PM" -> "three PM",
@@ -395,6 +410,9 @@ export function normalizeForTts(text: string, languageCode = "hi"): string {
   // Distances: number + unit spoken in English in every mode ("3 km" -> "three
   // kilometers"). Runs before the general pass so the figure isn't Hindi-worded.
   out = distancesToEnglish(out);
+
+  // Durations: "30 minutes" -> "thirty minutes" in every mode (same reasoning).
+  out = durationsToEnglish(out);
 
   if (hindi) {
     for (const [pattern, replacement] of TTS_RESPELLINGS) {

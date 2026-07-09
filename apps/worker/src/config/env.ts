@@ -29,6 +29,14 @@ export const workerEnvSchema = z
     EXOTEL_APP_ID: optionalNonEmpty,
     PUBLIC_BASE_URL: z.string().url().default("http://localhost:4100"),
 
+    // This worker's OWN public Render URL. When set, a self-ping to its /health
+    // every 10 min keeps the free-tier web service from idling out (see
+    // KeepAliveScheduler). Optional — unset disables the keep-alive.
+    WORKER_PUBLIC_URL: z.preprocess(
+      (value) => (value === "" ? undefined : value),
+      z.string().url().optional(),
+    ),
+
     // CRM integration (REST only — Step 9). The worker POSTs completed calls to
     // <CRM_API_BASE_URL>/call-results, authenticated with the shared Bearer token
     // and an HMAC-SHA256 signature over the raw body (the CRM's VOICE_API_BEARER_TOKEN

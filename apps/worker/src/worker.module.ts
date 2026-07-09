@@ -3,6 +3,7 @@ import { ConfigModule } from "@nestjs/config";
 import { resolve } from "path";
 import { validateWorkerEnv } from "./config/env";
 import { HealthController } from "./health.controller";
+import { KeepAliveScheduler } from "./keepalive.scheduler";
 import { DatabaseModule } from "./database/database.module";
 import { DialService } from "./dial/dial.service";
 import { DialRepairScheduler } from "./dial/dial-repair.scheduler";
@@ -71,6 +72,7 @@ import { CrmRetryScheduler } from "./postcall/crm-retry.scheduler";
     },
     DialService,
     DialRepairScheduler,
+    KeepAliveScheduler,
     LeadScoreLlmService,
     PostCallProcessingService,
     PostCallWorker,

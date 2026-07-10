@@ -29,10 +29,12 @@ export const workerEnvSchema = z
     EXOTEL_APP_ID: optionalNonEmpty,
     PUBLIC_BASE_URL: z.string().url().default("http://localhost:4100"),
 
-    // This worker's OWN public Render URL. When set, a self-ping to its /health
-    // every 13 min keeps the free-tier web service from idling out (see
-    // KeepAliveScheduler). Base URL or a full ".../health" URL both work.
-    // Optional — unset disables the keep-alive.
+    // Keep-alive self-ping (see KeepAliveScheduler). Manual on/off switch,
+    // defaults OFF. Set WORKER_KEEPALIVE_ENABLED=true + WORKER_PUBLIC_URL to this
+    // worker's own Render URL to stop the free-tier instance idling out.
+    WORKER_KEEPALIVE_ENABLED: z
+      .preprocess((v) => (v === "" ? undefined : v), z.enum(["true", "false"]))
+      .default("false"),
     WORKER_PUBLIC_URL: z.preprocess(
       (value) => (value === "" ? undefined : value),
       z.string().url().optional(),

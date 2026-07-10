@@ -144,11 +144,13 @@ services:
       - key: PUBLIC_BASE_URL
         sync: false # same Render API URL — used for the StatusCallback
 
-      # Self-ping keep-alive: set to THIS worker service's own Render URL so the
-      # free-tier instance never idles out (see KeepAliveScheduler). Pings every
-      # 13 min. Base URL or a full ".../health" URL both work.
+      # Keep-alive self-ping (see KeepAliveScheduler). Manual on/off switch —
+      # flip to "true" to keep the free-tier worker awake (pings every 13 min),
+      # "false" to turn it off. Currently OFF.
+      - key: WORKER_KEEPALIVE_ENABLED
+        value: "false"
       - key: WORKER_PUBLIC_URL
-        sync: false # e.g. https://pikorua-voice-web-worker.onrender.com/health
+        sync: false # this worker's own URL, e.g. https://pikorua-voice-web-worker.onrender.com/health
 
       # ── CRM (post-call sync) ──────────────────────────────────────────────
       # Worker POSTs completed calls to <CRM_API_BASE_URL>/call-results, signed

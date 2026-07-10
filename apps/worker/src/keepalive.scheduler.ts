@@ -4,8 +4,12 @@ import { ConfigService } from "@nestjs/config";
 // Render's free web-service tier spins the worker down after ~15 min without
 // inbound HTTP traffic; the next dial then pays a ~30s cold start. Pinging our
 // own public /health every 13 min keeps inbound traffic flowing so the instance
-// never idles out. Set WORKER_PUBLIC_URL to this service's own Render URL to
-// enable it; leaving it unset (e.g. local dev) disables the self-ping cleanly.
+// never idles out.
+//
+// MANUAL ON/OFF: the self-ping is controlled by WORKER_KEEPALIVE_ENABLED and
+// defaults to OFF. Set WORKER_KEEPALIVE_ENABLED=true (and WORKER_PUBLIC_URL to
+// this service's own Render URL) to turn it on; set it back to false (or unset
+// WORKER_PUBLIC_URL) to turn it off. It re-reads the flag on each (re)deploy.
 const KEEPALIVE_INTERVAL_MS = 13 * 60_000; // 13 min < Render's ~15 min idle window
 const PING_TIMEOUT_MS = 10_000;
 
@@ -17,9 +21,17 @@ export class KeepAliveScheduler implements OnModuleInit, OnModuleDestroy {
   constructor(private readonly config: ConfigService) {}
 
   onModuleInit() {
+    const enabled =
+      String(this.config.get("WORKER_KEEPALIVE_ENABLED") ?? "false").trim().toLowerCase() ===
+      "true";
+    if (!enabled) {
+      this.logger.log("Keep-alive self-ping OFF (set WORKER_KEEPALIVE_ENABLED=true to enable)");
+      return;
+    }
+
     const base = String(this.config.get("WORKER_PUBLIC_URL") ?? "").trim().replace(/\/+$/, "");
     if (!base) {
-      this.logger.warn("WORKER_PUBLIC_URL not set; keep-alive self-ping disabled");
+      this.logger.warn("WORKER_KEEPALIVE_ENABLED=true but WORKER_PUBLIC_URL unset; self-ping disabled");
       return;
     }
     if (/localhost|127\.0\.0\.1/.test(base)) {
@@ -33,7 +45,7 @@ export class KeepAliveScheduler implements OnModuleInit, OnModuleDestroy {
     // Don't let the keep-alive timer hold the event loop open on shutdown.
     this.timer.unref();
     this.logger.log(
-      `Keep-alive self-ping enabled → ${url} every ${KEEPALIVE_INTERVAL_MS / 60_000} min`,
+      `Keep-alive self-ping ON → ${url} every ${KEEPALIVE_INTERVAL_MS / 60_000} min`,
     );
   }
 

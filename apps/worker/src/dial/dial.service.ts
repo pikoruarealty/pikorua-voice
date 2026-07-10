@@ -36,6 +36,10 @@ export class DialService implements OnModuleDestroy {
     this.workerRedis = new Redis(redisUrl, { maxRetriesPerRequest: null });
 
     this.queue = new Queue("dial", { connection: this.queueRedis });
+    // A Queue emits 'error' too; without a listener it would crash the process.
+    this.queue.on("error", (err: Error) => {
+      this.logger.warn(`dial queue error (non-fatal): ${String(err)}`);
+    });
 
     this.worker = new Worker<Record<string, unknown>>(
       "dial",
@@ -47,6 +51,12 @@ export class DialService implements OnModuleDestroy {
 
     this.worker.on("failed", (job: Job<Record<string, unknown>> | undefined, err: Error) => {
       this.logger.error(`Dial job ${job?.id} failed: ${String(err)}`);
+    });
+
+    // An unhandled 'error' event (e.g. BullMQ's stalled-job check erroring
+    // against Redis) would crash the process — log it and keep running.
+    this.worker.on("error", (err: Error) => {
+      this.logger.warn(`dial worker error (non-fatal): ${String(err)}`);
     });
 
     this.logger.log("Dial queue started and worker attached");

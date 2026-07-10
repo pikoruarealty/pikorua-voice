@@ -86,6 +86,12 @@ export class CrmRetryWorker implements OnModuleDestroy {
       this.logger.error(`crm-retry job ${job?.id} failed: ${String(err)}`);
     });
 
+    // An unhandled 'error' event (e.g. BullMQ's stalled-job check erroring
+    // against Redis) would crash the process — log it and keep running.
+    this.worker.on("error", (err: Error) => {
+      this.logger.warn(`crm-retry worker error (non-fatal): ${String(err)}`);
+    });
+
     this.logger.log("CrmRetryWorker started");
   }
 

@@ -20,6 +20,10 @@ export class CrmRetryScheduler implements OnModuleInit, OnModuleDestroy {
 
     this.redis = new Redis(redisUrl);
     this.queue = new Queue("crm-retry", { connection: this.redis });
+    // Without an 'error' listener a Queue error would crash the process.
+    this.queue.on("error", (err: Error) => {
+      this.logger.warn(`crm-retry queue error (non-fatal): ${String(err)}`);
+    });
 
     try {
       // Repeatable job that triggers the CrmRetryWorker every 5 minutes.

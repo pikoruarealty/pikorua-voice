@@ -45,6 +45,13 @@ export class PostCallWorker implements OnModuleDestroy {
       this.logger.error(`postcall job ${job?.id} failed: ${String(err)}`);
     });
 
+    // Without an 'error' listener, a BullMQ internal error (e.g. the periodic
+    // stalled-job check failing against Redis) is emitted on an EventEmitter with
+    // no handler — which crashes the whole process. Log it and stay alive.
+    this.worker.on("error", (err: Error) => {
+      this.logger.warn(`postcall worker error (non-fatal): ${String(err)}`);
+    });
+
     this.logger.log("PostCallWorker started");
   }
 

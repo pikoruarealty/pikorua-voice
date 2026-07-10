@@ -25,6 +25,10 @@ export class DialRepairScheduler implements OnModuleInit, OnModuleDestroy {
 
     this.redis = new Redis(redisUrl);
     this.queue = new Queue("dial", { connection: this.redis });
+    // Without an 'error' listener a Queue error would crash the process.
+    this.queue.on("error", (err: Error) => {
+      this.logger.warn(`dial-repair queue error (non-fatal): ${String(err)}`);
+    });
     this.timer = setInterval(() => void this.repair(), 60_000);
     this.timer.unref();
     await this.repair();

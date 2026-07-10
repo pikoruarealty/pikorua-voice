@@ -858,7 +858,7 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
           ? "लगता है line पर कुछ disturbance है या आप अभी busy हैं। हमारे sales expert आपसे personally connect करेंगे। Thank you."
           : "It seems the line is disturbed or you're occupied right now. Our sales expert will personally reach out to you. Thank you."
         : isHindi
-          ? "लगता है आप अभी available नहीं हैं। हमारे sales expert आपसे personally connect करेंगे। Thank you, namaste."
+          ? "लगता है आप अभी available नहीं हैं। हमारे sales expert आपसे personally connect करेंगे। Thank you."
           : "It seems you are unavailable. Our sales expert will personally reach out to you. Thank you.";
       state.queue = state.queue.then(async () => {
         // A real utterance arriving in the meantime resets inactivityStrikes to 0,

@@ -29,11 +29,13 @@ export class KeepAliveScheduler implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    const base = String(this.config.get("WORKER_PUBLIC_URL") ?? "").trim().replace(/\/+$/, "");
+    let base = String(this.config.get("WORKER_PUBLIC_URL") ?? "").trim().replace(/\/+$/, "");
     if (!base) {
       this.logger.warn("WORKER_KEEPALIVE_ENABLED=true but WORKER_PUBLIC_URL unset; self-ping disabled");
       return;
     }
+    // Tolerate a scheme-less value ("host/health") by defaulting to https.
+    if (!/^https?:\/\//i.test(base)) base = `https://${base}`;
     if (/localhost|127\.0\.0\.1/.test(base)) {
       this.logger.log("WORKER_PUBLIC_URL is local; keep-alive self-ping disabled");
       return;

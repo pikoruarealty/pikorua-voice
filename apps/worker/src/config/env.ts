@@ -31,14 +31,11 @@ export const workerEnvSchema = z
 
     // Keep-alive self-ping (see KeepAliveScheduler). Manual on/off switch,
     // defaults OFF. Set WORKER_KEEPALIVE_ENABLED=true + WORKER_PUBLIC_URL to this
-    // worker's own Render URL to stop the free-tier instance idling out.
-    WORKER_KEEPALIVE_ENABLED: z
-      .preprocess((v) => (v === "" ? undefined : v), z.enum(["true", "false"]))
-      .default("false"),
-    WORKER_PUBLIC_URL: z.preprocess(
-      (value) => (value === "" ? undefined : value),
-      z.string().url().optional(),
-    ),
+    // worker's own Render URL to stop the free-tier instance idling out. Kept as
+    // lenient optional strings (no enum / URL validation) so a stray value can
+    // never crash worker startup — the scheduler interprets them at runtime.
+    WORKER_KEEPALIVE_ENABLED: optionalNonEmpty,
+    WORKER_PUBLIC_URL: optionalNonEmpty,
 
     // CRM integration (REST only — Step 9). The worker POSTs completed calls to
     // <CRM_API_BASE_URL>/call-results, authenticated with the shared Bearer token

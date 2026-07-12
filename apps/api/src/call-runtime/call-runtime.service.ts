@@ -654,9 +654,13 @@ export class CallRuntimeService implements OnApplicationShutdown {
     return state;
   }
 
-  // Current wall-clock date & time in Ahmedabad (IST), captured at call start and
-  // baked into the system prompt so scheduling can reason about "now" — e.g. it must
-  // not offer an 11 AM slot when the call is already past noon.
+  // Current wall-clock date & time in Ahmedabad (IST). Re-read FRESH on every turn
+  // via withNowNote() (never captured once at call start), so scheduling reasons
+  // about the real "now" as a long call moves forward — e.g. it must not offer an
+  // 11 AM slot when the call is already past noon. IMPORTANT: this must stay in the
+  // per-turn user-message note and NEVER be moved into the (cached) system prompt —
+  // a value that changes each turn would invalidate the Anthropic prompt cache on
+  // every turn AND freeze the time at call start (the "offered today after 5 PM" bug).
   private nowInAhmedabad(): string {
     return new Date().toLocaleString("en-IN", {
       timeZone: "Asia/Kolkata",

@@ -1,6 +1,6 @@
 # Pikorua Voice
 
-Outbound AI voice concierge for ultra-luxury real estate. The system places calls via Exotel, runs a real-time STT → LLM → TTS pipeline, and books site-visit appointments — without a human agent in the loop.
+Inbound + outbound AI voice concierge for ultra-luxury real estate. The system **places and answers** calls via Exotel, runs a real-time STT → LLM → TTS pipeline, and books site-visit appointments — without a human agent in the loop. Every call, in either direction, is scored and pushed to the CRM.
 
 > **Standalone repository.** This service owns its PostgreSQL and Redis instances. All CRM communication is over REST — it never touches the CRM database directly.
 
@@ -171,9 +171,16 @@ pnpm db:studio        # open Drizzle Studio
           ├── dispatchSentence: hard guardrail check → TTS stream
           ├── PcmReframer: pad to 320-byte Exotel frame boundary
           └── semantic guardrail concurrent with TTS drain
-8. Exotel webhook → "completed" → PostCallWorker
-     └→ LLM lead scoring → CRM sync
+8. Call ends → PostCallWorker, enqueued by whichever fires first:
+     the Exotel "completed" webhook, OR the gateway on socket close
+     (for gateway-owned inbound calls); a shared jobId dedupes the two
+     └→ LLM lead scoring → CRM sync (idempotent)
 ```
+
+**Inbound calls** join this pipeline from step 3: Exotel opens `/exotel-stream`, the
+gateway creates a `calls` row on the fly (capturing the caller's number for the CRM),
+and on hang-up it finalizes the call and drives post-call itself. So every call —
+inbound or outbound — is scored and synced.
 
 ---
 
@@ -193,7 +200,7 @@ Exotel requires frames to be a **multiple of 320 bytes** (20 ms per frame at 8 k
 
 | Parameter          | Value   | Purpose                                                                  |
 | ------------------ | ------- | ------------------------------------------------------------------------ |
-| `endpointing`      | 300 ms  | VAD sensitivity (silence threshold) — set once on connect, never changed |
+| `endpointing`      | 250 ms  | VAD sensitivity (silence threshold) — set once on connect, never changed |
 | `utterance_end_ms` | 1000 ms | Hard utterance boundary; 400 ms after short acks                         |
 
 After a short acknowledgment ("haan", "ok") `utterance_end_ms` is tightened to **400 ms** via a Deepgram `Configure` message, making the bot respond faster. It restores to 1000 ms on the next full utterance.
@@ -214,6 +221,10 @@ The session reconnects up to 3 times with exponential backoff (300 → 600 → 1
 
 A per-turn watchdog (`TURN_TIMEOUT_MS`, default 12 s) aborts in-flight provider calls if the whole turn overruns.
 
+**Prompt caching**: the static system prompt (Maya persona + full inventory, ~15k tokens) is marked with an Anthropic `cache_control` ephemeral breakpoint (via OpenRouter, Claude models only), so Anthropic reuses the already-processed prefix on later turns within its ~5-min TTL — cutting time-to-first-token and ~90% of the input-token cost. The breakpoint sits **only** on the static prefix; conversation history follows it and stays uncached. The stream logs `cachedRead=…` so cache hits are visible in production.
+
+**Per-turn time note** (`withNowNote`): every turn's latest user message is prefixed with a fresh `[Now in Ahmedabad: <IST time>. SAME-DAY SLOTS: …]` note. The current time is re-read on **every** turn (never frozen at call start) and the offerable same-day visit slots are precomputed in code, so Maya schedules from the real current moment without doing clock arithmetic. Crucially the note lives in the **uncached suffix** — putting it in the system prompt would both freeze the time and invalidate the cache on every turn.
+
 **Speculative generation** (demo gateway only): the LLM is pre-warmed on a confident partial transcript (≥ 4 words) before VAD fires. If the final utterance matches, the pre-collected deltas are replayed — saving 200–400 ms of turn latency.
 
 ---
@@ -232,6 +243,9 @@ Two modes, controlled by `TTS_WS_STREAMING_ENABLED`:
 - Devanagari respellings for Indian proper nouns (`crore` → `करोड़`, `ISKCON` → `इस्कॉन`)
 - Romanized Hindi → Devanagari (`aapko` → `आपको`, `bilkul` → `बिल्कुल`)
 - BHK expansion: `4BHK` → `four BHK` (BHK count is always spoken in English number words, even in Hindi mode — a Hindi numeral against the English "BHK" sounds unnatural)
+- Distances & durations in English words in **both** modes (`3 km` → `three kilometers`, `30 minutes` → `thirty minutes`) — the Hindi engine otherwise mangles the unit
+- Property sizes with the figure in English words even in Hindi mode (`4,800 square feet` → `four thousand eight hundred square feet`; unit still respelled to Devanagari)
+- Clock times → English words in Hindi mode (`3:02 PM` → `three oh two PM`); the `see you at N` sign-off time is spoken as an English number in both modes
 - Number-to-words with Indian grouping (lakh/crore), skipping years/times/percentages
 - Hard-block: `"take care"` → `"Thank you."`
 
@@ -275,13 +289,15 @@ The property inventory (14 rows, 5 Ahmedabad micro-markets) is embedded in the s
 
 ## Barge-in
 
-Server-authoritative barge-in: when `onPartial` fires with ≥ 4 characters while the bot is speaking:
+Server-authoritative barge-in: when `onPartial` fires with ≥ `BARGE_IN_MIN_CHARS` (3) characters while the bot is speaking:
 
 1. `state.active.controller.abort()` — cancels in-flight LLM/TTS
 2. `send({ event: "clear" })` — tells Exotel to drop its audio queue
 3. `state.speaking = false` — resets the flag
 
-The `finally` block of every `runTurn`/`runStreamingTurn` path unconditionally resets `state.speaking = false`, so a failed or interrupted turn never leaves the flag permanently armed.
+The 3-char floor filters 1–2 char echo/noise blips (the caller's line carries Maya's own audio back, un-cancelled) while still catching short interjections (`हाँ`, `रुको`, `stop`, `नहीं`). A fully-formed utterance also triggers a commit-path barge-in even when no partial did, and `isMayaAudible` includes the paced-sender tail so a late interruption during audio playout is not missed.
+
+The `finally` block of every `runTurn`/`processUtteranceStream` path unconditionally resets `state.speaking = false`, so a failed or interrupted turn never leaves the flag permanently armed.
 
 ---
 
@@ -528,10 +544,10 @@ When Exotel reports DTMF digits **via the status webhook**, the digit is mapped 
 
 ## Deployment (Render)
 
-The project includes a `render.yaml` for one-click deployment:
+The project ships a `render.yaml` for one-click deployment. Both services build from **Docker images** (`env: docker`), not Buildpacks:
 
-- **API service**: `pnpm build && pnpm start:api`, port 4100
-- **Worker service**: `pnpm build && pnpm start:worker`
+- **API service** (`type: web`, port 4100): root `Dockerfile` → `node apps/api/dist/main.js`, health check `/api/health`.
+- **Worker service** (`type: web`): `apps/worker/Dockerfile` → `node apps/worker/dist/main.js`, health check `/health`. Deployed as a `web` service (not `worker`) because Render's free tier has no Background Worker plan — a bare `/health` endpoint satisfies the platform check. An optional 13-min self-ping keep-alive (`WORKER_KEEPALIVE_ENABLED`, off by default) prevents free-tier idle spin-down; switch to `type: worker` once on a paid plan.
 
 Both services read from the same Render environment group. Set `PUBLIC_BASE_URL` to the deployed API service URL so Exotel can reach the webhook endpoint at `PUBLIC_BASE_URL/api/webhooks/exotel`.
 

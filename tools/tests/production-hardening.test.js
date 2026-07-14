@@ -136,6 +136,8 @@ test("post-call scoring prefers caller turns over assistant turns", async () => 
       ],
     },
     { findById: async () => null }, // campaignRepo (best-effort campaign name for CRM payload)
+    { findById: async () => undefined }, // targetRepo (appointment link lookup)
+    { findActiveNear: async () => undefined, create: async () => ({ id: "appt-1" }) }, // appointmentRepo
     { evaluate: async () => null },
     { get: () => "" },
   );
@@ -192,6 +194,8 @@ test("post-call is idempotent: an already-scored call is skipped (no duplicate H
       },
     },
     { findById: async () => null },
+    { findById: async () => undefined }, // targetRepo
+    { findActiveNear: async () => undefined, create: async () => ({ id: "appt-1" }) }, // appointmentRepo
     {
       evaluate: async () => {
         throw new Error("scorer must not run for an already-scored call");
@@ -247,6 +251,8 @@ test("post-call carries the LLM score breakdown into the lead score and CRM payl
     },
     { findByCallId: async () => [{ role: "caller", content: "I'm a doctor, budget 5 crore." }] },
     { findById: async () => null },
+    { findById: async () => undefined }, // targetRepo
+    { findActiveNear: async () => undefined, create: async () => ({ id: "appt-1" }) }, // appointmentRepo
     // LLM scorer returns a full result including the structured breakdown.
     {
       evaluate: async () => ({
@@ -297,6 +303,8 @@ test("post-call heuristic fallback forces score 0 when the caller self-IDs as a 
       ],
     },
     { findById: async () => null },
+    { findById: async () => undefined }, // targetRepo
+    { findActiveNear: async () => undefined, create: async () => ({ id: "appt-1" }) }, // appointmentRepo
     { evaluate: async () => null }, // LLM scorer unavailable → heuristic path
     { get: () => "" },
   );

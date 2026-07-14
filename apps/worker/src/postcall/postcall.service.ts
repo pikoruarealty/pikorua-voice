@@ -8,12 +8,15 @@ import {
   CallRepository,
   CallTurnRepository,
   CampaignRepository,
+  CampaignTargetRepository,
+  AppointmentRepository,
 } from "@pikorua/db";
-import type { NewCallEvent, NewCrmSyncLogEntry, NewLeadScore } from "@pikorua/db";
+import type { Call, Campaign, NewCallEvent, NewCrmSyncLogEntry, NewLeadScore } from "@pikorua/db";
 import { LeadScoreLlmService } from "./lead-score-llm.service";
 import type { LeadBreakdown } from "./lead-score.schema";
 import { buildCallResultPayload, type CrmEventInput } from "./crm-payload";
 import { postCallResult } from "./crm-client";
+import { resolveVisitDate, formatIstWhen } from "../appointments/visit-date";
 
 @Injectable()
 export class PostCallProcessingService {
@@ -26,6 +29,8 @@ export class PostCallProcessingService {
     @Inject(CallRepository) private readonly callRepo: CallRepository,
     @Inject(CallTurnRepository) private readonly turnRepo: CallTurnRepository,
     @Inject(CampaignRepository) private readonly campaignRepo: CampaignRepository,
+    @Inject(CampaignTargetRepository) private readonly targetRepo: CampaignTargetRepository,
+    @Inject(AppointmentRepository) private readonly appointmentRepo: AppointmentRepository,
     private readonly scorer: LeadScoreLlmService,
     private readonly config: ConfigService,
   ) {}
@@ -144,6 +149,7 @@ export class PostCallProcessingService {
           currentResidence: null,
           siteVisit: { intent: false, when: null, gapDays: null },
           sampleHouseInterest: null,
+          objections: [],
         }
       : null;
     const breakdown: LeadBreakdown | null = llmScore?.breakdown ?? heuristicBreakdown;
@@ -218,6 +224,13 @@ export class PostCallProcessingService {
       ? await this.campaignRepo.findById(call.campaignId).catch(() => null)
       : null;
 
+    // Appointments (#2/#4): update the linked appointment for reconfirm/feedback
+    // calls, or auto-create a provisional one from a qualifying concierge call.
+    // Best-effort — never blocks scoring or the CRM sync.
+    await this.syncAppointment(call, campaign, breakdown).catch((err) =>
+      this.logger.warn("Appointment sync failed", err instanceof Error ? err.stack : String(err)),
+    );
+
     const crmPayload = buildCallResultPayload({
       call,
       turns,
@@ -280,6 +293,96 @@ export class PostCallProcessingService {
         error: String(err),
       });
     }
+  }
+
+  // Auto-provisional window: an active visit for the same phone within 12h of the
+  // resolved time is treated as the same booking (dedup for re-runs / repeat calls).
+  private static readonly APPOINTMENT_DEDUP_MS = 12 * 60 * 60 * 1000;
+
+  // The lead's own phone: on an outbound call it's the callee; on an inbound call
+  // it's the caller (our ExoPhone is the other side).
+  private leadPhone(call: Call): string | null {
+    const phone = call.direction === "inbound" ? call.fromNumber : call.toNumber;
+    return phone && phone.trim() ? phone.trim() : null;
+  }
+
+  private async appointmentIdForCall(call: Call): Promise<string | null> {
+    if (!call.targetId) return null;
+    const target = await this.targetRepo.findById(call.targetId).catch(() => undefined);
+    const md = (target?.metadata ?? {}) as Record<string, unknown>;
+    return typeof md.appointmentId === "string" ? md.appointmentId : null;
+  }
+
+  // Reconcile the appointment side effects of this call.
+  //   • reconfirm call → mark the linked appointment confirmed or cancelled
+  //   • feedback call  → mark it completed and record the objection summary
+  //   • default call   → auto-create a provisional appointment when a site visit
+  //                      was agreed with a resolvable date (the API path handles
+  //                      authoritative ones; an api/confirmed row is never touched)
+  private async syncAppointment(
+    call: Call,
+    campaign: Campaign | null | undefined,
+    breakdown: LeadBreakdown | null,
+  ): Promise<void> {
+    const scriptRef = campaign?.scriptRef ?? "default";
+
+    if (scriptRef === "reconfirm" || scriptRef === "feedback") {
+      const apptId = await this.appointmentIdForCall(call);
+      if (!apptId) return;
+      if (scriptRef === "reconfirm") {
+        const stillOn = breakdown?.siteVisit?.intent ?? true;
+        await this.appointmentRepo.update(apptId, {
+          status: stillOn ? "confirmed" : "cancelled",
+          confirmed: stillOn,
+          outcome: stillOn ? "Reconfirmed on reminder call" : "Declined on reminder call",
+        });
+      } else {
+        const objections = breakdown?.objections ?? [];
+        await this.appointmentRepo.update(apptId, {
+          status: "completed",
+          outcome: objections.length
+            ? `Feedback — objections: ${objections.map((o) => o.category).join(", ")}`
+            : "Feedback collected — no objection raised",
+        });
+      }
+      return;
+    }
+
+    // Default concierge call: provisional appointment from an agreed visit.
+    const sv = breakdown?.siteVisit;
+    if (!sv?.intent) return;
+    const phone = this.leadPhone(call);
+    if (!phone) return;
+    const scheduledAt = resolveVisitDate(new Date(), sv.gapDays ?? null);
+    if (!scheduledAt) return;
+
+    const existing = await this.appointmentRepo.findActiveNear(
+      phone,
+      scheduledAt,
+      PostCallProcessingService.APPOINTMENT_DEDUP_MS,
+    );
+    if (existing) return;
+
+    await this.appointmentRepo.create({
+      callId: call.id,
+      campaignId: call.campaignId ?? null,
+      crmLeadId: call.crmLeadId ?? null,
+      fullName: null,
+      phone,
+      locale: call.locale ?? null,
+      scheduledAt,
+      status: "scheduled",
+      source: "auto",
+      confirmed: false,
+      metadata: {
+        when: sv.when ?? null,
+        gapDays: sv.gapDays ?? null,
+        scheduledAtHuman: formatIstWhen(scheduledAt),
+      },
+    });
+    this.logger.log(
+      `Auto-created provisional appointment for call=${call.id} at ${scheduledAt.toISOString()}`,
+    );
   }
 
   private toRecord(value: unknown): Record<string, unknown> {

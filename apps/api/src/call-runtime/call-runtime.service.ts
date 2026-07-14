@@ -43,6 +43,13 @@ type CallState = {
   // Call is ended after SILENCE_END_THRESHOLD strikes within SILENCE_WINDOW_MS.
   silenceStrikes: number;
   lastSilenceAt: number;
+  // Script variant driving this call, from the owning campaign's scriptRef:
+  // "default" (full 9-step concierge), "reconfirm" (#2 site-visit reminder), or
+  // "feedback" (#4 post-visit). Selects both the system prompt and the greeting.
+  scriptRef: string;
+  // Human-readable scheduled visit time for reconfirm/feedback greetings (from the
+  // dial target metadata); null on the default flow.
+  apptWhen: string | null;
 };
 
 // Trailing words that signal the caller paused mid-thought rather than finishing.
@@ -451,8 +458,30 @@ export class CallRuntimeService implements OnApplicationShutdown {
   // removes the ~1.8-2.6s LLM round-trip that used to precede her very first word.
   // The wording is kept IDENTICAL to the intro example in the system prompt so
   // that later turns — which read the greeting back from history — stay coherent.
-  private greetingText(locale: string): string {
-    if (this.isHinglishLocale(locale)) {
+  private greetingText(state: CallState): string {
+    const hinglish = this.isHinglishLocale(state.locale);
+    // Reconfirmation call (#2): open by confirming the booked slot.
+    if (state.scriptRef === "reconfirm") {
+      const when = state.apptWhen?.trim();
+      if (hinglish) {
+        return when
+          ? `Hello, मैं Maya बोल रही हूँ पिकोरा Group से। आपकी site visit ${when} के लिए scheduled है — बस वही confirm करना चाहती थी। क्या वो time आपके लिए ठीक है?`
+          : "Hello, मैं Maya बोल रही हूँ पिकोरा Group से। आपकी upcoming site visit को confirm करना चाहती थी। क्या वो time आपके लिए ठीक है?";
+      }
+      return when
+        ? `Hello, this is Maya from PIKORA Group. Your site visit is scheduled for ${when} — I just wanted to confirm that with you. Does that time still work for you?`
+        : "Hello, this is Maya from PIKORA Group. I wanted to confirm your upcoming site visit. Does the scheduled time still work for you?";
+    }
+    // Post-visit feedback call (#4): open by asking how the visit went.
+    if (state.scriptRef === "feedback") {
+      if (hinglish) {
+        return "Hello, मैं Maya बोल रही हूँ पिकोरा Group से। आपने हाल ही में हमारी site visit की थी — बस आपका experience जानना चाहती थी। आपको project कैसा लगा?";
+      }
+      return "Hello, this is Maya from PIKORA Group. You recently visited one of our residences — I just wanted to hear how it went. How did you find the project?";
+    }
+    // Default concierge flow — wording IDENTICAL to the intro example in the
+    // system prompt so later turns reading it back from history stay coherent.
+    if (hinglish) {
       return "Hello, मैं Maya बोल रही हूँ पिकोरा Group से — Ahmedabad की leading luxury advisory firm। आपकी enquiry मिली थी, तो आपको personally invite करना चाहती थी — एक exceptional ultra-luxury project की site visit के लिए। आप 4 BHK देख रहे हैं या 5 BHK.";
     }
     return "Hello, this is Maya calling from PIKORA Group — Ahmedabad's leading luxury advisory firm. We received your enquiry and I wanted to personally reach out — I'd love to invite you for a site visit of an exceptional ultra-luxury project in Ahmedabad. Are you looking at a 4 BHK or a 5 BHK.";
@@ -527,10 +556,11 @@ export class CallRuntimeService implements OnApplicationShutdown {
     // so subsequent turns know step 1 (intro) is already done.
     const GREETING_TRIGGER: LlmMessage = { role: "user", content: "Begin the call." };
 
-    // The opening is a fixed template (no LLM call) — identical to the intro
-    // example in the system prompt, so downstream turns reading it back from
-    // history stay coherent.
-    const reply = this.greetingText(state.locale);
+    // The opening is a fixed template (no LLM call) — for the default flow it is
+    // identical to the intro example in the system prompt, so downstream turns
+    // reading it back from history stay coherent. reconfirm/feedback calls open
+    // with their own purpose-specific line (see greetingText).
+    const reply = this.greetingText(state);
 
     this.activeTurns += 1;
     try {
@@ -633,7 +663,17 @@ export class CallRuntimeService implements OnApplicationShutdown {
         const locale = String(
           localeHint ?? call?.locale ?? this.config.get("CALL_LOCALE_DEFAULT") ?? "hi-IN",
         );
-        const systemPrompt = await this.buildSystemPrompt(locale, call?.campaignId, call?.targetId);
+        // Resolve the script variant from the owning campaign. reconfirm/feedback
+        // calls (#2/#4) run a short purpose-built prompt + greeting; everything
+        // else runs the full concierge flow. The default path is untouched.
+        const { scriptRef, leadName, apptWhen } = await this.resolveScriptContext(
+          call?.campaignId ?? null,
+          call?.targetId ?? null,
+        );
+        const systemPrompt =
+          scriptRef === "reconfirm" || scriptRef === "feedback"
+            ? this.buildScriptPrompt(scriptRef, locale, leadName, apptWhen)
+            : await this.buildSystemPrompt(locale, call?.campaignId, call?.targetId);
         state = {
           history: [],
           systemPrompt,
@@ -645,6 +685,8 @@ export class CallRuntimeService implements OnApplicationShutdown {
           lastApologyAt: 0,
           silenceStrikes: 0,
           lastSilenceAt: 0,
+          scriptRef,
+          apptWhen,
         };
         this.calls.set(callId, state);
         this.persistState(callId, state);
@@ -732,6 +774,99 @@ export class CallRuntimeService implements OnApplicationShutdown {
     }
     // No user message yet (shouldn't happen on a real turn) — lead with the note.
     return [{ role: "user", content: note }, ...copy];
+  }
+
+  // Resolve the script variant (from the owning campaign) plus the lead name and
+  // human-readable appointment time (from the dial target metadata) that the
+  // reconfirm/feedback prompt + greeting need. Best-effort: any lookup failure
+  // falls back to the default concierge flow so a call never fails to start.
+  private async resolveScriptContext(
+    campaignId: string | null,
+    targetId: string | null,
+  ): Promise<{ scriptRef: string; leadName: string; apptWhen: string | null }> {
+    let scriptRef = "default";
+    let leadName = "the caller";
+    let apptWhen: string | null = null;
+    try {
+      if (campaignId) {
+        const campaign = await this.campaignRepo.findById(campaignId);
+        if (campaign?.scriptRef) scriptRef = campaign.scriptRef;
+      }
+      if ((scriptRef === "reconfirm" || scriptRef === "feedback") && targetId) {
+        const target = await this.targetRepo.findById(targetId);
+        if (target?.fullName) leadName = target.fullName;
+        const md = (target?.metadata ?? {}) as Record<string, unknown>;
+        if (typeof md.scheduledAtHuman === "string" && md.scheduledAtHuman.trim()) {
+          apptWhen = md.scheduledAtHuman.trim();
+        }
+      }
+    } catch (err) {
+      this.logger.warn("Failed to resolve script context — using default flow", String(err));
+    }
+    return { scriptRef, leadName, apptWhen };
+  }
+
+  // Purpose-built system prompt for the short reconfirm (#2) and feedback (#4)
+  // calls. Keeps Maya's persona invariants (feminine Hindi, Devanagari, no
+  // pricing, not-an-AI, "Thank you." sign-off, <end_call/> sentinel) but swaps
+  // the 9-step concierge flow for a single objective. Deliberately does NOT load
+  // the inventory — these calls are brief and don't pitch.
+  private buildScriptPrompt(
+    scriptRef: string,
+    locale: string,
+    leadName: string,
+    apptWhen: string | null,
+  ): string {
+    const hinglish = this.isHinglishLocale(locale);
+    const when =
+      apptWhen?.trim() || (hinglish ? "आपकी scheduled site visit" : "your scheduled site visit");
+
+    const persona = hinglish
+      ? `आप Maya हैं — पिकोरा Group (Ahmedabad की luxury real estate advisory) की warm, professional relationship manager। आप ${leadName} से phone पर बात कर रही हैं।
+- आप एक 28-year-old woman हैं — हमेशा feminine Hindi verb forms ("कर रही हूँ", "बता सकती हूँ"), कभी masculine नहीं। आप AI नहीं हैं — कभी मत कहिए कि आप bot/AI हैं।
+- सारे Hindi शब्द Devanagari में, English शब्द English letters में। "पिकोरा Group" ऐसे ही लिखिए (U silent)।
+- कोई price या figure कभी मत बताइए। हर turn छोटा रखिए — एक ही sentence, एक ही सवाल।
+- जब बात पूरी हो जाए तो अपने आखिरी sentence के END में <end_call/> लगाइए (यह बोला नहीं जाता), और sign-off हमेशा "Thank you." हो।`
+      : `You are Maya — a warm, professional relationship manager at PIKORA Group (Ahmedabad luxury real estate advisory), on a call with ${leadName}.
+- You are a 28-year-old woman. You are NOT an AI — never say you are a bot or AI.
+- Write "PIKORA Group" exactly (the U is silent). Never quote any price or figure.
+- Keep every turn short — one sentence, one question.
+- When the conversation is complete, append <end_call/> at the END of your final sentence (never spoken), and sign off with exactly "Thank you."`;
+
+    const timeNote = hinglish
+      ? `\n\nRIGHT NOW: हर turn के शुरू में एक note "[Now in Ahmedabad: <time>. SAME-DAY SLOTS: …]" आता है — reschedule करते समय सिर्फ़ उसी के qualifying slots offer कीजिए, खुद clock का हिसाब मत लगाइए।`
+      : `\n\nRIGHT NOW: each of your turns is preceded by a "[Now in Ahmedabad: <time>. SAME-DAY SLOTS: …]" note — when rescheduling, offer only the slots it says qualify; never do the clock math yourself.`;
+
+    if (scriptRef === "reconfirm") {
+      const body = hinglish
+        ? `\n\nGOAL — SITE VISIT RECONFIRMATION:
+1. गर्मजोशी से confirm कीजिए कि ${when} का visit ठीक है।
+2. अगर वे हाँ कहें — warmly confirm कीजिए ("बढ़िया, हम आपका इंतज़ार करेंगे"), फिर politely close कीजिए।
+3. अगर वे time बदलना चाहें — ऊपर वाले note के qualifying slots में से एक नया slot offer करके confirm कीजिए।
+4. अगर वे cancel/मना करें — graceful रहिए, कोई दबाव नहीं ("कोई बात नहीं, ज़रूरत पड़े तो हम यहाँ हैं"), फिर close कीजिए।
+हर स्थिति में call को गर्मजोशी से बंद कीजिए।`
+        : `\n\nGOAL — SITE VISIT RECONFIRMATION:
+1. Warmly confirm the ${when} visit still works.
+2. If yes — confirm warmly ("wonderful, we'll be expecting you") and close politely.
+3. If they want a different time — offer a new slot from the qualifying slots in the note, and confirm it.
+4. If they cancel/decline — stay gracious, no pressure ("no problem at all, we're here whenever you need"), then close.
+Always end the call warmly.`;
+      return persona + timeNote + body;
+    }
+
+    // feedback
+    const body = hinglish
+      ? `\n\nGOAL — POST-VISIT FEEDBACK:
+1. पूछिए कि उन्हें project/visit कैसा लगा।
+2. अगर वे अभी आगे नहीं बढ़ रहे — politely और बिना दबाव के एक बार पूछिए कि कौन सी बात रोक रही है (price, possession timeline, location, family decision, loan, कोई और option), फिर उनका जवाब acknowledge कीजिए।
+3. दबाव मत डालिए और कोई नया offer या price मत दीजिए — सिर्फ़ सुनिए और acknowledge कीजिए।
+4. उन्हें उनके time के लिए धन्यवाद देकर गर्मजोशी से close कीजिए।`
+      : `\n\nGOAL — POST-VISIT FEEDBACK:
+1. Ask how they found the project / the visit.
+2. If they aren't moving ahead yet — gently, without pressure, ask once what's holding them back (price, possession timeline, location, family decision, loan, another option), then acknowledge their answer.
+3. Do not pressure and do not offer anything new or any price — just listen and acknowledge.
+4. Thank them for their time and close warmly.`;
+    return persona + timeNote + body;
   }
 
   // Build a detailed system prompt grounded in lead and campaign context.

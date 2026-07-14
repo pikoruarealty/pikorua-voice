@@ -47,6 +47,15 @@ export class CampaignTargetRepository {
     return row;
   }
 
+  // True if this phone has ever been marked do_not_call on any target. Used to
+  // honor an existing opt-out before placing a reminder/feedback dial (#2/#4).
+  async isPhoneDoNotCall(phone: string): Promise<boolean> {
+    const row = await this.db.query.campaignTargets.findFirst({
+      where: and(eq(campaignTargets.phone, phone), eq(campaignTargets.dialStatus, "do_not_call")),
+    });
+    return row != null;
+  }
+
   async createMany(data: NewCampaignTarget[]): Promise<CampaignTarget[]> {
     if (data.length === 0) return [];
     return this.db.insert(campaignTargets).values(data).onConflictDoNothing().returning();

@@ -9,6 +9,32 @@ import { z } from "zod";
 export const professionCategory = z.enum(["broker", "builder", "friend", "end_user", "unknown"]);
 export type ProfessionCategory = z.infer<typeof professionCategory>;
 
+// Why a lead is hesitating / didn't commit — captured on any call, and the whole
+// point of the post-visit feedback call (#4). Categories are the recurring
+// real-estate blockers; `other` catches the rest. Surfaced to the CRM so sales
+// walks into the follow-up already knowing the objection.
+export const objectionCategory = z.enum([
+  "price",
+  "possession_timeline",
+  "location",
+  "family_decision",
+  "loan_finance",
+  "comparison",
+  "layout_size",
+  "amenities",
+  "other",
+]);
+export type ObjectionCategory = z.infer<typeof objectionCategory>;
+
+export const ObjectionSchema = z.object({
+  // A novel/unseen category from the model coerces to "other" rather than failing
+  // the whole score parse (which would drop us to the heuristic fallback).
+  category: objectionCategory.catch("other"),
+  // The caller's own words (verbatim or lightly paraphrased); null if unclear.
+  detail: z.string().nullable().catch(null).default(null),
+});
+export type Objection = z.infer<typeof ObjectionSchema>;
+
 // Structured, per-criterion facts extracted from the transcript. Surfaced to the
 // CRM (via crm-payload) so an agent can see WHY a lead scored the way it did —
 // not just the number. Every field is null/false when the caller didn't disclose
@@ -37,6 +63,9 @@ export const LeadBreakdownSchema = z.object({
     .default({ intent: false, when: null, gapDays: null }),
   // Interest in seeing the sample house / model flat.
   sampleHouseInterest: z.boolean().nullable().default(null),
+  // Reasons the caller is hesitating / not proceeding. Empty when none surfaced.
+  // .catch([]) so a malformed objections field never fails the whole score parse.
+  objections: z.array(ObjectionSchema).catch([]).default([]),
 });
 export type LeadBreakdown = z.infer<typeof LeadBreakdownSchema>;
 

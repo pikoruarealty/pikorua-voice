@@ -1,3 +1,4 @@
+export { AppointmentRepository } from "./appointment.repository";
 export { CallEventRepository } from "./call-event.repository";
 export { CallRepository } from "./call.repository";
 export { CallTurnRepository } from "./call-turn.repository";

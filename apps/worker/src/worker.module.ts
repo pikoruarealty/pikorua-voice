@@ -15,8 +15,10 @@ import {
   CrmSyncLogRepository,
   CallEventRepository,
   CallTurnRepository,
+  AppointmentRepository,
   type Database,
 } from "@pikorua/db";
+import { AppointmentScheduler } from "./appointments/appointment.scheduler";
 import { PostCallProcessingService } from "./postcall/postcall.service";
 import { LeadScoreLlmService } from "./postcall/lead-score-llm.service";
 import { PostCallWorker } from "./postcall/postcall.worker";
@@ -70,6 +72,11 @@ import { CrmRetryScheduler } from "./postcall/crm-retry.scheduler";
       useFactory: (db: Database) => new CallTurnRepository(db),
       inject: ["DATABASE"],
     },
+    {
+      provide: AppointmentRepository,
+      useFactory: (db: Database) => new AppointmentRepository(db),
+      inject: ["DATABASE"],
+    },
     DialService,
     DialRepairScheduler,
     KeepAliveScheduler,
@@ -78,6 +85,7 @@ import { CrmRetryScheduler } from "./postcall/crm-retry.scheduler";
     PostCallWorker,
     CrmRetryWorker,
     CrmRetryScheduler,
+    AppointmentScheduler,
   ],
 })
 export class WorkerModule {}

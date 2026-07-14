@@ -109,6 +109,18 @@ export const webhookStatus = pgEnum("webhook_status", [
   "ignored",
 ]);
 
+// Lifecycle of a site-visit appointment. `scheduled` is the initial state;
+// `confirmed`/`rescheduled`/`cancelled` are set by a reconfirmation call (#2);
+// `completed`/`no_show` record what actually happened (drives feedback, #4).
+export const appointmentStatus = pgEnum("appointment_status", [
+  "scheduled",
+  "confirmed",
+  "rescheduled",
+  "cancelled",
+  "completed",
+  "no_show",
+]);
+
 // ─── campaigns ───────────────────────────────────────────────────────────────
 // A batch of outbound concierge calls (Step 5). The concierge script content
 // lives in code/config (Step 8) keyed by `script_ref`; only the reference is
@@ -344,6 +356,52 @@ export const webhookEvents = pgTable(
   ],
 );
 
+// ─── appointments ────────────────────────────────────────────────────────────
+// A booked site visit. Created either automatically from a qualifying call
+// (source="auto", provisional) or authoritatively via the appointments API
+// (source="api", confirmed). The reminder scheduler (#2) fires T-24h / T-2h
+// reconfirmation calls off `scheduled_at`; the feedback scheduler (#4) fires a
+// post-visit call after it passes. Pricing/inventory are never stored here.
+export const appointments = pgTable(
+  "appointments",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    // The call this was created from / most recently linked to. SET NULL so a
+    // deleted call never cascades away the appointment.
+    callId: uuid("call_id").references(() => calls.id, { onDelete: "set null" }),
+    campaignId: uuid("campaign_id").references(() => campaigns.id, { onDelete: "set null" }),
+    crmLeadId: varchar("crm_lead_id", { length: 120 }),
+    fullName: varchar("full_name", { length: 200 }),
+    phone: varchar("phone", { length: 32 }).notNull(),
+    locale: varchar("locale", { length: 16 }),
+    // Concrete visit time — schedulers fire relative to this.
+    scheduledAt: timestamp("scheduled_at", { withTimezone: true }).notNull(),
+    status: appointmentStatus("status").notNull().default("scheduled"),
+    // "auto" (parsed from a call, provisional) | "api" (authoritative). An auto
+    // create must never overwrite a confirmed/api row.
+    source: varchar("source", { length: 16 }).notNull().default("auto"),
+    confirmed: boolean("confirmed").notNull().default(false),
+    // Set once when each reminder dial is enqueued, so every window fires at most
+    // once regardless of how often the scheduler ticks.
+    reminderT24At: timestamp("reminder_t24_at", { withTimezone: true }),
+    reminderT2At: timestamp("reminder_t2_at", { withTimezone: true }),
+    // Set once when the post-visit feedback dial is enqueued (#4).
+    feedbackCallAt: timestamp("feedback_call_at", { withTimezone: true }),
+    // Free-text result after a reconfirm/feedback call ("confirmed", "moved to
+    // Sunday 5 PM", "declined — budget").
+    outcome: text("outcome"),
+    metadata: jsonb("metadata").$type<Record<string, unknown>>(),
+    createdAt,
+    updatedAt,
+  },
+  (t) => [
+    index("appointments_phone_idx").on(t.phone),
+    index("appointments_scheduled_at_idx").on(t.scheduledAt),
+    index("appointments_status_idx").on(t.status),
+    index("appointments_call_idx").on(t.callId),
+  ],
+);
+
 // ─── Relations ───────────────────────────────────────────────────────────────
 export const campaignsRelations = relations(campaigns, ({ many }) => ({
   targets: many(campaignTargets),
@@ -393,6 +451,11 @@ export const webhookEventsRelations = relations(webhookEvents, ({ one }) => ({
   call: one(calls, { fields: [webhookEvents.callId], references: [calls.id] }),
 }));
 
+export const appointmentsRelations = relations(appointments, ({ one }) => ({
+  call: one(calls, { fields: [appointments.callId], references: [calls.id] }),
+  campaign: one(campaigns, { fields: [appointments.campaignId], references: [campaigns.id] }),
+}));
+
 // ─── Inferred types (Rule 6: $inferSelect / $inferInsert) ────────────────────
 export type Campaign = typeof campaigns.$inferSelect;
 export type NewCampaign = typeof campaigns.$inferInsert;
@@ -417,3 +480,6 @@ export type NewCallEvent = typeof callEvents.$inferInsert;
 
 export type WebhookEvent = typeof webhookEvents.$inferSelect;
 export type NewWebhookEvent = typeof webhookEvents.$inferInsert;
+
+export type Appointment = typeof appointments.$inferSelect;
+export type NewAppointment = typeof appointments.$inferInsert;

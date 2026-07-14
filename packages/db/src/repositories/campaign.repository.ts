@@ -12,6 +12,13 @@ export class CampaignRepository {
     return this.db.query.campaigns.findFirst({ where: eq(campaigns.id, id) });
   }
 
+  // Look up a campaign by its `source` tag. Used to find-or-create the singleton
+  // system campaigns that own reconfirm/feedback dials (source="system:reconfirm"
+  // / "system:feedback"), so those calls carry the right scriptRef.
+  async findBySource(source: string): Promise<Campaign | undefined> {
+    return this.db.query.campaigns.findFirst({ where: eq(campaigns.source, source) });
+  }
+
   async findAll(filter?: { status?: CampaignStatus }): Promise<Campaign[]> {
     return this.db.query.campaigns.findMany({
       where: filter?.status ? eq(campaigns.status, filter.status) : undefined,

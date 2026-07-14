@@ -42,8 +42,9 @@ Inbound + outbound AI voice concierge for ultra-luxury real estate. The system *
 │                                                                 │
 │  DialService          ── places outbound calls via Exotel API   │
 │  DialRepairScheduler  ── re-queues stuck pending targets/60 s   │
-│  PostCallWorker       ── scores leads, syncs to CRM             │
+│  PostCallWorker       ── scores leads, extracts objections, CRM │
 │  CrmRetryWorker       ── retries failed CRM syncs (5 min cron)  │
+│  AppointmentScheduler ── site-visit reminders + feedback calls  │
 └─────────────────────────────────────────────────────────────────┘
          │ Drizzle ORM
          ▼
@@ -330,6 +331,7 @@ Campaigns can restrict dialing to a time window (`dialWindowStart` / `dialWindow
 | `crm_sync_log`     | Every CRM REST sync attempt with idempotency key              |
 | `call_events`      | Operational events: HOT alerts, guardrail blocks, escalations |
 | `webhook_events`   | Raw Exotel webhooks with HMAC signature verification status   |
+| `appointments`     | Booked site visits — time, status, reminder/feedback bookkeeping |
 
 Turn row convention: caller turns use `turnIndex * 2`, assistant turns use `turnIndex * 2 + 1` — adjacent and ordered correctly.
 
@@ -388,10 +390,14 @@ Turn row convention: caller turns use `turnIndex * 2`, assistant turns use `turn
 
 ### apps/worker
 
-| Variable               | Default | Description                                                      |
-| ---------------------- | ------- | ---------------------------------------------------------------- |
-| `LLM_SCORING_PROVIDER` | `auto`  | `openrouter` or `auto`                                           |
-| `LLM_SCORING_MODEL`    | —       | Override model for lead scoring (defaults to `OPENROUTER_MODEL`) |
+| Variable                        | Default    | Description                                                                 |
+| ------------------------------- | ---------- | --------------------------------------------------------------------------- |
+| `LLM_SCORING_PROVIDER`          | `auto`     | `openrouter` or `auto`                                                      |
+| `LLM_SCORING_MODEL`             | —          | Override model for lead scoring (defaults to `OPENROUTER_MODEL`)            |
+| `WORKER_KEEPALIVE_ENABLED`      | `false`    | Self-ping every 13 min to stop free-tier idle spin-down                     |
+| `WORKER_PUBLIC_URL`             | —          | This worker's own URL (required when keep-alive is on)                      |
+| `APPOINTMENTS_OUTBOUND_ENABLED` | `false`    | **Opt-in**: place real reconfirmation / feedback calls. Off = no dialing    |
+| `APPOINTMENT_FEEDBACK_DELAY_MS` | `10800000` | How long after the visit the feedback call fires (default 3 h)              |
 
 Worker inherits all Exotel, Redis, DB, and OpenRouter vars from the shared `.env`.
 
@@ -419,6 +425,29 @@ Content-Type: application/json
 ```
 
 Setting `status: "active"` immediately enqueues all targets for dialing.
+
+### Appointments
+
+```
+POST /api/appointments
+Authorization: Bearer <API_AUTH_TOKEN>
+
+{
+  "phone": "+919876543210",
+  "scheduledAt": "2026-07-20T11:00:00+05:30",   // concrete ISO-8601 instant
+  "locale": "hi-IN",
+  "fullName": "Ravi Shah",
+  "crmLeadId": "lead-123"
+}
+
+GET   /api/appointments/:id
+PATCH /api/appointments/:id   { "scheduledAt"? , "status"? , "outcome"? }
+```
+
+`POST` is authoritative: it upgrades a nearby provisional (auto) row instead of
+duplicating. A `PATCH` that moves `scheduledAt` clears the reminder flags so the
+T-24h / T-2h calls fire again for the new time. `status` ∈ `scheduled` | `confirmed` |
+`rescheduled` | `cancelled` | `completed` | `no_show`.
 
 ### REST turn API (non-telephony path)
 
@@ -515,6 +544,59 @@ When Exotel fires a `completed` webhook:
    - Negative: `not interested`, `don't call`, `do not call`, `stop`, `unsubscribe`, `no thanks`
 4. Score ≥ 75 → **HOT alert** written to `call_events`
 5. **CRM sync**: POST a structured call-result payload to `CRM_API_BASE_URL/call-results`, signed with a `Bearer` token + `X-Signature` (HMAC-SHA256 over the raw body) + `X-Timestamp`, and deduped by an `Idempotency-Key`. Failures retried by `CrmRetryWorker` every 5 minutes (up to 5 attempts)
+
+---
+
+## Site-visit appointments — reconfirmation & post-visit feedback
+
+Two outbound flows built on one `appointments` row, driven by `AppointmentScheduler`
+(worker, 60 s tick).
+
+**How a visit gets booked** — two paths that converge on one row:
+
+| Path | Source | When |
+| ---- | ------ | ---- |
+| **Auto** (provisional) | `source="auto"` | Post-call, when the scorer reports `siteVisit.intent` **and** a resolvable `gapDays`. `resolveVisitDate` pins it to the default 11:00 IST slot; no reliable date → no row. |
+| **API** (authoritative) | `source="api"` | `POST /api/appointments` with a concrete `scheduledAt`. Upgrades a nearby provisional row in place (±12 h) rather than duplicating — **the API always wins**. |
+
+**Reconfirmation (#2)** — a **T-24h** and a **T-2h** call before each visit. `dueReminder`
+decides which window is due (mutually exclusive; each fires at most once, tracked by
+`reminderT24At` / `reminderT2At`). Maya confirms the slot, **reschedules on the spot**
+using the qualifying slots from the per-turn time note, or bows out gracefully on a
+cancel. Post-call writes the result back (`confirmed` / `cancelled`).
+
+**Post-visit feedback (#4)** — `APPOINTMENT_FEEDBACK_DELAY_MS` (default 3 h) after the
+visit, Maya asks how it went and — gently, once, without pressure — what's holding them
+back. The post-call scorer extracts a structured `objections[]` array
+(`price`, `possession_timeline`, `location`, `family_decision`, `loan_finance`,
+`comparison`, `layout_size`, `amenities`, `other` + the caller's own words), stored on
+the lead score and surfaced to the CRM at `score.objections`. Objections are captured on
+**every** call, not just feedback ones. An unknown category coerces to `other` rather
+than failing the score parse.
+
+**Script variants.** These calls reuse the whole voice pipeline but swap the prompt:
+`campaigns.scriptRef` (`default` | `reconfirm` | `feedback`) selects both the system
+prompt (`buildScriptPrompt` — short, single-objective, no inventory, no pricing) and the
+opening line (`greetingText`). The `default` concierge flow is untouched. An outbound
+call resolves its variant via `providerCallSid → call → campaign.scriptRef`; appointment
+context (the human-readable visit time) rides on the dial target's `metadata`.
+
+**Safety rails.**
+
+- **Outbound dialing is opt-in**: `APPOINTMENTS_OUTBOUND_ENABLED=false` by default. When
+  off, appointments and objection capture still work — only the real calls are gated, so
+  a deploy never surprise-dials anyone.
+- **`do_not_call` is always honored** — checked against the phone before every reminder /
+  feedback dial.
+- **At-most-once**: the reminder timestamp is written *before* the dial is enqueued, so a
+  failed enqueue skips that reminder rather than risking a repeat call.
+- Each dial gets its own single-target system campaign (`source="appt:<id>:<tag>"`), so
+  the `(campaign_id, phone)` unique index never collides across a lead's repeat visits.
+
+> **Open items before scaling outbound:** a full TRAI/DNC-list gate (beyond the existing
+> per-lead `do_not_call` opt-out) is **not** implemented, and Maya's prompt still asserts
+> she is not an AI. Both are acceptable at demo volume and for warm leads who booked a
+> visit; both need a decision before high-volume or white-label use.
 
 ---
 

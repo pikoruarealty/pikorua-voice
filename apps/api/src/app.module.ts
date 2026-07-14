@@ -10,6 +10,7 @@ import { DatabaseModule } from "./database/database.module";
 import { RedisModule } from "./redis/redis.module";
 import { HealthModule } from "./health/health.module";
 import { CampaignModule } from "./campaign/campaign.module";
+import { AppointmentModule } from "./appointments/appointment.module";
 import { WebhookModule } from "./webhooks/webhook.module";
 import { CallRuntimeModule } from "./call-runtime/call-runtime.module";
 import { MetricsModule } from "./metrics/metrics.module";
@@ -30,6 +31,7 @@ import { DemoModule } from "./demo/demo.module";
     RedisModule,
     HealthModule,
     CampaignModule,
+    AppointmentModule,
     WebhookModule,
     CallRuntimeModule,
     MetricsModule,

@@ -104,6 +104,9 @@ export function buildCallResultPayload(params: BuildCallResultParams) {
         negative: score.negative,
       },
       breakdown: score.breakdown,
+      // Surface objections at the top of the score too (also inside breakdown) so
+      // the CRM can show "why they hesitated" without digging into the breakdown.
+      objections: score.breakdown?.objections ?? [],
       source: score.source,
       scoredAt: score.scoredAt,
     },

@@ -169,3 +169,12 @@ services:
         sync: false
       - key: OPENROUTER_MODEL
         value: anthropic/claude-haiku-4-5
+
+      # ── Site-visit appointments (#2 reconfirmation + #4 feedback) ─────────
+      # Outbound reminder/feedback dialing is OFF by default — it places real
+      # calls. Appointments + objection capture work regardless; only the dialing
+      # is gated. Flip to "true" to go live (do_not_call opt-outs always honored).
+      - key: APPOINTMENTS_OUTBOUND_ENABLED
+        value: "false"
+      - key: APPOINTMENT_FEEDBACK_DELAY_MS
+        value: "10800000"

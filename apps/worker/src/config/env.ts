@@ -37,6 +37,14 @@ export const workerEnvSchema = z
     WORKER_KEEPALIVE_ENABLED: optionalNonEmpty,
     WORKER_PUBLIC_URL: optionalNonEmpty,
 
+    // Site-visit reconfirmation (#2) + post-visit feedback (#4) outbound dialing.
+    // OFF by default — these place REAL calls, so enabling is a deliberate switch.
+    // APPOINTMENT_FEEDBACK_DELAY_MS is how long after the visit the feedback call
+    // fires (default 3h). Kept lenient (no strict enum/number) so a stray value can
+    // never crash worker startup; the scheduler coerces them at runtime.
+    APPOINTMENTS_OUTBOUND_ENABLED: optionalNonEmpty,
+    APPOINTMENT_FEEDBACK_DELAY_MS: optionalNonEmpty,
+
     // CRM integration (REST only — Step 9). The worker POSTs completed calls to
     // <CRM_API_BASE_URL>/call-results, authenticated with the shared Bearer token
     // and an HMAC-SHA256 signature over the raw body (the CRM's VOICE_API_BEARER_TOKEN

@@ -159,6 +159,30 @@ test("appointment scheduler is gated behind APPOINTMENTS_OUTBOUND_ENABLED and ho
   assert.match(src, /markReminder\(appt\.id/);
 });
 
+test("reconfirm/feedback scripts use simple spoken Hinglish, not literary Hindi", () => {
+  const src = read("apps/api/src/call-runtime/call-runtime.service.ts");
+  // Everything Maya SPEAKS (greetings) and the script instructions must stay in
+  // everyday spoken Hinglish. These literary/formal words sound wrong on a call.
+  // NOTE: they may still appear inside the "never say this" instruction itself,
+  // so we check only the greeting + script-body template literals.
+  const scriptRegion = src.slice(
+    src.indexOf("private greetingText"),
+    src.indexOf("private async buildSystemPrompt"),
+  );
+  const banned = ["हाल ही में", "स्थिति", "प्रतीक्षा", "आवश्यकता", "अवसर", "गर्मजोशी", "धन्यवाद"];
+  for (const word of banned) {
+    // Allowed exactly once inside the plain-language rule that FORBIDS them.
+    const hits = scriptRegion.split(word).length - 1;
+    const inBanList = scriptRegion.includes(`कठिन या किताबी Hindi कभी मत बोलिए`);
+    assert.ok(
+      hits === 0 || (inBanList && hits === 1),
+      `"${word}" should not be spoken by Maya (found ${hits}x outside the ban-list rule)`,
+    );
+  }
+  // The plain-language rule itself must be present.
+  assert.match(scriptRegion, /कठिन या किताबी Hindi कभी मत बोलिए/);
+});
+
 test("objections are surfaced to the CRM payload", () => {
   const src = read("apps/worker/src/postcall/crm-payload.ts");
   assert.match(src, /objections:\s*score\.breakdown\?\.objections/);

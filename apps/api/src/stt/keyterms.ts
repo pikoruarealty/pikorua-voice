@@ -22,9 +22,14 @@ export const PROPER_NOUN_KEYTERMS = [
   "Sindhu", "Bhavan", "Rajpath", "Rangoli",
   "Thaltej", "Vastrapur", "Nehrunagar", "Vaishnodevi", "Gota",
   "Shilaj", "Nandoli", "Bodakdev",
+  // Residence areas a caller may say when asked where they live (not inventory
+  // micro-markets) — most-often mis-heard, so bias them too.
+  "Naroda", "Maninagar", "Satellite", "Chandkheda", "Prahlad Nagar",
+  "Navrangpura", "Paldi", "Motera", "Bopal",
   // Devanagari — biases the same names when spoken inside Hindi (Hinglish callers).
   "वैष्णोदेवी", "थलतेज", "वस्त्रापुर", "नेहरूनगर", "गोता",
   "सिंधु भवन", "राजपथ", "रंगोली", "अंबली", "बोपल",
   "अंबली बोपल", "अंबली-बोपल", "अंबली बोपल रोड", "अंबली-बोपल रोड",
+  "नरोडा", "मणिनगर", "सैटेलाइट", "चांदखेड़ा", "प्रह्लाद नगर", "नवरंगपुरा",
   "बोडकदेव", "शिलज", "नंदोली", "बंगला",
 ] as const;

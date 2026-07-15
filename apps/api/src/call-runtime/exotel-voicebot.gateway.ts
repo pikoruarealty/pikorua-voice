@@ -56,6 +56,17 @@ const BARGE_IN_MIN_CHARS = 3;
 // no real reply to Maya) before we gracefully bow out and hang up.
 const SIDE_CONVERSATION_HANGUP_MS = 35_000;
 
+// Detect the language a caller utterance is in, so the session can follow them
+// (Hindi ⇄ English). Devanagari → Hindi; Latin with >=2 words → English (a lone
+// English word is often a loanword inside Hindi speech). Null for short/ambiguous
+// input (a bare "ok"/"haan") so a single word can't thrash the locale.
+function detectSpokenLanguage(text: string): "hi" | "en" | null {
+  if (/[ऀ-ॿ]/.test(text)) return "hi";
+  const words = text.trim().split(/\s+/).filter(Boolean);
+  if (/[a-zA-Z]/.test(text) && words.length >= 2) return "en";
+  return null;
+}
+
 // Delay before the gateway's post-call BACKSTOP fires for webhook-managed
 // (outbound) calls. Long enough that Exotel's `completed` webhook — which
 // enqueues immediately and wins via the shared jobId — normally beats it; the
@@ -661,6 +672,19 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
     } else {
       state.inactivityStrikes = 0;
       state.lastNoiseAt = 0;
+      // Follow the caller's language: once they clearly speak English (or Hindi),
+      // switch the session locale so the inactivity check-in, goodbye, and reply
+      // TTS all match them. Short/ambiguous acks return null and don't switch.
+      const lang = detectSpokenLanguage(utterance);
+      if (lang) {
+        const target = lang === "hi" ? "hi-IN" : "en-IN";
+        if (state.locale !== target) {
+          this.logger.log(
+            `Caller language=${lang} → session locale ${target} (callId=${state.callId})`,
+          );
+          state.locale = target;
+        }
+      }
       this.resetInactivityTimer(client, state);
     }
     // Reliable barge-in (commit path): a fully-formed caller utterance must stop

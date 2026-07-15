@@ -8,6 +8,7 @@ import { ApiAuthGuard } from "./auth/api-auth.guard";
 import { validateEnv } from "./config/env";
 import { DatabaseModule } from "./database/database.module";
 import { RedisModule } from "./redis/redis.module";
+import { WorkerWakerModule } from "./worker-waker/worker-waker.module";
 import { HealthModule } from "./health/health.module";
 import { CampaignModule } from "./campaign/campaign.module";
 import { AppointmentModule } from "./appointments/appointment.module";
@@ -29,6 +30,7 @@ import { DemoModule } from "./demo/demo.module";
     ThrottlerModule.forRoot([{ ttl: 60_000, limit: 120 }]),
     DatabaseModule,
     RedisModule,
+    WorkerWakerModule,
     HealthModule,
     CampaignModule,
     AppointmentModule,

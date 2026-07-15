@@ -53,6 +53,13 @@ export const envSchema = z
     EXOTEL_STREAM_SECRET: optionalNonEmpty,
     PUBLIC_BASE_URL: z.string().url().default("http://localhost:4100"),
 
+    // Worker wake-up: the worker is a Render free-tier web service that spins down
+    // when idle, and a queued BullMQ job can't wake it. Set this to the worker's
+    // URL (e.g. https://pikorua-voice-worker.onrender.com/health) and the API pings
+    // it whenever it queues work (post-call after any call, or an outbound dial), so
+    // the worker cold-starts and drains the queue. Unset/local = no-op.
+    WORKER_WAKE_URL: optionalNonEmpty,
+
     // Voice routing
     CALL_LOCALE_DEFAULT: z.string().max(16).default("hi-IN"),
     LLM_PROVIDER_OVERRIDE: optionalLlmProvider,

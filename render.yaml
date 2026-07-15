@@ -41,6 +41,12 @@ services:
       # Set this to your Render service URL after first deploy
       - key: PUBLIC_BASE_URL
         sync: false
+      # Worker's own URL (e.g. https://pikorua-voice-worker.onrender.com/health).
+      # The API pings it whenever it queues work (post-call after any inbound/outbound
+      # call, or an outbound dial) so the spun-down free-tier worker wakes and drains
+      # the queue. Leave blank to disable.
+      - key: WORKER_WAKE_URL
+        sync: false
 
       # ── STT · Deepgram ───────────────────────────────────────────────────
       - key: DEEPGRAM_API_KEY

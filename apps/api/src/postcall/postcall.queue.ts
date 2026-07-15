@@ -2,6 +2,7 @@ import { Injectable, Logger, OnModuleDestroy } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { Queue } from "bullmq";
 import { Redis } from "ioredis";
+import { WorkerWaker } from "../worker-waker/worker-waker.service";
 
 @Injectable()
 export class PostCallQueueService implements OnModuleDestroy {
@@ -9,7 +10,10 @@ export class PostCallQueueService implements OnModuleDestroy {
   private queue: Queue | null = null;
   private redis: Redis | null = null;
 
-  constructor(private readonly config: ConfigService) {
+  constructor(
+    private readonly config: ConfigService,
+    private readonly waker: WorkerWaker,
+  ) {
     const redisUrl = String(this.config.get("REDIS_URL") ?? "");
     if (redisUrl) {
       this.redis = new Redis(redisUrl, { maxRetriesPerRequest: null });
@@ -42,6 +46,10 @@ export class PostCallQueueService implements OnModuleDestroy {
         ...(opts?.delayMs && opts.delayMs > 0 ? { delay: opts.delayMs } : {}),
       },
     );
+    // Wake a spun-down worker so this call is scored + synced to the CRM promptly,
+    // instead of the job waiting in Redis until something else happens to ping it.
+    // (A delayed backstop still benefits: the worker warms now and is up when it fires.)
+    this.waker.wake("post-call");
   }
 
   async onModuleDestroy() {

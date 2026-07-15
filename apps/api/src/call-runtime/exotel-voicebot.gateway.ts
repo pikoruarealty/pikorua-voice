@@ -8,6 +8,7 @@ import { ElevenlabsService } from "../tts/elevenlabs.service";
 import { CallRuntimeService, isNoisyTranscript } from "./call-runtime.service";
 import { CallRepository, type NewCall } from "@pikorua/db";
 import { PostCallQueueService } from "../postcall/postcall.queue";
+import { WorkerWaker } from "../worker-waker/worker-waker.service";
 
 // Exotel's Voicebot WebSocket carries raw 16-bit linear PCM, 8 kHz, mono,
 // little-endian (slin/s16le) in BOTH directions — confirmed against Exotel's
@@ -303,6 +304,7 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
     private readonly runtime: CallRuntimeService,
     @Inject(CallRepository) private readonly callRepo: CallRepository,
     private readonly postcallQueue: PostCallQueueService,
+    private readonly waker: WorkerWaker,
   ) {}
 
   handleConnection(client: WebSocket, request?: IncomingMessage) {
@@ -426,6 +428,12 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
         >;
 
         state.callSid = callSid || null;
+
+        // A call is now live (inbound or outbound). Wake the (possibly spun-down)
+        // worker now so it's warm by the time this call ends and post-call is
+        // enqueued — otherwise post-call waits on a ~30s cold start. Throttled +
+        // fire-and-forget; no-op when WORKER_WAKE_URL is unset/local.
+        this.waker.wake("call-start");
 
         // Caller/callee numbers for the (inbound) row we may create below. Outbound
         // rows already carry these from the dial worker, but an inbound first-time

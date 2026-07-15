@@ -357,6 +357,7 @@ Turn row convention: caller turns use `turnIndex * 2`, assistant turns use `turn
 | `EXOTEL_WEBHOOK_SECRET`       | required (prod)              | HMAC secret for webhook signature verification              |
 | `EXOTEL_STREAM_SECRET`        | —                            | Optional shared secret for `/exotel-stream` WS endpoint     |
 | `PUBLIC_BASE_URL`             | `http://localhost:4100`      | Used for Exotel status callback URL                         |
+| `WORKER_WAKE_URL`             | —                            | Worker's URL; API pings it on call start / enqueue to wake a spun-down worker |
 | `CALL_LOCALE_DEFAULT`         | `hi-IN`                      | Fallback locale when none is set on the call                |
 | `LLM_PROVIDER_OVERRIDE`       | —                            | `openrouter` or `auto` (leave blank for auto)               |
 | `GUARDRAIL_SEMANTIC_ENABLED`  | `true`                       | Enable LLM semantic guardrail (set `false` for local demos) |
@@ -556,7 +557,7 @@ Two outbound flows built on one `appointments` row, driven by `AppointmentSchedu
 
 | Path | Source | When |
 | ---- | ------ | ---- |
-| **Auto** (provisional) | `source="auto"` | Post-call, when the scorer reports `siteVisit.intent` **and** a resolvable `gapDays`. `resolveVisitDate` pins it to the default 11:00 IST slot; no reliable date → no row. |
+| **Auto** (provisional) | `source="auto"` | Post-call, when the scorer reports `siteVisit.intent` **and** a resolvable `gapDays`. `resolveVisitDate` uses the caller's agreed time (`parseVisitTime` on `when`, incl. Hindi "N बजे"), falling back to the 11:00 IST slot; no reliable date → no row. |
 | **API** (authoritative) | `source="api"` | `POST /api/appointments` with a concrete `scheduledAt`. Upgrades a nearby provisional row in place (±12 h) rather than duplicating — **the API always wins**. |
 
 **Reconfirmation (#2)** — a **T-24h** and a **T-2h** call before each visit. `dueReminder`
@@ -636,6 +637,8 @@ The project ships a `render.yaml` for one-click deployment. Both services build 
 - **Worker service** (`type: web`): `apps/worker/Dockerfile` → `node apps/worker/dist/main.js`, health check `/health`. Deployed as a `web` service (not `worker`) because Render's free tier has no Background Worker plan — a bare `/health` endpoint satisfies the platform check. An optional 13-min self-ping keep-alive (`WORKER_KEEPALIVE_ENABLED`, off by default) prevents free-tier idle spin-down; switch to `type: worker` once on a paid plan.
 
 Both services read from the same Render environment group. Set `PUBLIC_BASE_URL` to the deployed API service URL so Exotel can reach the webhook endpoint at `PUBLIC_BASE_URL/api/webhooks/exotel`.
+
+**Waking the worker on demand.** A BullMQ job in Redis cannot wake a spun-down free-tier worker — only an inbound HTTP request does. Set the API's `WORKER_WAKE_URL` to the worker's URL and the API pings it (throttled, fire-and-forget) whenever it queues work for the worker: a **call starts** (inbound or outbound), **post-call is enqueued** after any call, and an **outbound dial** is enqueued. So the worker cold-starts and drains the queue promptly instead of the job waiting for the next keep-alive tick. This is orthogonal to `WORKER_KEEPALIVE_ENABLED` (periodic self-ping) — use either or both.
 
 ---
 

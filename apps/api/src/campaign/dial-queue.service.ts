@@ -2,6 +2,7 @@ import { Injectable, Logger, OnModuleDestroy } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { Queue } from "bullmq";
 import { Redis } from "ioredis";
+import { WorkerWaker } from "../worker-waker/worker-waker.service";
 
 @Injectable()
 export class DialQueueService implements OnModuleDestroy {
@@ -9,7 +10,10 @@ export class DialQueueService implements OnModuleDestroy {
   private queue: Queue | null = null;
   private redis: Redis | null = null;
 
-  constructor(private readonly config: ConfigService) {
+  constructor(
+    private readonly config: ConfigService,
+    private readonly waker: WorkerWaker,
+  ) {
     const redisUrl = String(this.config.get("REDIS_URL") ?? "");
     if (!redisUrl) {
       this.logger.warn("REDIS_URL not set; dial queue disabled");
@@ -37,6 +41,9 @@ export class DialQueueService implements OnModuleDestroy {
         removeOnFail: false,
       },
     );
+    // Wake a spun-down worker so it actually places this outbound call, rather than
+    // the dial job sitting in Redis until the worker happens to wake.
+    this.waker.wake("dial");
   }
 
   async enqueueTargets(targetIds: string[]) {

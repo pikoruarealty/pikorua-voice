@@ -5,15 +5,12 @@ import type { Appointment, NewAppointment } from "../schema";
 
 type AppointmentStatus = (typeof appointments.status.enumValues)[number];
 
-// Statuses that still warrant a reminder / feedback call (a cancelled visit does not).
+// Statuses that still warrant a reminder call (a cancelled visit does not).
 const REMINDABLE: AppointmentStatus[] = ["scheduled", "confirmed", "rescheduled"];
-const FEEDBACKABLE: AppointmentStatus[] = [
-  "scheduled",
-  "confirmed",
-  "rescheduled",
-  "completed",
-  "no_show",
-];
+// Feedback only targets visits we have positive signal on — NOT a bare "scheduled"
+// provisional row (a guessed date that was never confirmed): asking "how was your
+// visit?" for a visit that may never have happened is worse than staying silent.
+const FEEDBACKABLE: AppointmentStatus[] = ["confirmed", "rescheduled", "completed", "no_show"];
 
 export class AppointmentRepository {
   constructor(private readonly db: Database) {}
@@ -35,6 +32,29 @@ export class AppointmentRepository {
       .where(eq(appointments.id, id))
       .returning();
     return row;
+  }
+
+  // Atomically claim a reminder slot: set the timestamp only if still unset, and
+  // report whether THIS caller won. Guarantees exactly one dial per window even
+  // if two worker instances (or a tick straddling a restart) race the same row.
+  async claimReminder(id: string, kind: "t24" | "t2", at: Date): Promise<boolean> {
+    const col = kind === "t24" ? appointments.reminderT24At : appointments.reminderT2At;
+    const rows = await this.db
+      .update(appointments)
+      .set(kind === "t24" ? { reminderT24At: at } : { reminderT2At: at })
+      .where(and(eq(appointments.id, id), isNull(col)))
+      .returning({ id: appointments.id });
+    return rows.length > 0;
+  }
+
+  // Atomically claim the single post-visit feedback call (same race guarantee).
+  async claimFeedback(id: string, at: Date): Promise<boolean> {
+    const rows = await this.db
+      .update(appointments)
+      .set({ feedbackCallAt: at })
+      .where(and(eq(appointments.id, id), isNull(appointments.feedbackCallAt)))
+      .returning({ id: appointments.id });
+    return rows.length > 0;
   }
 
   // Dedup guard for the auto path: an active visit for the same phone within

@@ -191,8 +191,9 @@ test("appointment scheduler is gated behind APPOINTMENTS_OUTBOUND_ENABLED and ho
   assert.match(src, /if \(!this\.enabled\(\)\)/);
   // DNC honored before any reminder/feedback dial.
   assert.match(src, /isPhoneDoNotCall\(appt\.phone\)/);
-  // Reminder bookkeeping is marked before enqueue (at-most-once).
-  assert.match(src, /markReminder\(appt\.id/);
+  // The window is claimed atomically before enqueue (no double-dial across ticks).
+  assert.match(src, /claimReminder\(appt\.id/);
+  assert.match(src, /if \(!claimed\) continue/);
 });
 
 test("reconfirm/feedback scripts use simple spoken Hinglish, not literary Hindi", () => {

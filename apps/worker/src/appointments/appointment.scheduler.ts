@@ -8,7 +8,7 @@ import {
   CampaignTargetRepository,
 } from "@pikorua/db";
 import type { Appointment, Campaign } from "@pikorua/db";
-import { dueFeedback, dueReminder, type ReminderKind } from "./appointment-window";
+import { dueFeedback, dueReminder } from "./appointment-window";
 import { formatIstWhen } from "./visit-date";
 
 // Default gap between the visit time and the post-visit feedback call (#4).
@@ -99,9 +99,11 @@ export class AppointmentScheduler implements OnModuleInit, OnModuleDestroy {
         appt.reminderT2At != null,
       );
       if (!kind) continue;
-      // Mark BEFORE enqueue (at-most-once): a failed enqueue skips this reminder
-      // rather than risking a repeat dial. The other window still fires later.
-      await this.markReminder(appt.id, kind, now);
+      // Claim the window atomically BEFORE enqueue: only the caller that flips the
+      // (still-null) timestamp dials, so a race between ticks/instances can't
+      // double-call. A failed enqueue simply skips this window; the other still fires.
+      const claimed = await this.appointmentRepo.claimReminder(appt.id, kind, now);
+      if (!claimed) continue;
       await this.enqueueScriptCall(appt, "reconfirm", kind);
     }
   }
@@ -111,20 +113,14 @@ export class AppointmentScheduler implements OnModuleInit, OnModuleDestroy {
     const candidates = await this.appointmentRepo.findFeedbackCandidates(cutoff, 100);
     const now = new Date();
     for (const appt of candidates) {
-      if (appt.status === "cancelled") continue;
       if (!dueFeedback(appt.scheduledAt, now, this.feedbackDelayMs(), appt.feedbackCallAt != null)) {
         continue;
       }
-      await this.appointmentRepo.update(appt.id, { feedbackCallAt: now });
+      // Same atomic-claim guarantee: exactly one feedback dial per visit.
+      const claimed = await this.appointmentRepo.claimFeedback(appt.id, now);
+      if (!claimed) continue;
       await this.enqueueScriptCall(appt, "feedback", "feedback");
     }
-  }
-
-  private async markReminder(id: string, kind: ReminderKind, at: Date): Promise<void> {
-    await this.appointmentRepo.update(
-      id,
-      kind === "t24" ? { reminderT24At: at } : { reminderT2At: at },
-    );
   }
 
   // Create a purpose dial for this appointment and enqueue it. Honors an existing

@@ -588,8 +588,12 @@ context (the human-readable visit time) rides on the dial target's `metadata`.
   a deploy never surprise-dials anyone.
 - **`do_not_call` is always honored** — checked against the phone before every reminder /
   feedback dial.
-- **At-most-once**: the reminder timestamp is written *before* the dial is enqueued, so a
-  failed enqueue skips that reminder rather than risking a repeat call.
+- **Exactly-once, race-safe**: each window is claimed with an atomic conditional update
+  (`SET reminder_t2h_at = now WHERE … IS NULL RETURNING`) — only the caller that flips the
+  still-null timestamp dials, so two ticks (or worker instances) can't double-call.
+- **Feedback only chases confirmed visits** — a bare provisional (`scheduled`) row whose
+  guessed date was never confirmed is skipped, so we never ask "how was your visit?" about
+  a visit that may not have happened.
 - Each dial gets its own single-target system campaign (`source="appt:<id>:<tag>"`), so
   the `(campaign_id, phone)` unique index never collides across a lead's repeat visits.
 

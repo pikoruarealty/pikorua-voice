@@ -59,6 +59,13 @@ export const envSchema = z
     // it whenever it queues work (post-call after any call, or an outbound dial), so
     // the worker cold-starts and drains the queue. Unset/local = no-op.
     WORKER_WAKE_URL: optionalNonEmpty,
+    // When WORKER_WAKE_URL is set, the API also keeps the worker available for the
+    // TIME-DRIVEN reminder/feedback scheduler: it wakes the worker just before any
+    // reminder is due (any hour) AND keeps it warm during business hours. This is
+    // the IST window for that business-hours keep-alive (defaults 10-18). Lenient
+    // integers; set start >= end to disable the window (wake-ahead still runs).
+    WORKER_KEEPALIVE_START_HOUR_IST: optionalNonEmpty,
+    WORKER_KEEPALIVE_END_HOUR_IST: optionalNonEmpty,
 
     // Voice routing
     CALL_LOCALE_DEFAULT: z.string().max(16).default("hi-IN"),

@@ -32,6 +32,12 @@ export class WorkerWaker {
     return raw;
   }
 
+  // Whether a real (non-local) worker URL is set — lets schedulers stay idle when
+  // there is nothing to wake.
+  isConfigured(): boolean {
+    return this.targetUrl() !== null;
+  }
+
   // Ping the worker so a spun-down instance starts. Fire-and-forget: never throws
   // into (or slows down) the caller's enqueue path.
   wake(reason: string): void {

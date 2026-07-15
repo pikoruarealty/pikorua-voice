@@ -47,6 +47,14 @@ services:
       # the queue. Leave blank to disable.
       - key: WORKER_WAKE_URL
         sync: false
+      # Business-hours window (IST) during which the API keeps the free-tier worker
+      # warm for the time-driven reminder/feedback scheduler. Outside these hours the
+      # worker sleeps and is woken just-in-time before any reminder is due. Defaults
+      # 10-18 if unset; set start >= end to disable the window.
+      - key: WORKER_KEEPALIVE_START_HOUR_IST
+        value: "10"
+      - key: WORKER_KEEPALIVE_END_HOUR_IST
+        value: "18"
 
       # ── STT · Deepgram ───────────────────────────────────────────────────
       - key: DEEPGRAM_API_KEY

@@ -97,6 +97,56 @@ export class AppointmentRepository {
       .limit(limit);
   }
 
+  // How many appointments have a reminder/feedback due to FIRE within the next
+  // `lookaheadMs` — used by the API to wake a spun-down worker ~just before the
+  // window, so its scheduler tick catches it. Fire times:
+  //   T-24h reminder  → scheduledAt - 24h   (scheduledAt ∈ [now+24h, +lookahead])
+  //   T-2h  reminder  → scheduledAt - 2h    (scheduledAt ∈ [now+2h,  +lookahead])
+  //   feedback        → scheduledAt + delay (scheduledAt ∈ [now-delay, +lookahead])
+  async countImminentReminders(
+    now: Date,
+    lookaheadMs: number,
+    feedbackDelayMs: number,
+  ): Promise<number> {
+    const nowMs = now.getTime();
+    const H = 60 * 60 * 1000;
+    const range = (offsetMs: number): [Date, Date] => [
+      new Date(nowMs + offsetMs),
+      new Date(nowMs + offsetMs + lookaheadMs),
+    ];
+    const [t24Lo, t24Hi] = range(24 * H);
+    const [t2Lo, t2Hi] = range(2 * H);
+    const [fbLo, fbHi] = range(-feedbackDelayMs);
+
+    const rows = await this.db
+      .select({ id: appointments.id })
+      .from(appointments)
+      .where(
+        or(
+          and(
+            inArray(appointments.status, REMINDABLE),
+            isNull(appointments.reminderT24At),
+            gte(appointments.scheduledAt, t24Lo),
+            lte(appointments.scheduledAt, t24Hi),
+          ),
+          and(
+            inArray(appointments.status, REMINDABLE),
+            isNull(appointments.reminderT2At),
+            gte(appointments.scheduledAt, t2Lo),
+            lte(appointments.scheduledAt, t2Hi),
+          ),
+          and(
+            inArray(appointments.status, FEEDBACKABLE),
+            isNull(appointments.feedbackCallAt),
+            gte(appointments.scheduledAt, fbLo),
+            lte(appointments.scheduledAt, fbHi),
+          ),
+        ),
+      )
+      .limit(1);
+    return rows.length;
+  }
+
   // Feedback candidates: a visit whose time is at/behind `cutoff` (= now - delay)
   // that hasn't had its post-visit feedback call enqueued yet.
   async findFeedbackCandidates(cutoff: Date, limit: number): Promise<Appointment[]> {

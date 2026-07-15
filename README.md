@@ -358,6 +358,8 @@ Turn row convention: caller turns use `turnIndex * 2`, assistant turns use `turn
 | `EXOTEL_STREAM_SECRET`        | —                            | Optional shared secret for `/exotel-stream` WS endpoint     |
 | `PUBLIC_BASE_URL`             | `http://localhost:4100`      | Used for Exotel status callback URL                         |
 | `WORKER_WAKE_URL`             | —                            | Worker's URL; API pings it on call start / enqueue to wake a spun-down worker |
+| `WORKER_KEEPALIVE_START_HOUR_IST` | `10`                     | Business-hours keep-alive window start (IST) for the worker                 |
+| `WORKER_KEEPALIVE_END_HOUR_IST`   | `18`                     | Window end (IST); set start ≥ end to disable (wake-ahead still runs)         |
 | `CALL_LOCALE_DEFAULT`         | `hi-IN`                      | Fallback locale when none is set on the call                |
 | `LLM_PROVIDER_OVERRIDE`       | —                            | `openrouter` or `auto` (leave blank for auto)               |
 | `GUARDRAIL_SEMANTIC_ENABLED`  | `true`                       | Enable LLM semantic guardrail (set `false` for local demos) |
@@ -638,7 +640,12 @@ The project ships a `render.yaml` for one-click deployment. Both services build 
 
 Both services read from the same Render environment group. Set `PUBLIC_BASE_URL` to the deployed API service URL so Exotel can reach the webhook endpoint at `PUBLIC_BASE_URL/api/webhooks/exotel`.
 
-**Waking the worker on demand.** A BullMQ job in Redis cannot wake a spun-down free-tier worker — only an inbound HTTP request does. Set the API's `WORKER_WAKE_URL` to the worker's URL and the API pings it (throttled, fire-and-forget) whenever it queues work for the worker: a **call starts** (inbound or outbound), **post-call is enqueued** after any call, and an **outbound dial** is enqueued. So the worker cold-starts and drains the queue promptly instead of the job waiting for the next keep-alive tick. This is orthogonal to `WORKER_KEEPALIVE_ENABLED` (periodic self-ping) — use either or both.
+**Waking the worker on demand.** A BullMQ job in Redis cannot wake a spun-down free-tier worker — only an inbound HTTP request does. Set the API's `WORKER_WAKE_URL` to the worker's URL and the always-on API pings it (throttled, fire-and-forget) whenever the worker is needed:
+
+- **Event-driven** (`WorkerWaker`): a **call starts** (inbound or outbound), **post-call is enqueued** after any call, or an **outbound dial** is enqueued → wake the worker so it drains the queue instead of the job waiting.
+- **Time-driven** (`WorkerAvailabilityScheduler`, for the reminder/feedback scheduler): because that scheduler is a `setInterval` *inside* the worker, it only ticks while the worker is awake. So the API (a) **wakes the worker ~5–8 min before any reminder/feedback is due** — at any hour, covering a 9 AM T-2h or 9 PM feedback — and (b) keeps it **warm during business hours** (`WORKER_KEEPALIVE_START_HOUR_IST`–`WORKER_KEEPALIVE_END_HOUR_IST`, default 10–18 IST, one ping ~every 12 min). Outside those hours with nothing imminent, the worker sleeps.
+
+> Note: the keep-alive **must** be API-driven, not the worker's own `WORKER_KEEPALIVE_ENABLED` self-ping — a self-ping can't revive a worker that has already slept (e.g. at 10 AM after an overnight idle). All of this is a no-op when `WORKER_WAKE_URL` is unset or local.
 
 ---
 

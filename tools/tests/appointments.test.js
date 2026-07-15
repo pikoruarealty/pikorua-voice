@@ -16,7 +16,11 @@ const {
   T2_WINDOW_MS,
   MIN_REMINDER_LEAD_MS,
 } = require("../../apps/worker/dist/appointments/appointment-window");
-const { resolveVisitDate, formatIstWhen } = require("../../apps/worker/dist/appointments/visit-date");
+const {
+  resolveVisitDate,
+  formatIstWhen,
+  parseVisitTime,
+} = require("../../apps/worker/dist/appointments/visit-date");
 const { LeadScoreLlmSchema } = require("../../apps/worker/dist/postcall/lead-score.schema");
 
 const HOUR = 60 * 60 * 1000;
@@ -76,6 +80,38 @@ test("resolveVisitDate: gapDays lands on the default 11:00 IST slot", () => {
   assert.equal(d.getUTCMonth(), 6); // July (0-indexed)
   assert.equal(d.getUTCDate(), 16);
   assert.ok(d.getTime() > now.getTime());
+});
+
+// Regression: a REAL production call (2026-07-14) booked "कल तीन बजे" = tomorrow
+// 3 PM. The scorer captured when="tomorrow 3 PM (कल तीन बजे)", but resolveVisitDate
+// ignored `when` and pinned the visit to the default 11:00 slot — so the
+// reconfirmation call would have announced an hour the caller never agreed to.
+test("parseVisitTime: pulls the agreed time out of the scorer's free-text `when`", () => {
+  assert.deepEqual(parseVisitTime("tomorrow 3 PM (कल तीन बजे)"), { hour: 15, minute: 0 });
+  assert.deepEqual(parseVisitTime("5:30 PM"), { hour: 17, minute: 30 });
+  assert.deepEqual(parseVisitTime("11 AM"), { hour: 11, minute: 0 });
+  assert.deepEqual(parseVisitTime("this Sunday, 5pm"), { hour: 17, minute: 0 });
+  // Hindi "N बजे" with no AM/PM: 1–7 means afternoon on a site-visit call...
+  assert.deepEqual(parseVisitTime("कल 3 बजे"), { hour: 15, minute: 0 });
+  assert.deepEqual(parseVisitTime("5 बजे शाम"), { hour: 17, minute: 0 });
+  // ...unless they explicitly said सुबह (morning).
+  assert.deepEqual(parseVisitTime("सुबह 11 बजे"), { hour: 11, minute: 0 });
+  // No usable time / out-of-hours mis-parse -> null (caller falls back to default).
+  assert.equal(parseVisitTime("next week"), null);
+  assert.equal(parseVisitTime("4 BHK"), null); // must NOT read "4" as 4 o'clock
+  assert.equal(parseVisitTime(null), null);
+});
+
+test("resolveVisitDate: honours the agreed time, not the default slot", () => {
+  const d = resolveVisitDate(now, 1, "tomorrow 3 PM (कल तीन बजे)");
+  // 3:00 PM IST == 09:30 UTC.
+  assert.equal(d.getUTCHours(), 9);
+  assert.equal(d.getUTCMinutes(), 30);
+  assert.equal(d.getUTCDate(), 14); // 2026-07-13 IST + 1 day
+  // Falls back to the 11:00 IST default only when `when` carries no time.
+  const fallback = resolveVisitDate(now, 1, "next week");
+  assert.equal(fallback.getUTCHours(), 5);
+  assert.equal(fallback.getUTCMinutes(), 30);
 });
 
 test("resolveVisitDate: returns null for missing / negative / absurd / past gaps", () => {

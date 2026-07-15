@@ -353,7 +353,10 @@ export class PostCallProcessingService {
     if (!sv?.intent) return;
     const phone = this.leadPhone(call);
     if (!phone) return;
-    const scheduledAt = resolveVisitDate(new Date(), sv.gapDays ?? null);
+    // Pass `when` too — it carries the TIME the caller actually agreed to ("3 PM").
+    // gapDays alone would pin every visit to the default slot and make the
+    // reconfirmation call announce an hour the caller never agreed to.
+    const scheduledAt = resolveVisitDate(new Date(), sv.gapDays ?? null, sv.when ?? null);
     if (!scheduledAt) return;
 
     const existing = await this.appointmentRepo.findActiveNear(

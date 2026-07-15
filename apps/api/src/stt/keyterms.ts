@@ -15,7 +15,9 @@
 // call-runtime.service.ts (which is what the model was trained-adjacent to emit).
 export const PROPER_NOUN_KEYTERMS = [
   // Latin — biases English-spoken proper nouns and property terms.
-  "Ambli", "Bopal", "Ambli-Bopal Road", "Iskcon",
+  // Ambli-Bopal is the most-named area and the most-often mis-heard — list it in
+  // every spoken form (hyphenated, spaced, with/without "Road").
+  "Ambli", "Bopal", "Ambli-Bopal Road", "Ambli Bopal Road", "Ambli-Bopal", "Ambli Bopal", "Iskcon",
   "bungalow", "bungalows", "penthouse", "duplex",
   "Sindhu", "Bhavan", "Rajpath", "Rangoli",
   "Thaltej", "Vastrapur", "Nehrunagar", "Vaishnodevi", "Gota",
@@ -23,5 +25,6 @@ export const PROPER_NOUN_KEYTERMS = [
   // Devanagari — biases the same names when spoken inside Hindi (Hinglish callers).
   "वैष्णोदेवी", "थलतेज", "वस्त्रापुर", "नेहरूनगर", "गोता",
   "सिंधु भवन", "राजपथ", "रंगोली", "अंबली", "बोपल",
+  "अंबली बोपल", "अंबली-बोपल", "अंबली बोपल रोड", "अंबली-बोपल रोड",
   "बोडकदेव", "शिलज", "नंदोली", "बंगला",
 ] as const;

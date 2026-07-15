@@ -128,6 +128,24 @@ test("distances speak the number + unit in English in both modes", () => {
   );
 });
 
+test("dates speak the day number in English in both modes", () => {
+  const { normalizeForTts } = require("../../apps/api/dist/tts/elevenlabs.service");
+
+  // "20 July" -> "twenty July" (not the Hindi "बीस July"); बजे time stays Hindi.
+  assert.equal(
+    normalizeForTts("5 July, 11 बजे सुबह — confirm कर रही हूँ।", "hi"),
+    "five July, ग्यारह बजे सुबह — confirm कर रही हूँ।",
+  );
+  assert.equal(normalizeForTts("आपकी visit July 20 को है।", "hi"), "आपकी visit July twenty को है।");
+  // Ordinal suffix drops to a cardinal ("5th July" -> "five July").
+  assert.equal(
+    normalizeForTts("5th July at 11 in the morning.", "en"),
+    "five July at eleven in the morning.",
+  );
+  // A 4-digit year is left as digits, not treated as a day.
+  assert.equal(normalizeForTts("possession July 2026 में है।", "hi"), "possession July 2026 में है।");
+});
+
 test("durations in minutes speak the number in English in both modes", () => {
   const { normalizeForTts } = require("../../apps/api/dist/tts/elevenlabs.service");
 

@@ -378,6 +378,28 @@ function durationsToEnglish(text: string): string {
   });
 }
 
+// Dates read the day number in English in both modes ("20 July" -> "twenty July",
+// "July 5" -> "July five") — the Hindi engine would otherwise say "बीस July". Any
+// ordinal suffix (st/nd/rd/th) is dropped to a cardinal, matching how the day is
+// spoken here. Full month names are listed before abbreviations so "July" matches
+// whole, not just "Jul". A 4-digit year is left as digits (\d{1,2} + \b won't grab it).
+const MONTH_SRC =
+  "(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|July|Jul|Aug|Sept|Sep|Oct|Nov|Dec)";
+const DATE_DAY_MONTH_RE = new RegExp(`\\b(\\d{1,2})(?:st|nd|rd|th)?\\s+(${MONTH_SRC})\\b`, "gi");
+const DATE_MONTH_DAY_RE = new RegExp(`\\b(${MONTH_SRC})\\s+(\\d{1,2})(?:st|nd|rd|th)?\\b`, "gi");
+
+function datesToEnglish(text: string): string {
+  let out = text.replace(
+    DATE_DAY_MONTH_RE,
+    (_m, day, month) => `${englishNumberWords(parseInt(day, 10))} ${month}`,
+  );
+  out = out.replace(
+    DATE_MONTH_DAY_RE,
+    (_m, month, day) => `${month} ${englishNumberWords(parseInt(day, 10))}`,
+  );
+  return out;
+}
+
 // Clock times spoken in English words so they read correctly in Hindi mode too
 // (the Hindi engine reads bare digits like "3:02 PM" in Hindi). "3:02 PM" ->
 // "three oh two PM", "11:30 AM" -> "eleven thirty AM", "3:00 PM" -> "three PM",
@@ -413,6 +435,9 @@ export function normalizeForTts(text: string, languageCode = "hi"): string {
 
   // Durations: "30 minutes" -> "thirty minutes" in every mode (same reasoning).
   out = durationsToEnglish(out);
+
+  // Dates: day number in English in every mode ("20 July" -> "twenty July").
+  out = datesToEnglish(out);
 
   if (hindi) {
     for (const [pattern, replacement] of TTS_RESPELLINGS) {

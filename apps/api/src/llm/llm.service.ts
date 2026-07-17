@@ -24,7 +24,7 @@ export type LlmOptions = {
 // Circuit breaker: after this many consecutive failures a provider is skipped
 // for OPEN_MS so a down provider doesn't add its full timeout to every turn.
 const BREAKER_THRESHOLD = 3;
-const BREAKER_OPEN_MS = 30_000;
+const BREAKER_OPEN_MS = 10_000;
 
 type ProviderHealth = { consecutiveFailures: number; openUntil: number };
 
@@ -44,7 +44,7 @@ export class LlmService {
   // air to the caller. The active per-request cap is OPENROUTER_TIMEOUT_MS; the
   // fallback chain still completes well under the old single-provider timeout.
   private openRouterTimeoutMs(): number {
-    return Number(this.config.get("OPENROUTER_TIMEOUT_MS") ?? 4000);
+    return Number(this.config.get("OPENROUTER_TIMEOUT_MS") ?? 7000);
   }
 
   private breakerOpen(provider: string): boolean {
@@ -157,9 +157,8 @@ export class LlmService {
 
     const attempts: Array<() => Promise<LlmResult | null>> = [];
 
-    // OpenRouter primary (up to 3 attempts), then OpenRouter fallback model
+    // OpenRouter primary (up to 2 attempts), then OpenRouter fallback model
     if (provider === "openrouter" || provider === "auto") {
-      attempts.push(() => this.streamOpenRouter(messages, opts, start, maxTokens, guardedDelta));
       attempts.push(() => this.streamOpenRouter(messages, opts, start, maxTokens, guardedDelta));
       attempts.push(() => this.streamOpenRouter(messages, opts, start, maxTokens, guardedDelta));
       const fallbackModel = this.config.get<string>("OPENROUTER_FALLBACK_MODEL");

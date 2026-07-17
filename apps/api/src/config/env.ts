@@ -93,6 +93,31 @@ export const envSchema = z
     ELEVENLABS_API_KEY: optionalNonEmpty,
     ELEVENLABS_VOICE_ID: optionalNonEmpty,
 
+    // Text-to-Speech · Sarvam (Gujarati ONLY)
+    //
+    // ElevenLabs cannot speak Gujarati in a realtime call — its low-latency
+    // models don't support gu, and the only model that does (eleven_v3) has no
+    // streaming. So gu-IN is voiced by Sarvam Bulbul instead. hi/en never touch
+    // this provider.
+    //
+    // Deliberately NOT required in production: with no key, gu-IN falls back to
+    // the legacy Hindi persona (see TtsRouter.isGujaratiEnabled), which is the
+    // pre-existing behaviour. Gujarati is opt-in, and a missing key must not
+    // block a boot that only serves hi/en.
+    SARVAM_API_KEY: optionalNonEmpty,
+    SARVAM_MODEL: z.string().default("bulbul:v3"),
+    // Maya is a woman — this MUST be a female voice. bulbul:v3 females: ritu,
+    // priya, neha, pooja, simran, kavya, ishita, shreya, roopa, tanya. Which one
+    // best matches her Hindi timbre is a listening decision — run
+    // `node tools/staging/sarvam-tts-smoke.js --audition`. ("anushka" is a v2
+    // voice and is rejected by v3.)
+    SARVAM_SPEAKER: z.string().default("ritu"),
+    // Sarvam's pace range is 0.5–2.0 (1.0 = natural), mirroring ELEVENLABS_SPEED's intent.
+    SARVAM_PACE: z.coerce.number().min(0.5).max(2).default(1.0),
+    // Kill switch for the whole Gujarati persona, independent of the key being
+    // present. Set false to force gu-IN back to Hindi without unsetting the key.
+    SARVAM_TTS_ENABLED: booleanFlag.default(true),
+
     // LLM · OpenRouter
     OPENROUTER_API_KEY: optionalNonEmpty,
     OPENROUTER_MODEL: z.string().default("anthropic/claude-haiku-4-5"),

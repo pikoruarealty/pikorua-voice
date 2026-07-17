@@ -5,6 +5,8 @@ import { DemoVoiceGateway } from "./demo-voice.gateway";
 import { ExotelVoicebotGateway } from "./exotel-voicebot.gateway";
 import { LlmService } from "../llm/llm.service";
 import { ElevenlabsService } from "../tts/elevenlabs.service";
+import { SarvamService } from "../tts/sarvam.service";
+import { TtsRouter } from "../tts/tts-router";
 import { CallRuntimeService } from "./call-runtime.service";
 import {
   CallTurnRepository,
@@ -25,7 +27,12 @@ import { PostCallQueueService } from "../postcall/postcall.queue";
     DemoVoiceGateway,
     ExotelVoicebotGateway,
     LlmService,
+    // ElevenlabsService and SarvamService stay registered as concrete providers,
+    // but nothing injects them directly any more — the call runtime and both
+    // gateways talk to TtsRouter, which picks the engine by language.
     ElevenlabsService,
+    SarvamService,
+    TtsRouter,
     GuardrailService,
     {
       provide: CallTurnRepository,

@@ -1,6 +1,18 @@
 /**
  * Sarvam Bulbul TTS smoke + latency spike.
  *
+ * RESULT (2026-07-17, bulbul:v3, gu-IN @ 8000):
+ *   Format ✔ — WAV, 8000 Hz, mono, 16-bit, 44-byte header, parts=1. Exactly
+ *   Exotel's wire format; stripWavHeader handles it, no resampling needed.
+ *   Latency ✖ — 2.2-4.2s per sentence (REST synthesizes the whole clip before
+ *   responding). ElevenLabs is ~200-400ms. TOO SLOW for the live path.
+ *
+ * CONSEQUENCE: the live per-sentence path uses the WEBSOCKET instead
+ * (SarvamService.synthesizeStream → ~235ms to first audio). See
+ * sarvam-ws-smoke.js. The REST endpoint this script exercises is still used for
+ * getClip/prewarmClips, which are warmed at call start and so not
+ * latency-critical — that is why this script is still worth keeping.
+ *
  * Answers the three questions that gate Gujarati going live:
  *   1. TTFB / total latency per sentence — the turn pipeline assumes ~200-400ms
  *      per sentence from ElevenLabs. If Sarvam is far slower, the Gujarati call
@@ -61,6 +73,23 @@ function inspectWav(buf) {
   return info;
 }
 
+// Female speakers available for bulbul:v3 (the API rejects the rest with a
+// helpful list). Maya is a 28-year-old woman, so the male voices — aditya,
+// ashutosh, rahul, rohan, amit, dev, ratan, varun, manan, sumit, kabir, aayan,
+// shubh, advait, anand, tarun — are not candidates.
+const FEMALE_SPEAKERS = [
+  "ritu",
+  "priya",
+  "neha",
+  "pooja",
+  "simran",
+  "kavya",
+  "ishita",
+  "shreya",
+  "roopa",
+  "tanya",
+];
+
 // Representative Gujarati lines from Maya's actual script — including the
 // code-switched English she really says, since that is the hard part.
 const SAMPLES = [
@@ -110,6 +139,33 @@ async function synth(text, speaker, model) {
   return { ok: true, ttfb, total, raw, parts: json.audios.length };
 }
 
+// Audition every female voice on one representative line so the choice can be
+// made by ear. Maya's voice is a product decision, not a passing assertion.
+async function auditionSpeakers(model) {
+  const line = SAMPLES[0].text;
+  console.log("── Voice audition (female speakers, one line each) ──");
+  const results = [];
+  for (const sp of FEMALE_SPEAKERS) {
+    process.stdout.write(`  ${sp.padEnd(8)} `);
+    try {
+      const r = await synth(line, sp, model);
+      if (!r.ok) {
+        console.log(`✖ HTTP ${r.status} — ${r.detail.slice(0, 90)}`);
+        continue;
+      }
+      const info = inspectWav(r.raw);
+      const file = path.join(OUT_DIR, `voice-${sp}.pcm`);
+      fs.writeFileSync(file, info.pcm);
+      const secs = (info.pcm.length / 2 / 8000).toFixed(1);
+      console.log(`✔ ${String(r.total).padStart(4)}ms  ${secs}s audio  → voice-${sp}.pcm`);
+      results.push({ speaker: sp, ms: r.total });
+    } catch (err) {
+      console.log(`✖ ${err.message}`);
+    }
+  }
+  return results;
+}
+
 async function main() {
   loadEnv();
   if (!process.env.SARVAM_API_KEY) {
@@ -117,11 +173,19 @@ async function main() {
     console.error("This spike cannot run without a key — Gujarati TTS is blocked on it.");
     process.exit(2);
   }
-  const speaker = process.env.SARVAM_SPEAKER || "anushka";
   const model = process.env.SARVAM_MODEL || "bulbul:v3";
+  // Default to a valid bulbul:v3 female voice. "anushka" is NOT valid for v3 —
+  // the API rejects it with a list of the ones that are.
+  const speaker = process.env.SARVAM_SPEAKER || "ritu";
   fs.mkdirSync(OUT_DIR, { recursive: true });
 
   console.log(`Sarvam Bulbul smoke — model=${model} speaker=${speaker} lang=gu-IN rate=8000\n`);
+
+  if (process.argv.includes("--audition")) {
+    await auditionSpeakers(model);
+    console.log(`\nListen and pick one, then set SARVAM_SPEAKER:`);
+    console.log(`  ffplay -f s16le -ar 8000 -ac 1 ${path.join(OUT_DIR, "voice-ritu.pcm")}\n`);
+  }
 
   let failed = 0;
   const latencies = [];
@@ -175,11 +239,13 @@ async function main() {
     const max = Math.max(...latencies);
     console.log(`\nLatency: avg=${avg}ms max=${max}ms  (ElevenLabs per-sentence TTFB ~200-400ms)`);
     if (max > 1500) {
-      console.log("⚠ VERDICT: too slow for per-sentence synthesis — use Sarvam's WS/HTTP streaming.");
-    } else if (max > 800) {
-      console.log("⚠ VERDICT: usable but noticeably slower than ElevenLabs — expect a laggier turn.");
+      console.log(
+        "⚠ REST is too slow for the live path — as expected. This is why the live path uses\n" +
+          "  the WebSocket (see sarvam-ws-smoke.js / SarvamService.synthesizeStream, ~235ms TTFB).\n" +
+          "  REST is only used for getClip/prewarmClips, which are warmed at call start.",
+      );
     } else {
-      console.log("✔ VERDICT: latency is in the workable range for per-sentence synthesis.");
+      console.log("✔ REST latency is in the workable range.");
     }
   }
 

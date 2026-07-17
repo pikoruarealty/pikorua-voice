@@ -8,7 +8,7 @@ import {
 import type { Redis } from "ioredis";
 import { DeepgramService } from "../stt/deepgram.service";
 import { LlmService, type LlmMessage, type LlmResult } from "../llm/llm.service";
-import { ElevenlabsService } from "../tts/elevenlabs.service";
+import { TtsRouter } from "../tts/tts-router";
 import { GuardrailService, type GuardrailResult } from "../llm/guardrail.service";
 import { LlmResponseSchema } from "../llm/llm-response.schema";
 import {
@@ -302,7 +302,7 @@ export class CallRuntimeService implements OnApplicationShutdown {
   constructor(
     private readonly stt: DeepgramService,
     private readonly llm: LlmService,
-    private readonly tts: ElevenlabsService,
+    private readonly tts: TtsRouter,
     private readonly guardrail: GuardrailService,
     @Inject(CallTurnRepository) private readonly turnRepo: CallTurnRepository,
     @Inject(CallRepository) private readonly callRepo: CallRepository,
@@ -360,8 +360,18 @@ export class CallRuntimeService implements OnApplicationShutdown {
   // Which persona this call runs in. Replaces the old isHinglishLocale(), which
   // treated gu as an alias for hi. See i18n/lang-mode.ts for why non-hi/gu
   // locales (ta/te/mr) resolve to "en".
+  //
+  // THE GUJARATI GATE: when Sarvam isn't configured, gu deliberately collapses
+  // back to the LEGACY Hindi alias. ElevenLabs cannot voice Gujarati, so serving
+  // the Gujarati persona without a Gujarati engine would give the caller a
+  // broken call; falling back gives them the same (wrong-language but working)
+  // Hindi call they get today. The prompt, greeting, normalizer and voice all
+  // read this one function, so they can never disagree about which language the
+  // call is in.
   private langMode(locale: string): LangMode {
-    return resolveLangMode(locale);
+    const mode = resolveLangMode(locale);
+    if (mode === "gu" && !this.tts.isGujaratiEnabled()) return "hi";
+    return mode;
   }
 
   private byMode<T>(locale: string, choices: Record<LangMode, T>): T {
@@ -375,7 +385,12 @@ export class CallRuntimeService implements OnApplicationShutdown {
   // switch the regional locales from Hindi phonetics to English.
   private ttsLanguageCode(locale: string): string | undefined {
     const l = locale.toLowerCase();
-    if (l.startsWith("gu")) return "gu"; // routes to the Gujarati TTS provider
+    // Gated on langMode, not the raw locale: if Gujarati is disabled this must
+    // return undefined (→ ELEVENLABS_LANGUAGE_CODE, i.e. hi) so the voice matches
+    // the Hindi persona langMode() just fell back to. Returning "gu" here while
+    // the prompt speaks Hindi would send an unsupported language_code to
+    // ElevenLabs and break the call.
+    if (l.startsWith("gu")) return this.langMode(locale) === "gu" ? "gu" : undefined;
     return l.startsWith("en") ? "en" : undefined;
   }
 
@@ -388,7 +403,11 @@ export class CallRuntimeService implements OnApplicationShutdown {
   // the old Latin check running first it would have been mis-tagged "en" and read
   // with English phonetics.
   private replyLanguageCode(text: string, locale: string): string | undefined {
-    if (hasGujarati(text)) return "gu"; // has Gujarati → Gujarati mode
+    // Gated for the same reason as ttsLanguageCode: with Gujarati disabled the
+    // prompt is Hindi, so Gujarati text should not appear — but if it somehow
+    // does, routing it to a "gu" code we can't voice is worse than reading it
+    // with the Hindi engine.
+    if (hasGujarati(text) && this.langMode(locale) === "gu") return "gu";
     if (hasDevanagari(text)) return undefined; // has Devanagari → Hindi mode
     if (/[a-zA-Z]/.test(text)) return "en"; // Latin script only → English mode
     return this.ttsLanguageCode(locale);
@@ -2057,7 +2076,14 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
     // of one HTTP call per sentence. Sentences are dispatched as text frames;
     // ElevenLabs pipelines them so the next sentence starts generating while the
     // previous is still playing. Controlled by TTS_WS_STREAMING_ENABLED env var.
-    const useWsStreaming = this.config.get<boolean>("TTS_WS_STREAMING_ENABLED") === true;
+    // Gujarati is excluded: WS input-streaming is an ElevenLabs capability and
+    // Sarvam's WebSocket API is not implemented, so a gu turn must take the
+    // HTTP-per-sentence path. Without this guard a gu call with
+    // TTS_WS_STREAMING_ENABLED=true would open an ElevenLabs WS and feed it
+    // Gujarati text it cannot speak.
+    const useWsStreaming =
+      this.config.get<boolean>("TTS_WS_STREAMING_ENABLED") === true &&
+      this.langMode(locale) !== "gu";
     let wsSession: ReturnType<typeof this.tts.openWsSession> | null = null;
     let resolveWsDone: () => void = () => {};
     const wsAudioDone: Promise<void> | null = useWsStreaming

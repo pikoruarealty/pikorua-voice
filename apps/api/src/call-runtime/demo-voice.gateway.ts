@@ -5,7 +5,7 @@ import type { IncomingMessage } from "http";
 import { ConfigService } from "@nestjs/config";
 import { type LiveSession } from "../stt/deepgram-live.service";
 import { DeepgramLiveService } from "../stt/deepgram-live.service";
-import { ElevenlabsService } from "../tts/elevenlabs.service";
+import { TtsRouter } from "../tts/tts-router";
 import { CallRuntimeService, type PreStreamedData } from "./call-runtime.service";
 import { closeUnauthorized, isWebSocketAuthorized } from "../auth/ws-auth";
 
@@ -64,7 +64,7 @@ export class DemoVoiceGateway implements OnGatewayConnection, OnGatewayDisconnec
 
   constructor(
     private readonly deepgramLive: DeepgramLiveService,
-    private readonly tts: ElevenlabsService,
+    private readonly tts: TtsRouter,
     private readonly runtime: CallRuntimeService,
     private readonly config: ConfigService,
   ) {}

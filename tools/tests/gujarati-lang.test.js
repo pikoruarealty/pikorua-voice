@@ -19,6 +19,10 @@
  */
 const assert = require("node:assert/strict");
 const test = require("node:test");
+const fs = require("node:fs");
+const path = require("node:path");
+
+const read = (p) => fs.readFileSync(path.join(__dirname, "..", "..", p), "utf8");
 
 const DEVANAGARI = /[ऀ-ॿ]/;
 const GUJARATI = /[઀-૿]/;
@@ -151,6 +155,132 @@ test("the internal-pricing backstop is script-independent (fires on Gujarati tex
     "તમે roughly કયા budget માં comfortable છો? જેમ કે 3 કરોડ, 5 કરોડ, કે 10 કરોડ.",
   );
   assert.equal(safe.triggered, false, "spoken tiers must not trigger the backstop");
+});
+
+// ─── TTS routing ─────────────────────────────────────────────────────────────
+
+test("TtsRouter and both providers are registered in CallRuntimeModule", () => {
+  // A missing provider here is a boot-time DI failure that no unit test catches.
+  const src = read("apps/api/src/call-runtime/call-runtime.module.ts");
+  for (const provider of ["TtsRouter", "SarvamService", "ElevenlabsService"]) {
+    assert.match(src, new RegExp(`\\b${provider}\\b`), `${provider} must be a provider`);
+  }
+});
+
+test("nothing injects a concrete TTS provider directly — all go through TtsRouter", () => {
+  // The router is only load-bearing if every consumer actually uses it. An
+  // injection of ElevenlabsService would silently bypass Gujarati routing.
+  for (const file of [
+    "apps/api/src/call-runtime/call-runtime.service.ts",
+    "apps/api/src/call-runtime/exotel-voicebot.gateway.ts",
+    "apps/api/src/call-runtime/demo-voice.gateway.ts",
+  ]) {
+    const src = read(file);
+    assert.match(src, /tts:\s*TtsRouter/, `${file} must inject TtsRouter`);
+    assert.doesNotMatch(
+      src,
+      /tts:\s*(ElevenlabsService|SarvamService)/,
+      `${file} must not inject a concrete TTS provider`,
+    );
+  }
+});
+
+test("Gujarati turns never open an ElevenLabs WS session", () => {
+  // Sarvam has no WS implementation, so a gu turn must take the HTTP path.
+  // Without this guard, TTS_WS_STREAMING_ENABLED=true would feed Gujarati text
+  // to an ElevenLabs WS that cannot speak it.
+  const src = read("apps/api/src/call-runtime/call-runtime.service.ts");
+  assert.match(
+    src,
+    /TTS_WS_STREAMING_ENABLED[\s\S]{0,200}?langMode\(locale\)\s*!==\s*"gu"/,
+    "useWsStreaming must exclude the gu mode",
+  );
+});
+
+function makeRouter(env = {}) {
+  const { TtsRouter } = require("../../apps/api/dist/tts/tts-router");
+  const calls = { elevenlabs: [], sarvam: [] };
+  const fakeEleven = {
+    synthesize: async (t) => (calls.elevenlabs.push(t), { audio: Buffer.alloc(2), ttsMs: 1 }),
+    synthesizeStream: async (t) => (calls.elevenlabs.push(t), { ttsMs: 1, ttfbMs: 1, bytes: 2 }),
+    getClip: async (t) => (calls.elevenlabs.push(t), Buffer.alloc(2)),
+    prewarmClips: (ts) => calls.elevenlabs.push(...ts),
+  };
+  const fakeSarvam = {
+    isConfigured: () => Boolean(env.SARVAM_API_KEY),
+    synthesize: async (t) => (calls.sarvam.push(t), { audio: Buffer.alloc(2), ttsMs: 1 }),
+    synthesizeStream: async (t) => (calls.sarvam.push(t), { ttsMs: 1, ttfbMs: 1, bytes: 2 }),
+    getClip: async (t) => (calls.sarvam.push(t), Buffer.alloc(2)),
+    prewarmClips: (ts) => calls.sarvam.push(...ts),
+  };
+  const config = { get: (k) => env[k] };
+  return { router: new TtsRouter(fakeEleven, fakeSarvam, config), calls };
+}
+
+test("router sends Gujarati to Sarvam and everything else to ElevenLabs", async () => {
+  const { router, calls } = makeRouter({ SARVAM_API_KEY: "sk-test" });
+
+  await router.synthesize("ગુજરાતી", { languageCode: "gu" });
+  await router.synthesize("हिंदी", { languageCode: undefined });
+  await router.synthesize("English", { languageCode: "en" });
+
+  assert.deepEqual(calls.sarvam, ["ગુજરાતી"]);
+  assert.deepEqual(calls.elevenlabs, ["हिंदी", "English"]);
+});
+
+test("router: an English reply on a gu call still goes to ElevenLabs", async () => {
+  // replyLanguageCode picks the code from the REPLY's script, so if the caller
+  // switches to English mid-call Maya's English answer must not go to the
+  // Gujarati engine.
+  const { router, calls } = makeRouter({ SARVAM_API_KEY: "sk-test" });
+  await router.synthesize("Certainly, which budget?", { languageCode: "en" });
+  assert.deepEqual(calls.sarvam, []);
+  assert.equal(calls.elevenlabs.length, 1);
+});
+
+test("KILL SWITCH: no SARVAM_API_KEY disables Gujarati entirely", async () => {
+  // The deploy-safety property. With no key, ElevenLabs cannot voice Gujarati —
+  // so the whole persona must collapse back to the legacy Hindi alias rather
+  // than send an unsupported language_code and break the call.
+  const { router, calls } = makeRouter({});
+
+  assert.equal(router.isGujaratiEnabled(), false);
+
+  // Even an explicit gu request must NOT reach Sarvam (it isn't configured) and
+  // must fall through to ElevenLabs.
+  await router.synthesize("ગુજરાતી", { languageCode: "gu" });
+  assert.deepEqual(calls.sarvam, [], "must not call an unconfigured Sarvam");
+  assert.equal(calls.elevenlabs.length, 1);
+});
+
+test("KILL SWITCH: SARVAM_TTS_ENABLED=false disables Gujarati even with a key", async () => {
+  const { router, calls } = makeRouter({ SARVAM_API_KEY: "sk-test", SARVAM_TTS_ENABLED: false });
+
+  assert.equal(router.isGujaratiEnabled(), false);
+  await router.synthesize("ગુજરાતી", { languageCode: "gu" });
+  assert.deepEqual(calls.sarvam, []);
+  assert.equal(calls.elevenlabs.length, 1);
+});
+
+test("router: Gujarati enabled only when key present and not disabled", () => {
+  assert.equal(makeRouter({ SARVAM_API_KEY: "sk-test" }).router.isGujaratiEnabled(), true);
+  assert.equal(
+    makeRouter({ SARVAM_API_KEY: "sk-test", SARVAM_TTS_ENABLED: true }).router.isGujaratiEnabled(),
+    true,
+  );
+  assert.equal(makeRouter({}).router.isGujaratiEnabled(), false);
+});
+
+test("router routes clips and prewarm by language too", async () => {
+  const { router, calls } = makeRouter({ SARVAM_API_KEY: "sk-test" });
+
+  await router.getClip("સમજી ગઈ.", { languageCode: "gu" });
+  await router.getClip("Perfect.", { languageCode: "en" });
+  router.prewarmClips(["હા, બિલકુલ."], { languageCode: "gu" });
+  router.prewarmClips(["Certainly."], { languageCode: "en" });
+
+  assert.deepEqual(calls.sarvam, ["સમજી ગઈ.", "હા, બિલકુલ."]);
+  assert.deepEqual(calls.elevenlabs, ["Perfect.", "Certainly."]);
 });
 
 // Builds a minimal WAV around `pcm`, optionally with an extra chunk before

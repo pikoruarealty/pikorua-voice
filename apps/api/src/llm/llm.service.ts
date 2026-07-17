@@ -41,10 +41,18 @@ export class LlmService {
   constructor(private readonly config: ConfigService) {}
 
   // Voice turns must fail fast: a slow provider is indistinguishable from dead
-  // air to the caller. The active per-request cap is OPENROUTER_TIMEOUT_MS; the
-  // fallback chain still completes well under the old single-provider timeout.
+  // air to the caller. The active per-request cap is OPENROUTER_TIMEOUT_MS, whose
+  // default lives in the env schema (config/env.ts) — the only source of truth, so
+  // the literal here is just a NaN guard and must stay in step with it.
+  //
+  // INVARIANT: attempts × OPENROUTER_TIMEOUT_MS ≤ TURN_TIMEOUT_MS. generateStream
+  // runs up to 3 serial attempts (2 primary + 1 fallback model), so a per-request
+  // cap above TURN_TIMEOUT_MS / 3 means the turn watchdog kills the turn before the
+  // fallback model is ever tried — the chain silently stops being a fallback chain.
+  // Defaults (4000 × 3 = 12000 = TURN_TIMEOUT_MS) and prod (5000 × 3 = 15000 <
+  // 18000) both hold. Raise this only alongside TURN_TIMEOUT_MS.
   private openRouterTimeoutMs(): number {
-    return Number(this.config.get("OPENROUTER_TIMEOUT_MS") ?? 7000);
+    return Number(this.config.get("OPENROUTER_TIMEOUT_MS") ?? 4000);
   }
 
   private breakerOpen(provider: string): boolean {

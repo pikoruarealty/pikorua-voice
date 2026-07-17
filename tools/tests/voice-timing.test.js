@@ -1,0 +1,151 @@
+/**
+ * Voice-path timing invariants.
+ *
+ * These guard COUPLINGS between constants that live in different files and have no
+ * compile-time link — the kind that silently break a live call and never fail a
+ * type-check. Each test states the invariant and the failure it prevents.
+ *
+ * Run with: node --test tools/tests/voice-timing.test.js
+ */
+const assert = require("node:assert/strict");
+const test = require("node:test");
+const fs = require("node:fs");
+const path = require("node:path");
+
+const read = (rel) => fs.readFileSync(path.resolve(__dirname, "../../", rel), "utf8");
+
+const GATEWAY = "apps/api/src/call-runtime/exotel-voicebot.gateway.ts";
+const DEEPGRAM = "apps/api/src/stt/deepgram-live.service.ts";
+const LLM = "apps/api/src/llm/llm.service.ts";
+const ENV = "apps/api/src/config/env.ts";
+
+// Pull the numeric default out of `agcNumber(process.env.NAME, <default>)`.
+const agcDefault = (src, name) => {
+  const m = src.match(new RegExp(`agcNumber\\(process\\.env\\.${name},\\s*([\\d.]+)\\)`));
+  assert.ok(m, `${name} must be read via agcNumber() with a numeric default`);
+  return Number(m[1]);
+};
+
+// Pull the numeric default out of `NAME: z.coerce.number()....default(<n>)`.
+const envDefault = (src, name) => {
+  const m = src.match(new RegExp(`${name}:[^\\n]*\\.default\\((\\d+)\\)`));
+  assert.ok(m, `${name} must have a numeric .default() in the env schema`);
+  return Number(m[1]);
+};
+
+// The near-end gate is consulted when the FINAL transcript lands, not when the
+// caller actually spoke. Deepgram finalizes either via speech_final (fast) or, when
+// speech_final never fires — noisy lines, exactly when this gate matters most — via
+// the UtteranceEnd fallback at utterance_end_ms. If the hold expires before that
+// fallback arrives, a REAL caller utterance carries no "near-end" flag, enqueueTurn
+// classifies it as echo, and drops it: Maya goes deaf mid-call.
+test("near-end hold outlasts Deepgram's utterance_end_ms fallback boundary", () => {
+  const holdMs = agcDefault(read(GATEWAY), "STT_NEAR_END_HOLD_MS");
+
+  const dg = read(DEEPGRAM);
+  const m = dg.match(/utterance_end_ms:\s*"(\d+)"/);
+  assert.ok(m, "deepgram-live must set utterance_end_ms");
+  const utteranceEndMs = Number(m[1]);
+
+  assert.ok(
+    holdMs > utteranceEndMs,
+    `NEAR_END_HOLD_MS (${holdMs}) must exceed utterance_end_ms (${utteranceEndMs}), ` +
+      `or an UtteranceEnd-finalized utterance is dropped as echo while Maya is audible`,
+  );
+});
+
+// The echo gate must reject on ENERGY, never on the transcript text: echo is real
+// words, so any text-based filter passes it straight through.
+test("echo rejection is gated on near-end energy while Maya is audible", () => {
+  const src = read(GATEWAY);
+  // Energy is measured on the RAW frame — the boost must not inflate it.
+  assert.match(src, /this\.updateNearEnd\(state,\s*frameRms\(pcm\)\)/);
+  assert.match(
+    src,
+    /this\.isMayaAudible\(state\)\s*&&\s*!this\.nearEndSpeaking\(state\)/,
+    "enqueueTurn must drop transcripts with no near-end energy while Maya is audible",
+  );
+  // Barge-in requires near-end too, else her own amplified echo stops her.
+  assert.match(src, /this\.nearEndSpeaking\(state\)\s*&&/);
+});
+
+// The callee can reject/hang up DURING the outbound greeting hold. The stream ends
+// while the socket can still be OPEN, so the readyState guard alone lets the timer
+// fire: it greets a dead call and opens an STT session nothing owns (billed, closed
+// only whenever the socket eventually closes).
+test("outbound greeting hold is cancelled on stop and on disconnect", () => {
+  const src = read(GATEWAY);
+
+  assert.match(
+    src,
+    /state\.greetingTimer\s*=\s*setTimeout\(startConversation/,
+    "the greeting hold timer must be tracked on the session, not fire-and-forget",
+  );
+  assert.match(src, /private clearGreetingTimer\(state: SessionState\)/);
+
+  // Cancelled on the stream's `stop` event...
+  const stopCase = src.slice(src.indexOf('case "stop":'), src.indexOf('case "stop":') + 400);
+  assert.match(stopCase, /this\.clearGreetingTimer\(state\)/, "`stop` must cancel the hold");
+
+  // ...and on socket teardown.
+  const disconnect = src.slice(
+    src.indexOf("handleDisconnect(client: WebSocket)"),
+    src.indexOf("handleDisconnect(client: WebSocket)") + 400,
+  );
+  assert.match(disconnect, /this\.clearGreetingTimer\(state\)/, "disconnect must cancel the hold");
+});
+
+// Only OUTBOUND calls are held — an inbound caller is already on the line, so any
+// hold there is pure dead air on the one path where the human speaks first.
+test("greeting hold applies to outbound calls only", () => {
+  const src = read(GATEWAY);
+  assert.match(src, /state\.isOutbound\s*&&\s*OUTBOUND_GREETING_DELAY_MS\s*>\s*0/);
+  assert.match(
+    src,
+    /state\.isOutbound\s*=\s*true/,
+    "outbound must be flagged from the start event",
+  );
+  assert.match(
+    src,
+    /state\.isOutbound\s*=\s*call\.direction\s*===\s*"outbound"/,
+    "a callSid-resolved row must take direction from the DB row",
+  );
+});
+
+// generateStream runs its attempts SERIALLY, all inside one turn watchdog. If the
+// per-request cap exceeds TURN_TIMEOUT_MS / attempts, the watchdog kills the turn
+// before the fallback model is ever tried — the chain stops being a fallback chain
+// exactly when the primary is already failing.
+test("LLM attempt chain fits inside the turn watchdog", () => {
+  const llm = read(LLM);
+  const env = read(ENV);
+
+  const attempts = (llm.match(/attempts\.push\(/g) ?? []).length;
+  assert.ok(attempts >= 2, "expected a multi-attempt fallback chain");
+
+  const perRequestMs = envDefault(env, "OPENROUTER_TIMEOUT_MS");
+  const turnMs = envDefault(env, "TURN_TIMEOUT_MS");
+
+  assert.ok(
+    attempts * perRequestMs <= turnMs,
+    `${attempts} attempts × OPENROUTER_TIMEOUT_MS (${perRequestMs}) = ${attempts * perRequestMs}ms ` +
+      `exceeds TURN_TIMEOUT_MS (${turnMs}) — the fallback model would never be reached`,
+  );
+});
+
+// The env schema's .default() ALWAYS supplies a value, so a differing `?? N`
+// literal in the service is unreachable — a lie that reads as the real default.
+test("LLM timeout fallback literal matches the env schema default", () => {
+  const llm = read(LLM);
+  const env = read(ENV);
+
+  const m = llm.match(/this\.config\.get\("OPENROUTER_TIMEOUT_MS"\)\s*\?\?\s*(\d+)/);
+  assert.ok(m, "openRouterTimeoutMs must read OPENROUTER_TIMEOUT_MS with a numeric guard");
+
+  assert.equal(
+    Number(m[1]),
+    envDefault(env, "OPENROUTER_TIMEOUT_MS"),
+    "the ?? literal is unreachable (zod .default() always fills the value) — " +
+      "keep it equal to the schema default so it can't misrepresent it",
+  );
+});

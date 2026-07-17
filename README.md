@@ -208,7 +208,11 @@ After a short acknowledgment ("haan", "ok") `utterance_end_ms` is tightened to *
 
 The session reconnects up to 3 times with exponential backoff (300 → 600 → 1200 ms) on unexpected close. Audio buffers during reconnect (up to 200 chunks / ~20 s).
 
-**Inbound AGC** (telephony path only): on the Exotel gateway a soft-spoken caller arrives as low-amplitude PCM, which degrades Deepgram's VAD and ASR (missed/dropped words). `InboundAgc` lifts each inbound frame toward `STT_INBOUND_AGC_TARGET_RMS` **before** the audio reaches STT — boost-only, noise-gated (`STT_INBOUND_AGC_NOISE_GATE_RMS`), and peak-limited (`STT_INBOUND_AGC_PEAK_CEILING`) so the boosted signal can never clip. It is applied **only while Maya is not audible**, so her own echo on the caller's line is never amplified into a false barge-in. Disable with `STT_INBOUND_AGC=0`.
+**Inbound AGC** (telephony path only): on the Exotel gateway a soft-spoken caller arrives as low-amplitude PCM, which degrades Deepgram's VAD and ASR (missed/dropped words). `InboundAgc` lifts each inbound frame toward `STT_INBOUND_AGC_TARGET_RMS` **before** the audio reaches STT — boost-only, noise-gated (`STT_INBOUND_AGC_NOISE_GATE_RMS`), and peak-limited (`STT_INBOUND_AGC_PEAK_CEILING`) so the boosted signal can never clip. It is applied **at all times**, including while Maya speaks: gating it on her silence left a soft caller unheard during her turn and its tail, so the loudest thing on the line won. Disable with `STT_INBOUND_AGC=0`.
+
+**Near-end (double-talk) detection**: amplifying at all times means her own echo (the line has no carrier echo-cancellation) and room background get boosted too, so echo must be rejected on **energy**, not text — echo is real words, so no text filter can catch it. Each raw frame's RMS (measured **before** the boost) is compared against the line's own adaptive noise floor: the floor falls fast toward the quiet baseline and rises slowly toward sustained background, so a real caller — even a soft one — stands `STT_NEAR_END_MARGIN`× above it while echo and steady chatter sit at it. `STT_NEAR_END_MIN_RMS` is an absolute guard so a near-silent line's tiny floor can't accept hiss. While Maya is audible, both barge-in and turn acceptance require near-end speech; while she is silent nothing is rejected, so that path stays fully sensitive.
+
+> `STT_NEAR_END_HOLD_MS` (1500) **must stay above** `utterance_end_ms` (1000). The gate is consulted when the **final transcript lands**, not when the caller spoke, and Deepgram falls back to `UtteranceEnd` at 1000 ms whenever `speech_final` never fires (noisy lines — exactly when the gate matters). A shorter hold makes a genuine utterance look like echo and drops it: Maya goes deaf mid-call. Guarded by `tools/tests/voice-timing.test.js`.
 
 ---
 
@@ -216,11 +220,13 @@ The session reconnects up to 3 times with exponential backoff (300 → 600 → 1
 
 `LlmService.generateStream` sends streaming SSE to OpenRouter:
 
-1. Up to **3 attempts** on the primary model (`OPENROUTER_MODEL`, default `anthropic/claude-haiku-4-5`)
+1. Up to **2 attempts** on the primary model (`OPENROUTER_MODEL`, default `anthropic/claude-haiku-4-5`)
 2. One attempt on `OPENROUTER_FALLBACK_MODEL` if configured
-3. Circuit breaker: after 3 consecutive failures a provider is skipped for 30 s
+3. Circuit breaker: after 3 consecutive failures a provider is skipped for 10 s
 
 A per-turn watchdog (`TURN_TIMEOUT_MS`, default 12 s) aborts in-flight provider calls if the whole turn overruns.
+
+> **Invariant:** attempts × `OPENROUTER_TIMEOUT_MS` ≤ `TURN_TIMEOUT_MS`. The attempts run **serially inside one watchdog**, so a per-request cap above `TURN_TIMEOUT_MS / 3` means the watchdog kills the turn before the fallback model is ever tried — the chain stops being a fallback chain exactly when the primary is already failing. Defaults (4000 × 3 = 12 s) and prod (5000 × 3 = 15 s < 18 s) both hold. Raise `OPENROUTER_TIMEOUT_MS` only alongside `TURN_TIMEOUT_MS`. Guarded by `tools/tests/voice-timing.test.js`.
 
 **Prompt caching**: the static system prompt (Maya persona + full inventory, ~15k tokens) is marked with an Anthropic `cache_control` ephemeral breakpoint (via OpenRouter, Claude models only), so Anthropic reuses the already-processed prefix on later turns within its ~5-min TTL — cutting time-to-first-token and ~90% of the input-token cost. The breakpoint sits **only** on the static prefix; conversation history follows it and stays uncached. The stream logs `cachedRead=…` so cache hits are visible in production.
 
@@ -290,13 +296,15 @@ The property inventory (14 rows, 5 Ahmedabad micro-markets) is embedded in the s
 
 ## Barge-in
 
-Server-authoritative barge-in: when `onPartial` fires with ≥ `BARGE_IN_MIN_CHARS` (3) characters while the bot is speaking:
+Server-authoritative barge-in: when `onPartial` fires with ≥ `BARGE_IN_MIN_CHARS` (3) characters **and** the near-end detector confirms genuine caller energy while the bot is speaking:
 
 1. `state.active.controller.abort()` — cancels in-flight LLM/TTS
 2. `send({ event: "clear" })` — tells Exotel to drop its audio queue
 3. `state.speaking = false` — resets the flag
 
-The 3-char floor filters 1–2 char echo/noise blips (the caller's line carries Maya's own audio back, un-cancelled) while still catching short interjections (`हाँ`, `रुको`, `stop`, `नहीं`). A fully-formed utterance also triggers a commit-path barge-in even when no partial did, and `isMayaAudible` includes the paced-sender tail so a late interruption during audio playout is not missed.
+The 3-char floor filters 1–2 char noise blips while still catching short interjections (`हाँ`, `रुको`, `stop`, `नहीं`). The near-end requirement is what makes the always-on inbound boost safe: Maya's amplified echo produces real transcripts but carries no near-end energy, so it can neither stop her nor queue a phantom turn. A fully-formed utterance also triggers a commit-path barge-in even when no partial did, and `isMayaAudible` includes the paced-sender tail so a late interruption during audio playout is not missed.
+
+**Outbound greeting hold**: Exotel bridges the callee's media leg a beat *after* the Voicebot `start` fires, so greeting audio sent in that gap is dropped and the callee hears only the tail of Maya's intro. Outbound calls therefore hold the greeting **and** STT for `OUTBOUND_GREETING_DELAY_MS` (5 s); inbound calls — where the caller is already on the line — are never held. The hold is cancelled on `stop`/disconnect, so a callee who rejects inside the window is never greeted into a dead stream (which would also leak a billed STT session).
 
 The `finally` block of every `runTurn`/`processUtteranceStream` path unconditionally resets `state.speaking = false`, so a failed or interrupted turn never leaves the flag permanently armed.
 
@@ -377,6 +385,10 @@ Turn row convention: caller turns use `turnIndex * 2`, assistant turns use `turn
 | `STT_INBOUND_AGC_MAX_GAIN`    | `12`                         | Max boost factor (caps amplification of a near-silent line) |
 | `STT_INBOUND_AGC_PEAK_CEILING`| `29000`                      | Peak the boosted signal must never exceed (no-clip limit)   |
 | `STT_INBOUND_AGC_NOISE_GATE_RMS` | `55`                      | Frames quieter than this RMS are held near 1× (hiss gate)   |
+| `STT_NEAR_END_MARGIN`         | `2.2`                        | How far above the noise floor (×) counts as caller speech   |
+| `STT_NEAR_END_MIN_RMS`        | `70`                         | Absolute near-end guard (stops hiss on a near-silent line)  |
+| `STT_NEAR_END_HOLD_MS`        | `1500`                       | Near-end hold; **must exceed** `utterance_end_ms` (1000)    |
+| `OUTBOUND_GREETING_DELAY_MS`  | `5000`                       | Outbound-only greeting hold; `0` disables                   |
 | `ELEVENLABS_API_KEY`          | required (prod)              |                                                             |
 | `ELEVENLABS_VOICE_ID`         | required (prod)              | Indian multilingual voice ID                                |
 | `ELEVENLABS_STABILITY`        | `0.55`                       | Voice stability (0–1)                                       |

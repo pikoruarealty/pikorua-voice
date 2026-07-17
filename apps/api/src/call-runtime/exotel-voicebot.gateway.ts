@@ -142,7 +142,17 @@ const NEAR_END_MARGIN = agcNumber(process.env.STT_NEAR_END_MARGIN, 2.2);
 const NEAR_END_MIN_RMS = agcNumber(process.env.STT_NEAR_END_MIN_RMS, 70);
 // Hold near-end "speaking" this long after the last loud frame, bridging inter-word
 // gaps and the skew between audio and Deepgram's transcript callbacks.
-const NEAR_END_HOLD_MS = agcNumber(process.env.STT_NEAR_END_HOLD_MS, 600);
+// MUST outlast the STT's own worst-case utterance boundary, because enqueueTurn
+// consults this hold when the FINAL transcript lands — not when the caller spoke.
+// Deepgram finalizes via speech_final (endpointing=250ms, the common path) or, when
+// speech_final never fires (noisy lines — exactly when this gate matters most), via
+// the UtteranceEnd fallback at utterance_end_ms=1000ms. A hold shorter than that
+// fallback + network makes a genuine caller utterance look like echo and get
+// dropped, i.e. Maya goes deaf mid-call. 1500ms covers the 1000ms fallback with
+// margin. Keep this ABOVE utterance_end_ms in deepgram-live.service.ts if either
+// value is retuned. (Raising it does not weaken echo rejection: echo carries no
+// near-end energy at all, so it never opens this window in the first place.)
+const NEAR_END_HOLD_MS = agcNumber(process.env.STT_NEAR_END_HOLD_MS, 1500);
 
 // Raw RMS of a 16-bit LE PCM frame. Cheap single pass; used for the near-end
 // detector on the pre-AGC signal so the boost can't inflate the measurement.
@@ -327,6 +337,9 @@ type SessionState = {
   // (see OUTBOUND_GREETING_DELAY_MS) so Maya doesn't speak before the callee's
   // media path is up. Inbound calls stay false.
   isOutbound: boolean;
+  // Pending outbound greeting-hold timer, so a callee who rejects/hangs up during
+  // the hold cancels it instead of being greeted into a dead stream.
+  greetingTimer: ReturnType<typeof setTimeout> | null;
   // Guards finalizeCall so post-call is enqueued at most once per session.
   finalized: boolean;
   // Wall-clock start, for a best-effort durationSeconds on gateway-owned calls.
@@ -395,6 +408,7 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
       hasDbRow: false,
       gatewayCreatedRow: false,
       isOutbound: false,
+      greetingTimer: null,
       finalized: false,
       startedAtMs: Date.now(),
     };
@@ -414,6 +428,7 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
   handleDisconnect(client: WebSocket) {
     const state = this.sessions.get(client);
     if (state) {
+      this.clearGreetingTimer(state);
       state.active?.controller.abort();
       state.stt?.close();
       state.pacer.clear();
@@ -590,6 +605,7 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
         // OUTBOUND_GREETING_DELAY_MS). During the hold STT is null, so incoming
         // media is ignored and the callee's early "hello?" can't trigger a turn.
         const startConversation = () => {
+          state.greetingTimer = null;
           if (client.readyState !== WebSocket.OPEN) return;
           void this.sendGreeting(client, state);
           state.stt = this.openSttSession(client, state);
@@ -598,7 +614,12 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
           this.logger.log(
             `Outbound call — holding greeting ${OUTBOUND_GREETING_DELAY_MS}ms callId=${state.callId}`,
           );
-          setTimeout(startConversation, OUTBOUND_GREETING_DELAY_MS);
+          // Tracked so `stop`/disconnect during the hold cancels it. A callee who
+          // rejects or hangs up inside the hold window ends the stream while the
+          // socket can still be OPEN, so the readyState guard alone would let this
+          // fire — greeting a dead call and re-opening an STT session that nothing
+          // owns (billed, and only closed whenever the socket eventually closes).
+          state.greetingTimer = setTimeout(startConversation, OUTBOUND_GREETING_DELAY_MS);
         } else {
           startConversation();
         }
@@ -632,6 +653,7 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
 
       case "stop":
         this.logger.log(`Exotel stream stop: callId=${state.callId}`);
+        this.clearGreetingTimer(state);
         state.active?.controller.abort();
         state.stt?.close();
         state.stt = null;
@@ -969,6 +991,15 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
     if (state.inactivityTimer !== null) {
       clearTimeout(state.inactivityTimer);
       state.inactivityTimer = null;
+    }
+  }
+
+  // Cancel a pending outbound greeting hold. Called on `stop` and on disconnect so
+  // a call that ends inside the hold window never greets or opens an STT session.
+  private clearGreetingTimer(state: SessionState): void {
+    if (state.greetingTimer !== null) {
+      clearTimeout(state.greetingTimer);
+      state.greetingTimer = null;
     }
   }
 

@@ -124,6 +124,39 @@ const INBOUND_AGC_PEAK_CEILING = agcNumber(process.env.STT_INBOUND_AGC_PEAK_CEIL
 // boosted rather than mistaken for hiss. Idle-line hiss sits well below this.
 const INBOUND_AGC_NOISE_GATE_RMS = agcNumber(process.env.STT_INBOUND_AGC_NOISE_GATE_RMS, 55);
 
+// --- Near-end (double-talk) detection ---------------------------------------
+// The caller is now amplified at ALL times so soft speech always reaches STT.
+// The cost of that: while Maya is audible her echo (no carrier echo-cancellation)
+// and any room background also get boosted, so a naive "any transcript stops her"
+// barge-in would fire on echo/chatter. The fix is to require genuine NEAR-END
+// speech before barging in or accepting a turn while Maya speaks: raw frame energy
+// (measured BEFORE the boost) that stands clearly above the line's OWN adaptive
+// floor. The floor tracks the quiet baseline (echo tail + steady background), so a
+// caller speaking directly into their handset — even softly — stands proud of it,
+// while echo and low-level chatter sit at the floor and are ignored. The gate is
+// primarily RELATIVE (self-calibrating via the floor), with a low absolute guard
+// for near-silent lines; both are env-tunable so prod can adjust with no deploy.
+// NEAR_END_MARGIN: how far above the floor (×) counts as real near-end speech.
+const NEAR_END_MARGIN = agcNumber(process.env.STT_NEAR_END_MARGIN, 2.2);
+// Absolute floor so a near-silent line's tiny floor×margin can't accept hiss.
+const NEAR_END_MIN_RMS = agcNumber(process.env.STT_NEAR_END_MIN_RMS, 70);
+// Hold near-end "speaking" this long after the last loud frame, bridging inter-word
+// gaps and the skew between audio and Deepgram's transcript callbacks.
+const NEAR_END_HOLD_MS = agcNumber(process.env.STT_NEAR_END_HOLD_MS, 600);
+
+// Raw RMS of a 16-bit LE PCM frame. Cheap single pass; used for the near-end
+// detector on the pre-AGC signal so the boost can't inflate the measurement.
+function frameRms(pcm: Buffer): number {
+  const sampleCount = pcm.length >> 1;
+  if (sampleCount === 0) return 0;
+  let sumSq = 0;
+  for (let i = 0; i < sampleCount; i++) {
+    const s = pcm.readInt16LE(i << 1);
+    sumSq += s * s;
+  }
+  return Math.sqrt(sumSq / sampleCount);
+}
+
 class InboundAgc {
   // Smoothed gain carried across frames so it adapts gradually (no pumping).
   private gain = 1;
@@ -257,6 +290,11 @@ type SessionState = {
   stt: LiveSession | null;
   // Per-call inbound gain control — normalizes the caller's level before STT.
   agc: InboundAgc;
+  // Near-end (double-talk) detection. noiseFloorRms: adaptive baseline of the
+  // line (echo tail + steady background). lastNearEndSpeechAt: last time a raw
+  // frame stood clearly above that floor — i.e. the caller (not echo) spoke.
+  noiseFloorRms: number;
+  lastNearEndSpeechAt: number;
   // Serialises turn processing so overlapping utterances stay in order.
   queue: Promise<void>;
   speaking: boolean;
@@ -341,6 +379,8 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
       turnIndex: 0,
       stt: null,
       agc: new InboundAgc(),
+      noiseFloorRms: 0,
+      lastNearEndSpeechAt: 0,
       queue: Promise.resolve(),
       speaking: false,
       active: null,
@@ -569,13 +609,14 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
         const payload = (msg.media as Record<string, unknown> | undefined)?.payload;
         if (typeof payload === "string" && state.stt) {
           const pcm = Buffer.from(payload, "base64");
-          // Only boost when Maya is NOT audible — during her playback the caller's
-          // line carries her own echo back (no echo cancellation), and amplifying
-          // that would risk transcribing echo into a false barge-in. When it's the
-          // caller's turn to speak, lift a soft-spoken caller toward a level STT
-          // can reliably hear.
-          const boost = INBOUND_AGC_ENABLED && !this.isMayaAudible(state);
-          state.stt.sendAudio(boost ? state.agc.process(pcm) : pcm);
+          // Update the near-end detector on the RAW frame (before any boost), then
+          // ALWAYS amplify. Previously the boost was disabled whenever Maya was
+          // audible — which left the real caller unheard during her turn/tail and
+          // let the loudest thing on the line (echo or background) win. Now a soft
+          // caller is always lifted for STT; echo/background are rejected instead at
+          // the barge-in / turn gates, which consult the near-end detector.
+          this.updateNearEnd(state, frameRms(pcm));
+          state.stt.sendAudio(INBOUND_AGC_ENABLED ? state.agc.process(pcm) : pcm);
         }
         break;
       }
@@ -682,6 +723,26 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
     return state.active !== null || state.speaking || state.pacer.active;
   }
 
+  // Update the line's adaptive noise/echo floor from a raw (pre-AGC) frame RMS and
+  // flag when genuine near-end speech is present. The floor follows the quiet
+  // baseline DOWN quickly and rises toward sustained background SLOWLY, so a real
+  // caller — even a soft one — briefly stands clearly above it while echo and
+  // steady chatter stay at the floor.
+  private updateNearEnd(state: SessionState, rms: number): void {
+    const floor = state.noiseFloorRms || rms;
+    state.noiseFloorRms =
+      rms < floor ? floor * 0.9 + rms * 0.1 : floor * 0.995 + rms * 0.005;
+    const threshold = Math.max(NEAR_END_MIN_RMS, state.noiseFloorRms * NEAR_END_MARGIN);
+    if (rms > threshold) state.lastNearEndSpeechAt = Date.now();
+  }
+
+  // True when the caller (not echo/low background) has spoken within the recent
+  // hold window. Barge-in and — while Maya is audible — turn acceptance require it,
+  // so her own echo and room chatter can neither stop her nor inject a phantom turn.
+  private nearEndSpeaking(state: SessionState): boolean {
+    return Date.now() - state.lastNearEndSpeechAt <= NEAR_END_HOLD_MS;
+  }
+
   // Stop whatever Maya is currently saying: abort the in-flight turn, drop all
   // queued + in-flight audio locally, and tell Exotel to flush its own playback
   // buffer. After this the caller has the floor.
@@ -698,13 +759,33 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
   // immediately and the completed utterance drives the next turn.
   private handlePartial(client: WebSocket, state: SessionState, text: string) {
     if (state.closing) return; // never interrupt the final closing line
-    if (this.isMayaAudible(state) && text.trim().length >= BARGE_IN_MIN_CHARS) {
+    // Barge-in only on genuine near-end speech: the caller must be audible AND the
+    // raw line energy must stand above the echo/background floor. This is what lets
+    // the always-on boost be safe — Maya's amplified echo and room chatter produce
+    // transcripts but carry no near-end energy, so they no longer stop her.
+    if (
+      this.isMayaAudible(state) &&
+      this.nearEndSpeaking(state) &&
+      text.trim().length >= BARGE_IN_MIN_CHARS
+    ) {
       this.logger.log(`Barge-in (partial) callId=${state.callId} — stopping playback`);
       this.stopSpeaking(client, state);
     }
   }
 
   private enqueueTurn(client: WebSocket, state: SessionState, utterance: string) {
+    // Echo/background rejection. While Maya is audible, a finished transcript with
+    // no near-end energy behind it is her own (amplified) echo or room chatter —
+    // NOT the caller. Drop it so it neither barges in nor queues a phantom turn.
+    // (isNoisyTranscript can't catch this: echo is real words, not filler.) When
+    // Maya is silent there's no echo to reject and the AGC has already lifted a soft
+    // caller, so accept everything — that path stays fully sensitive.
+    if (this.isMayaAudible(state) && !this.nearEndSpeaking(state)) {
+      this.logger.log(
+        `Ignoring echo/background transcript callId=${state.callId}: "${utterance.slice(0, 40)}"`,
+      );
+      return;
+    }
     this.logger.log(`Utterance callId=${state.callId}: "${utterance.slice(0, 60)}"`);
     // Only a REAL utterance resets the inactivity clock. Pure noise/filler must
     // NOT — otherwise a noisy-but-dead line keeps re-arming the timer and never

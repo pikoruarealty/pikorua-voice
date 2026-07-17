@@ -42,6 +42,18 @@ const EXOTEL_FRAME_PACING_MS = 90;
 // never cut off. Generous enough to cover any realistic closing statement.
 const EXOTEL_HANGUP_GRACE_MS = 9000;
 
+// Outbound calls: Exotel bridges the callee's media leg a beat AFTER the Voicebot
+// WebSocket `start` fires, so greeting audio sent in that gap is dropped before
+// the callee's path is up — the caller then hears only the tail of Maya's intro.
+// Hold the opening greeting (and STT) this long on outbound calls so the callee
+// is fully connected before Maya speaks and the whole intro is heard. Inbound
+// calls (the caller is already on the line) are never held. Override with
+// OUTBOUND_GREETING_DELAY_MS; set 0 to disable the hold.
+const OUTBOUND_GREETING_DELAY_MS = (() => {
+  const n = Number(process.env.OUTBOUND_GREETING_DELAY_MS);
+  return Number.isFinite(n) && n >= 0 ? n : 5000;
+})();
+
 // If the client says nothing for this long, Maya asks if they're still there.
 const INACTIVITY_TIMEOUT_MS = 45_000;
 // Two consecutive inactivity fires with no real utterance in between → goodbye + hang up.
@@ -273,6 +285,10 @@ type SessionState = {
   // pre-existing record). It then owns marking the call completed + driving
   // post-call; a pre-existing row is instead managed by the status webhook.
   gatewayCreatedRow: boolean;
+  // True when this is an outbound (dialed) call. Drives the opening greeting hold
+  // (see OUTBOUND_GREETING_DELAY_MS) so Maya doesn't speak before the callee's
+  // media path is up. Inbound calls stay false.
+  isOutbound: boolean;
   // Guards finalizeCall so post-call is enqueued at most once per session.
   finalized: boolean;
   // Wall-clock start, for a best-effort durationSeconds on gateway-owned calls.
@@ -338,6 +354,7 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
       sideConversationSince: 0,
       hasDbRow: false,
       gatewayCreatedRow: false,
+      isOutbound: false,
       finalized: false,
       startedAtMs: Date.now(),
     };
@@ -458,6 +475,7 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
         if (custom.callId) {
           state.callId = custom.callId;
           state.hasDbRow = true; // outbound: worker created the row; webhook manages it
+          state.isOutbound = true;
           if (custom.locale) state.locale = custom.locale;
         } else if (callSid) {
           try {
@@ -465,6 +483,7 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
             if (call) {
               state.callId = call.id;
               state.hasDbRow = true;
+              state.isOutbound = call.direction === "outbound";
               if (call.locale) state.locale = call.locale;
             }
           } catch (err) {
@@ -522,11 +541,27 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
           `Exotel stream start: callSid=${callSid} callId=${state.callId} locale=${state.locale}`,
         );
 
-        // Warm clip cache and fire opening greeting concurrently.
+        // Warm the clip cache immediately (during any outbound hold, so the
+        // greeting is still instant when it fires).
         void this.runtime.warmCall(state.callId, state.locale);
-        void this.sendGreeting(client, state);
 
-        state.stt = this.openSttSession(client, state);
+        // Greet + open STT together. On outbound calls, hold both briefly so the
+        // callee's media path is up before Maya speaks (see
+        // OUTBOUND_GREETING_DELAY_MS). During the hold STT is null, so incoming
+        // media is ignored and the callee's early "hello?" can't trigger a turn.
+        const startConversation = () => {
+          if (client.readyState !== WebSocket.OPEN) return;
+          void this.sendGreeting(client, state);
+          state.stt = this.openSttSession(client, state);
+        };
+        if (state.isOutbound && OUTBOUND_GREETING_DELAY_MS > 0) {
+          this.logger.log(
+            `Outbound call — holding greeting ${OUTBOUND_GREETING_DELAY_MS}ms callId=${state.callId}`,
+          );
+          setTimeout(startConversation, OUTBOUND_GREETING_DELAY_MS);
+        } else {
+          startConversation();
+        }
         break;
       }
 

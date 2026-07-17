@@ -9,6 +9,7 @@ import { CallRuntimeService, isNoisyTranscript } from "./call-runtime.service";
 import { CallRepository, type NewCall } from "@pikorua/db";
 import { PostCallQueueService } from "../postcall/postcall.queue";
 import { WorkerWaker } from "../worker-waker/worker-waker.service";
+import { pickByLangMode } from "../i18n/lang-mode";
 
 // Exotel's Voicebot WebSocket carries raw 16-bit linear PCM, 8 kHz, mono,
 // little-endian (slin/s16le) in BOTH directions — confirmed against Exotel's
@@ -913,10 +914,11 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
         } else if (now - state.sideConversationSince >= SIDE_CONVERSATION_HANGUP_MS && !state.closing) {
           this.logger.log(`Side conversation exceeded window callId=${state.callId} — hanging up`);
           state.closing = true;
-          const isHindi = state.locale.startsWith("hi") || state.locale.startsWith("gu");
-          const goodbye = isHindi
-            ? "कोई बात नहीं, लगता है आप अभी थोड़ा busy हैं। हमारे sales expert आपसे personally connect करेंगे। Thank you."
-            : "No problem, it seems you're a little busy right now. Our sales expert will personally reach out to you. Thank you.";
+          const goodbye = pickByLangMode(state.locale, {
+            hi: "कोई बात नहीं, लगता है आप अभी थोड़ा busy हैं। हमारे sales expert आपसे personally connect करेंगे। Thank you.",
+            gu: "કોઈ વાંધો નહીં, લાગે છે તમે અત્યારે થોડા busy છો. અમારા sales expert તમારી સાથે personally connect કરશે. Thank you.",
+            en: "No problem, it seems you're a little busy right now. Our sales expert will personally reach out to you. Thank you.",
+          });
           await this.playDirectTts(state, goodbye);
           await this.waitForPacerDrain(state, 10_000);
           await new Promise<void>((r) => setTimeout(r, EXOTEL_HANGUP_GRACE_MS));
@@ -1014,7 +1016,6 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
       );
       return;
     }
-    const isHindi = state.locale.startsWith("hi") || state.locale.startsWith("gu");
     // Noisy line / caller talking to someone else: audio has been arriving (noise
     // utterances) for the whole window but none of it was a real reply to Maya.
     // Don't keep the line open or bother with a check-in — after this single 35s
@@ -1033,12 +1034,16 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
       // Final strike (or a noisy/occupied line) — say goodbye and hang up. Include
       // the AI-disclosure line so this system-driven ending matches a normal sign-off.
       const goodbye = noisyWindow
-        ? isHindi
-          ? "लगता है line पर कुछ disturbance है या आप अभी busy हैं। हमारे sales expert आपसे personally connect करेंगे। Thank you."
-          : "It seems the line is disturbed or you're occupied right now. Our sales expert will personally reach out to you. Thank you."
-        : isHindi
-          ? "लगता है आप अभी available नहीं हैं। हमारे sales expert आपसे personally connect करेंगे। Thank you."
-          : "It seems you are unavailable. Our sales expert will personally reach out to you. Thank you.";
+        ? pickByLangMode(state.locale, {
+            hi: "लगता है line पर कुछ disturbance है या आप अभी busy हैं। हमारे sales expert आपसे personally connect करेंगे। Thank you.",
+            gu: "લાગે છે line પર થોડું disturbance છે કે તમે અત્યારે busy છો. અમારા sales expert તમારી સાથે personally connect કરશે. Thank you.",
+            en: "It seems the line is disturbed or you're occupied right now. Our sales expert will personally reach out to you. Thank you.",
+          })
+        : pickByLangMode(state.locale, {
+            hi: "लगता है आप अभी available नहीं हैं। हमारे sales expert आपसे personally connect करेंगे। Thank you.",
+            gu: "લાગે છે તમે અત્યારે available નથી. અમારા sales expert તમારી સાથે personally connect કરશે. Thank you.",
+            en: "It seems you are unavailable. Our sales expert will personally reach out to you. Thank you.",
+          });
       state.queue = state.queue.then(async () => {
         // A real utterance arriving in the meantime resets inactivityStrikes to 0,
         // cancelling this hangup; continued noise leaves strikes at the max.
@@ -1051,9 +1056,11 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
       });
     } else {
       // First strike on a silent line — ask if they're still there.
-      const checkIn = isHindi
-        ? "Hello? क्या आप अभी भी line पर हैं?"
-        : "Hello? Are you still there?";
+      const checkIn = pickByLangMode(state.locale, {
+        hi: "Hello? क्या आप अभी भी line पर हैं?",
+        gu: "Hello? શું તમે હજી line પર છો?",
+        en: "Hello? Are you still there?",
+      });
       state.queue = state.queue.then(async () => {
         // If the client spoke while this was queued, skip it.
         if (state.inactivityStrikes < strikes || state.closing) return;

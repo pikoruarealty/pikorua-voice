@@ -39,10 +39,6 @@ test("area measurements: English number + Devanagari unit in Hindi-mode TTS", ()
     "four BHK approx five thousand seven hundred स्क्वेयर फीट",
   );
   assert.equal(
-    normalizeForTts("The unit is 7600 sqft.", "gu-IN"),
-    "The unit is seven thousand six hundred स्क्वेयर फीट.",
-  );
-  assert.equal(
     normalizeForTts("The carpet is 5700 sq. feet.", "hi-IN"),
     "The carpet is five thousand seven hundred स्क्वेयर फीट.",
   );

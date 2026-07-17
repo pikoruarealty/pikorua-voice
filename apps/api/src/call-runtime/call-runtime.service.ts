@@ -21,6 +21,14 @@ import type { NewCallTurn } from "@pikorua/db";
 import { ConfigService } from "@nestjs/config";
 import { MetricsService } from "../metrics/metrics.service";
 import { REDIS_CLIENT } from "../redis/redis.module";
+import {
+  resolveLangMode,
+  pickByLangMode,
+  hasDevanagari,
+  hasGujarati,
+  type LangMode,
+} from "../i18n/lang-mode";
+import { buildSystemPromptGu } from "../i18n/prompt-gu";
 
 // Per-call state: conversation history + resolved context for prompt building.
 // Stamped with lastActivityAt so stale entries can be evicted.
@@ -54,6 +62,12 @@ type CallState = {
 
 // Trailing words that signal the caller paused mid-thought rather than finishing.
 // Covers common Hindi/English conjunctions, fillers, and dangling possessives.
+//
+// The Gujarati-script entries at the end are safe to add without touching hi/en
+// behaviour: a `multi` (Hindi/English) Deepgram session emits only Devanagari and
+// Latin, so a Gujarati token can never appear in a hi/en transcript and these
+// entries are unreachable on those paths. The romanized cues above stay shared —
+// a Gujarati caller code-switching in English hits them the same way.
 const CONTINUATION_CUES = new Set([
   "aur",
   "and",
@@ -83,6 +97,19 @@ const CONTINUATION_CUES = new Set([
   "apni",
   "uska",
   "uski",
+  // Gujarati script — unreachable on the hi/en (`multi`) path, see note above.
+  "અને", // and
+  "પણ", // but / also
+  "કે", // or / that
+  "તો", // so / then
+  "કારણ", // because
+  "એટલે", // meaning / so
+  "મારું", // my
+  "મારી",
+  "મારો",
+  "એનું", // its
+  "એની",
+  "એક", // one
 ]);
 
 // Pure interjections / backchannels with no content of their own. On their own
@@ -330,22 +357,39 @@ export class CallRuntimeService implements OnApplicationShutdown {
     }
   }
 
-  private isHinglishLocale(locale: string): boolean {
-    const l = locale.toLowerCase();
-    return l.startsWith("hi") || l.startsWith("gu");
+  // Which persona this call runs in. Replaces the old isHinglishLocale(), which
+  // treated gu as an alias for hi. See i18n/lang-mode.ts for why non-hi/gu
+  // locales (ta/te/mr) resolve to "en".
+  private langMode(locale: string): LangMode {
+    return resolveLangMode(locale);
   }
 
-  // Language code for TTS normalization: English calls get English number
-  // words; Hindi/Gujarati (and everything else) use the configured default.
+  private byMode<T>(locale: string, choices: Record<LangMode, T>): T {
+    return pickByLangMode(locale, choices);
+  }
+
+  // Language code for TTS normalization and the engine's `language_code`.
+  // Deliberately locale-driven rather than LangMode-driven: a ta/te/mr call must
+  // keep returning undefined (→ ELEVENLABS_LANGUAGE_CODE) exactly as before, even
+  // though its *persona* mode is "en". Collapsing these two axes would silently
+  // switch the regional locales from Hindi phonetics to English.
   private ttsLanguageCode(locale: string): string | undefined {
-    return locale.toLowerCase().startsWith("en") ? "en" : undefined;
+    const l = locale.toLowerCase();
+    if (l.startsWith("gu")) return "gu"; // routes to the Gujarati TTS provider
+    return l.startsWith("en") ? "en" : undefined;
   }
 
-  // Detect whether a reply is English-only by checking for Devanagari characters.
-  // Hinglish replies always contain Devanagari; pure English replies never do.
-  // Used to pick the right number-word language regardless of call locale.
+  // Pick the number-word language from the reply's own SCRIPT, not the call
+  // locale — the model follows the client's language, so a gu-IN call can end up
+  // answering in English if the caller switched.
+  //
+  // Gujarati is tested FIRST and this order matters: a Gujarati reply is
+  // code-switched ("તમારું budget કેટલું છે?") and so contains Latin letters. With
+  // the old Latin check running first it would have been mis-tagged "en" and read
+  // with English phonetics.
   private replyLanguageCode(text: string, locale: string): string | undefined {
-    if (/[ऀ-ॿ]/.test(text)) return undefined; // has Devanagari → Hindi mode
+    if (hasGujarati(text)) return "gu"; // has Gujarati → Gujarati mode
+    if (hasDevanagari(text)) return undefined; // has Devanagari → Hindi mode
     if (/[a-zA-Z]/.test(text)) return "en"; // Latin script only → English mode
     return this.ttsLanguageCode(locale);
   }
@@ -368,8 +412,18 @@ export class CallRuntimeService implements OnApplicationShutdown {
     "I'm sorry, I didn't get that clearly — could you repeat?",
   ];
 
+  // Gujarati mirrors the Hinglish set: same code-switched register, same feminine
+  // verb forms ("સાંભળી ન શકી", never "શક્યો").
+  private readonly FALLBACK_LINES_GU = [
+    "માફ કરશો, અવાજ થોડો unclear આવ્યો — ફરી એકવાર કહેશો?",
+    "Sorry, છેલ્લો ભાગ બરાબર સંભળાયો નહીં — please ફરીથી બોલશો?",
+    "થોડો connection issue લાગે છે — તમે શું કહી રહ્યા હતા?",
+    "માફ કરશો, તમારી વાત બરાબર સાંભળી ન શકી — ફરી બોલશો?",
+    "Hmm, અવાજ વચ્ચે cut થયો — ફરીથી કહી શકશો?",
+  ];
+
   apologyText(locale: string): string {
-    const lines = this.isHinglishLocale(locale) ? this.FALLBACK_LINES_HI : this.FALLBACK_LINES_EN;
+    const lines = this.allFallbackLines(locale);
     return lines[Math.floor(Math.random() * lines.length)];
   }
 
@@ -459,13 +513,18 @@ export class CallRuntimeService implements OnApplicationShutdown {
   // The wording is kept IDENTICAL to the intro example in the system prompt so
   // that later turns — which read the greeting back from history — stay coherent.
   private greetingText(state: CallState): string {
-    const hinglish = this.isHinglishLocale(state.locale);
+    const mode = this.langMode(state.locale);
     // Reconfirmation call (#2): open by confirming the booked slot. "reserve है" /
     // "reserved for you" reads as a slot being HELD for a guest, not a calendar
     // entry — the luxury register the concierge prompt asks for.
     if (state.scriptRef === "reconfirm") {
       const when = state.apptWhen?.trim();
-      if (hinglish) {
+      if (mode === "gu") {
+        return when
+          ? `Hello, હું Maya બોલી રહી છું પિકોરા Group તરફથી. તમારી site visit ${when} માટે reserve છે — હું personally confirm કરવા માંગતી હતી. શું એ time તમારા માટે comfortable રહેશે?`
+          : "Hello, હું Maya બોલી રહી છું પિકોરા Group તરફથી. તમારી upcoming site visit personally confirm કરવા માંગતી હતી. શું એ time તમારા માટે comfortable રહેશે?";
+      }
+      if (mode === "hi") {
         return when
           ? `Hello, मैं Maya बोल रही हूँ पिकोरा Group से। आपकी site visit ${when} के लिए reserve है — मैं personally confirm करना चाहती थी। क्या वो time आपके लिए comfortable रहेगा?`
           : "Hello, मैं Maya बोल रही हूँ पिकोरा Group से। आपकी upcoming site visit personally confirm करना चाहती थी। क्या वो time आपके लिए comfortable रहेगा?";
@@ -479,14 +538,20 @@ export class CallRuntimeService implements OnApplicationShutdown {
     // "आपने ... की थी" keeps the verb agreeing with "visit" (feminine noun), so the
     // line stays gender-safe when the client's gender isn't known yet.
     if (state.scriptRef === "feedback") {
-      if (hinglish) {
+      if (mode === "gu") {
+        return "Hello, હું Maya બોલી રહી છું પિકોરા Group તરફથી. તમે અમારા residence ની site visit કરી હતી — તમારો impression જાણવા માંગતી હતી. તમને residence કેવું લાગ્યું?";
+      }
+      if (mode === "hi") {
         return "Hello, मैं Maya बोल रही हूँ पिकोरा Group से। आपने हमारे residence की site visit की थी — आपका impression जानना चाहती थी। आपको residence कैसा लगा?";
       }
       return "Hello, this is Maya from PIKORA Group. You visited one of our residences with us — I would love to hear your impression. How did you find it?";
     }
     // Default concierge flow — wording IDENTICAL to the intro example in the
     // system prompt so later turns reading it back from history stay coherent.
-    if (hinglish) {
+    if (mode === "gu") {
+      return "Hello, હું Maya બોલી રહી છું પિકોરા Group તરફથી. તમારી enquiry મળી હતી, તો તમને personally invite કરવા માંગતી હતી — એક exceptional ultra-luxury project ની site visit માટે. તમે 4 BHK જોઈ રહ્યા છો કે 5 BHK.";
+    }
+    if (mode === "hi") {
       return "Hello, मैं Maya बोल रही हूँ पिकोरा Group से। आपकी enquiry मिली थी, तो आपको personally invite करना चाहती थी — एक exceptional ultra-luxury project की site visit के लिए। आप 4 BHK देख रहे हैं या 5 BHK.";
     }
     return "Hello, this is Maya calling from PIKORA Group. We received your enquiry and I wanted to personally reach out — I'd love to invite you for a site visit of an exceptional ultra-luxury project in Ahmedabad. Are you looking at a 4 BHK or a 5 BHK.";
@@ -600,7 +665,14 @@ export class CallRuntimeService implements OnApplicationShutdown {
   // Pre-build call state and warm the apology clip cache so the first
   // turn doesn't pay for campaign/target fetch + prompt build + clip synthesis.
   private allFallbackLines(locale: string): string[] {
-    return this.isHinglishLocale(locale) ? this.FALLBACK_LINES_HI : this.FALLBACK_LINES_EN;
+    switch (this.langMode(locale)) {
+      case "gu":
+        return this.FALLBACK_LINES_GU;
+      case "hi":
+        return this.FALLBACK_LINES_HI;
+      default:
+        return this.FALLBACK_LINES_EN;
+    }
   }
 
   // Short acknowledgment phrases that commonly open a reply. Pre-synthesizing
@@ -620,9 +692,23 @@ export class CallRuntimeService implements OnApplicationShutdown {
     "Right.",
     "Of course.",
   ];
+  private readonly ACK_CLIPS_GU = [
+    "Perfect.",
+    "Certainly.",
+    "હા, બિલકુલ.",
+    "સમજી ગઈ.",
+    "Absolutely.",
+  ];
 
   private ackClips(locale: string): string[] {
-    return this.isHinglishLocale(locale) ? this.ACK_CLIPS_HI : this.ACK_CLIPS_EN;
+    switch (this.langMode(locale)) {
+      case "gu":
+        return this.ACK_CLIPS_GU;
+      case "hi":
+        return this.ACK_CLIPS_HI;
+      default:
+        return this.ACK_CLIPS_EN;
+    }
   }
 
   async warmCall(callId: string, locale?: string) {
@@ -822,9 +908,17 @@ export class CallRuntimeService implements OnApplicationShutdown {
     leadName: string,
     apptWhen: string | null,
   ): string {
-    const hinglish = this.isHinglishLocale(locale);
+    const mode = this.langMode(locale);
+    const hinglish = mode === "hi";
     const when =
-      apptWhen?.trim() || (hinglish ? "आपकी scheduled site visit" : "your scheduled site visit");
+      apptWhen?.trim() ||
+      this.byMode(locale, {
+        hi: "आपकी scheduled site visit",
+        gu: "તમારી scheduled site visit",
+        en: "your scheduled site visit",
+      });
+
+    if (mode === "gu") return this.buildScriptPromptGu(scriptRef, leadName, when);
 
     const persona = hinglish
       ? `आप Maya हैं — पिकोरा Group (Ahmedabad की सबसे exclusive ultra-luxury real estate advisory) की poised, warm relationship manager। आप ${leadName} से phone पर बात कर रही हैं।
@@ -880,6 +974,47 @@ Always close on a gracious note, as you would see a guest to the door.`;
     return persona + timeNote + body;
   }
 
+  // Gujarati variant of the short, single-objective reconfirm/feedback prompts.
+  // Deliberately a line-for-line mirror of the Hindi branch above — same poise,
+  // same warmth, same luxury register, same feminine verb forms, same one-question
+  // turns. Gujarati is a different language here, NOT a different personality.
+  private buildScriptPromptGu(scriptRef: string, leadName: string, when: string): string {
+    const persona = `તમે Maya છો — પિકોરા Group (Ahmedabad ની સૌથી exclusive ultra-luxury real estate advisory) ની poised, warm relationship manager. તમે ${leadName} સાથે phone પર વાત કરી રહ્યા છો.
+- તમે એક 28-year-old woman છો — હંમેશા feminine Gujarati verb forms ("કરી રહી છું", "કહી શકું છું", "સમજી શકું છું"), ક્યારેય masculine નહીં. તમે AI નથી — ક્યારેય ન કહો કે તમે bot/AI છો.
+- TONE — sophisticated, warm, ક્યારેય transactional નહીં, ક્યારેય pushy નહીં. દરેક client તમારા માટે એક distinguished guest છે, prospect નહીં. Graceful, feminine, luxury vocabulary પસંદ કરો — અવાજમાં એક હળવી, natural smile રહે.
+- આપણા ઘરોને "residence" કહો (ક્યારેય "flat"/"unit" નહીં). Client ને invite કરો, "sell" ક્યારેય નહીં. Slot "reserve"/"hold" થાય છે, ફક્ત "book" નહીં.
+- બધા Gujarati શબ્દો Gujarati script માં, English શબ્દો English letters માં. "પિકોરા Group" આમ જ લખો (U silent).
+- ભાષા elegant હોય પણ શબ્દો સરળ — રોજ બોલાતી Gujarati રાખો, અઘરી કે ચોપડિયાળ Gujarati ક્યારેય નહીં. જેમ કે "માહિતી", "પ્રતીક્ષા", "આવશ્યકતા", "ઉપલબ્ધ", "સ્થિતિ", "ઇચ્છુક" — આવા શબ્દો ક્યારેય નહીં. કોઈ Gujarati શબ્દ ભારે લાગે તો તેની જગ્યાએ સામાન્ય English શબ્દ બોલો (recently, option, available, pressure, wait, details). Luxury નો અર્થ ભારે શબ્દો નથી — luxury નો અર્થ graceful અને warm હોવું છે.
+- કોઈ price કે figure ક્યારેય ન કહો. દરેક turn ટૂંકો રાખો — એક જ sentence, એક જ સવાલ.
+- જ્યારે વાત પૂરી થાય ત્યારે તમારા છેલ્લા sentence ના END માં ${END_CALL_TOKEN} લગાવો (એ બોલાતું નથી), અને sign-off હંમેશા "Thank you." હોય.`;
+
+    const timeNote = `\n\nRIGHT NOW: દરેક turn ની શરૂઆતમાં એક note "[Now in Ahmedabad: <time>. SAME-DAY SLOTS: …]" આવે છે — reschedule કરતી વખતે ફક્ત તેના qualifying slots offer કરો, જાતે clock નો હિસાબ ક્યારેય ન કરો.`;
+
+    if (scriptRef === "reconfirm") {
+      return (
+        persona +
+        timeNote +
+        `\n\nGOAL — SITE VISIT RECONFIRMATION:
+1. Graciously confirm કરો કે ${when} ની visit તેમના માટે comfortable છે.
+2. જો તેઓ હા કહે — warmly confirm કરો ("Perfect — અમે તમારું welcome કરવા તૈયાર રહીશું"), પછી politely close કરો.
+3. જો તેઓ time બદલવા માંગે — કોઈ hesitation વગર accommodate કરો ("બિલકુલ, અમે તમારા માટે slot adjust કરી દઈશું"), note ના qualifying slots માંથી નવો slot offer કરીને confirm કરો.
+4. જો તેઓ cancel કરે કે ના પાડે — સંપૂર્ણ graceful રહો, કોઈ pressure નહીં ("બિલકુલ વાંધો નહીં — જ્યારે પણ તમને ઠીક લાગે, અમે તમારા માટે અહીં છીએ"), પછી warmly close કરો.
+દરેક case માં call ને એક gracious note પર બંધ કરો — જાણે કોઈ guest ને વિદાય આપી રહ્યા હો.`
+      );
+    }
+
+    // feedback
+    return (
+      persona +
+      timeNote +
+      `\n\nGOAL — POST-VISIT FEEDBACK:
+1. પૂછો કે તેમને residence કેવું લાગ્યું — તેમનો impression ધ્યાનથી સાંભળો.
+2. જો તેઓ હજી આગળ નથી વધી રહ્યા — ખૂબ politely અને કોઈ pressure વગર, ફક્ત એક જ વાર પૂછો કે કઈ વાત રોકી રહી છે (price, possession timeline, location, family decision, loan, બીજો કોઈ option). પછી તેમના જવાબને graciously acknowledge કરો ("હું સમજી શકું છું").
+3. Pressure બિલકુલ ન કરો, argue ન કરો, અને કોઈ નવો offer કે price ન આપો — ફક્ત સાંભળો અને તેમને feel કરાવો કે તેમની વાતની value છે.
+4. તેમના time માટે "Thank you." કહીને એક gracious note પર close કરો.`
+    );
+  }
+
   // Build a detailed system prompt grounded in lead and campaign context.
   // Called once per call (cached in CallState thereafter).
   private async buildSystemPrompt(
@@ -910,7 +1045,20 @@ Always close on a gracious note, as you would see a guest to the door.`;
     const notesBlock = campaignNotes ? `\nCampaign briefing: ${campaignNotes}` : "";
     const nowLine = `\n\nCURRENT TIME: Every one of your turns is preceded by a note "[Now in Ahmedabad: <time>. SAME-DAY SLOTS: <which slots qualify today>]" — it gives the exact current IST moment AND the already-computed same-day visit slots. It is refreshed in real time on EACH turn, so RE-READ IT EVERY TURN before scheduling (a long call moves forward, and a slot that was fine earlier may have just passed). Treat that time as "today" and as the current clock time for ALL scheduling. SCHEDULING FROM THE NOTE: when you offer a same-day visit, offer ONLY the slots the note says qualify — NEVER work out the 3-hour rule yourself, and never offer a today slot the note has ruled out; if the note says no same-day slot qualifies, start from tomorrow. CURRENT-TIME QUERY: If the client explicitly asks what time it is now ("अभी कितने बजे हैं?", "what's the time?"), tell them that clock time in English "H:MM AM/PM" digit format — e.g. "अभी 11:30 AM हो रहा है" / "It's 11:30 AM right now" — always in English digits with AM/PM (never Hindi number words like "साढ़े ग्यारह"), on both Hindi and English calls. Otherwise never volunteer the current time.`;
 
-    if (locale.toLowerCase().startsWith("hi") || locale.toLowerCase().startsWith("gu")) {
+    const mode = this.langMode(locale);
+
+    // Gujarati is a real third persona, NOT an alias for Hindi. See i18n/prompt-gu.ts.
+    if (mode === "gu") {
+      return buildSystemPromptGu({
+        leadName,
+        campaignName,
+        notesBlock,
+        nowLine,
+        endCallToken: END_CALL_TOKEN,
+      });
+    }
+
+    if (mode === "hi") {
       return `You are Maya — a warm, poised, and deeply knowledgeable relationship manager at PIKORUA Group, Ahmedabad's most exclusive ultra-luxury real estate consultancy. You are on a phone call with ${leadName} about ${campaignName}.${notesBlock}${nowLine}
 
 WHO YOU ARE: A warm, well-spoken 28-year-old woman from Ahmedabad — NOT an AI, NOT a call-center agent, NOT a salesperson reading a script. There is a gentle, natural smile in your voice — the easy warmth of a young, confident professional who genuinely enjoys speaking with people. You represent Ahmedabad's finest addresses and speak with the quiet confidence of someone who knows the value of what she offers. Sophisticated, warm, never transactional, never pushy. You treat every caller like a distinguished guest, not a prospect.
@@ -971,6 +1119,7 @@ WORDS:
 - NEVER: "residence configuration", "investment opportunity", "investment range", "high-net-worth", "bespoke", "premium inventory", "I would like to inform you", "as part of our process", "kindly note", "valued customer", "prospective buyer", "take care", "cheap", "deal", "discount".
 - Sign-off ends with "Thank you." — NEVER "take care", "take care of yourself", "have a nice day", "नमस्ते", "Namaste", or any variation. NEVER end the call with "नमस्ते"/"Namaste"; the closing word is only "Thank you."
 - NEVER heavy/formal Hindi words: "sampatti", "niwesh", "kripya", "uttam", "suvidha", "vyakti", "vibhinn", "aakar", "pariksar", "nivedan", "prakar", "vistaar". Say "sizes" not "आकार", "details" not "विवरण", "visit" not "भ्रमण".
+- NEVER the word "जानकारी" — it sounds officious and bureaucratic, never like a warm concierge. Say "details" or "info", or simply drop the noun entirely: "यह मैं share नहीं कर सकती" (NOT "यह जानकारी मैं share नहीं कर सकती"), "सारी details भेज देंगे" (NOT "सारी जानकारी भेज देंगे").
 - NEVER strong, harsh, or negative-sounding Hindi words — nothing that sounds accusatory, heavy, or confrontational: e.g. "गुमराह", "धोखा", "झूठ", "गलतफहमी", "मजबूरी", "आपत्ति", "शिकायत". Keep every word soft, warm, gracious, and light — if a Hindi word feels heavy or sharp, use a gentle everyday word or the English word instead.
 
 RULES: NEVER quote the specific price, ticket size, or rate per square feet of any individual property. Price RANGES are shareable — when the client has not yet stated any budget figure, FIRST ask an OPEN question with NO numbers: "आप roughly किस budget में comfortable हैं?" ONLY if they don't answer with a specific number or range, then offer anchors: "जैसे 3 करोड़, 5 करोड़, 10 करोड़, 15 करोड़, 25 करोड़, या उससे ऊपर — इनमें से कौन-सा?" Never guarantee returns. Never pressure.
@@ -1310,16 +1459,24 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
   }
 
   private guardrailFallbackText(locale: string): string {
-    return this.isHinglishLocale(locale)
-      ? "यह जानकारी मैं share नहीं कर सकती — हमारे luxury sales expert आपसे personally connect करेंगे और सारी details share करेंगे."
-      : "I'm not able to share that — our luxury sales expert will personally connect with you and share all the details.";
+    return this.byMode(locale, {
+      // "जानकारी"/"માહિતી" are deliberately absent: they are heavy, officious words
+      // that break the warm register (same reasoning as the WORDS block's ban on
+      // "विवरण"/"आकार"). Just drop the noun — "यह मैं share नहीं कर सकती" is lighter
+      // and more natural than naming the thing being withheld.
+      hi: "यह मैं share नहीं कर सकती — हमारे luxury sales expert आपसे personally connect करेंगे और सारी details share करेंगे.",
+      gu: "આ હું share કરી શકતી નથી — અમારા luxury sales expert તમારી સાથે personally connect કરશે અને બધી details share કરશે.",
+      en: "I'm not able to share that — our luxury sales expert will personally connect with you and share all the details.",
+    });
   }
 
   // Spoken on the max-duration hangup.
   private wrapUpText(locale: string): string {
-    return this.isHinglishLocale(locale)
-      ? "हमारे luxury sales expert आपसे personally connect करेंगे। Thank you."
-      : "Our luxury sales expert will personally reach out to you. Thank you.";
+    return this.byMode(locale, {
+      hi: "हमारे luxury sales expert आपसे personally connect करेंगे। Thank you.",
+      gu: "અમારા luxury sales expert તમારી સાથે personally connect કરશે. Thank you.",
+      en: "Our luxury sales expert will personally reach out to you. Thank you.",
+    });
   }
 
   // TTS with outage fallback: a transient ElevenLabs failure must not drop a
@@ -1382,9 +1539,11 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
       // End the call after threshold consecutive silences within the window.
       if (state.silenceStrikes >= this.silenceEndThreshold()) {
         state.silenceStrikes = 0;
-        const goodbye = this.isHinglishLocale(locale)
-          ? "लगता है connection ठीक नहीं है। हमारे luxury sales expert आपसे personally connect करेंगे। Thank you."
-          : "It seems we have a bad connection. Our luxury sales expert will personally reach out to you. Thank you.";
+        const goodbye = this.byMode(locale, {
+          hi: "लगता है connection ठीक नहीं है। हमारे luxury sales expert आपसे personally connect करेंगे। Thank you.",
+          gu: "લાગે છે connection બરાબર નથી. અમારા luxury sales expert તમારી સાથે personally connect કરશે. Thank you.",
+          en: "It seems we have a bad connection. Our luxury sales expert will personally reach out to you. Thank you.",
+        });
         const { audio, spokenText } = await this.synthesizeWithFallback(goodbye, locale, callId);
         this.persistState(callId, state);
         return { audio, transcript: "", reply: spokenText, endCall: true, waitForMore: false };

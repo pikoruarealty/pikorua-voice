@@ -1,7 +1,7 @@
 import { Injectable, Logger, ServiceUnavailableException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import WebSocket, { RawData } from "ws";
-import { PROPER_NOUN_KEYTERMS } from "./keyterms";
+import { keytermsFor } from "./keyterms";
 
 export type LiveSessionCallbacks = {
   // Interim (non-final) transcript — fires while the caller is mid-sentence.
@@ -38,8 +38,19 @@ const MAX_BUFFERED_CHUNKS = 200; // ~20s of 100ms frames — drop oldest beyond 
 // Short ack words that don't need the full 1000ms silence window.
 // After one of these fires as a complete utterance, tighten to 400ms so the
 // caller isn't forced to wait an extra second before the bot responds.
+// Gujarati acks are listed in Gujarati SCRIPT, not romanized: a `gu` Deepgram
+// session emits Gujarati speech in Gujarati script, so the Latin alternatives
+// would never match it and the 400ms tightening would silently never fire for a
+// Gujarati caller.
+//
+// DELIBERATELY NOT ADDING DEVANAGARI ACKS ("हाँ", "जी", "ठीक") here. They would
+// belong by the same logic — the `multi` path emits Hindi in Devanagari too — but
+// adding them CHANGES live Hindi timing (those acks match nothing today, so Hindi
+// callers keep the full 1000ms window). That is a real behaviour change on a
+// working language and needs its own decision + call testing, not a drive-by fix
+// inside the Gujarati work. Tracked as a separate follow-up.
 const SHORT_ACK_PATTERN =
-  /^(haan|ha|han|okay|ok|yes|no|nahi|nai|sure|bilkul|theek|thik|hmm|ji|hm|yep|nope|right|got it|go on|accha|acha)[\s.,!?।]*$/i;
+  /^(haan|ha|han|okay|ok|yes|no|nahi|nai|sure|bilkul|theek|thik|hmm|ji|hm|yep|nope|right|got it|go on|accha|acha|હા|હાજી|હા જી|બરાબર|બિલકુલ|ઓકે|ના|સારું|જી|હં|હાં)[\s.,!?।]*$/i;
 const SHORT_ACK_ENDPOINTING_MS = 400;
 const DEFAULT_ENDPOINTING_MS = 1000;
 
@@ -82,9 +93,10 @@ export class DeepgramLiveService {
       throw new ServiceUnavailableException("Deepgram API key is not configured");
     }
 
+    const dgLang = this.dgLanguage(locale);
     const params = new URLSearchParams({
       model: "nova-3",
-      language: this.dgLanguage(locale),
+      language: dgLang,
       encoding: opts.encoding ?? "linear16",
       sample_rate: String(sampleRate),
       channels: "1",
@@ -111,7 +123,7 @@ export class DeepgramLiveService {
     // and standalone-language Nova-3 sessions; `keywords` is a Nova-2-only param
     // and is silently ignored by Nova-3. See keyterms.ts for the Latin-vs-Devanagari
     // rationale.
-    for (const term of PROPER_NOUN_KEYTERMS) {
+    for (const term of keytermsFor(dgLang)) {
       params.append("keyterm", term);
     }
     const url = `wss://api.deepgram.com/v1/listen?${params.toString()}`;

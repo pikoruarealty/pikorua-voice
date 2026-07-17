@@ -33,3 +33,49 @@ export const PROPER_NOUN_KEYTERMS = [
   "नरोडा", "मणिनगर", "सैटेलाइट", "चांदखेड़ा", "प्रह्लाद नगर", "नवरंगपुरा",
   "बोडकदेव", "शिलज", "नंदोली", "बंगला",
 ] as const;
+
+// Gujarati-script spellings of the same proper nouns, for `language=gu` sessions.
+//
+// SAME REASONING AS THE DEVANAGARI SET, DIFFERENT SCRIPT: Deepgram's `gu` model
+// emits Gujarati speech in Gujarati script, so a Latin keyterm ("Thaltej") does
+// not bias the Gujarati token ("થલતેજ"). Both scripts are needed because Gujarati
+// callers code-switch heavily — the area name may arrive in either script
+// depending on whether it was said inside a Gujarati or an English clause.
+//
+// The spellings mirror the exact forms used in i18n/prompt-gu.ts and the
+// GU_TTS_RESPELLINGS table in tts/elevenlabs.service.ts. Change one, change all three.
+const GUJARATI_KEYTERMS = [
+  "થલતેજ", "વસ્ત્રાપુર", "નેહરુનગર", "વૈષ્ણોદેવી", "ગોતા",
+  "સિંધુ ભવન", "રાજપથ", "રંગોલી", "અંબલી", "બોપલ",
+  "અંબલી બોપલ", "અંબલી-બોપલ", "અંબલી બોપલ રોડ", "અંબલી-બોપલ રોડ",
+  "બોડકદેવ", "શિલજ", "નંદોલી", "બંગલો", "ઇસ્કોન",
+  // Residence areas a caller may name when asked where they live.
+  "નરોડા", "મણિનગર", "સેટેલાઇટ", "ચાંદખેડા", "પ્રહલાદ નગર", "નવરંગપુરા",
+  "પાલડી", "મોટેરા", "અમદાવાદ",
+] as const;
+
+// Latin-only subset: proper nouns + the English property terms that appear inside
+// an otherwise-Gujarati sentence ("budget", "site visit", "BHK"). Nova-3's `multi`
+// code-switch set does NOT include Gujarati, so a `gu` session is standalone and
+// the embedded English is exactly what it is weakest on — biasing these terms is
+// the main mitigation available. (See dgLanguage() in deepgram-live.service.ts.)
+const GU_LATIN_KEYTERMS = [
+  "Ambli", "Bopal", "Ambli-Bopal Road", "Ambli Bopal Road", "Iskcon",
+  "bungalow", "penthouse", "duplex",
+  "Sindhu", "Bhavan", "Rajpath", "Rangoli",
+  "Thaltej", "Vastrapur", "Nehrunagar", "Vaishnodevi", "Gota",
+  "Shilaj", "Nandoli", "Bodakdev", "Satellite", "Prahlad Nagar",
+  "BHK", "budget", "site visit", "sample apartment", "Ready to Move In",
+] as const;
+
+// Keyterms for a session, chosen by the Deepgram `language` the session opened
+// with. Sending Devanagari terms to a `gu` session is dead weight — those tokens
+// can never appear in its output — and vice versa.
+//
+// hi/en route to `multi`, which emits Hindi in Devanagari and English in Latin,
+// so that path keeps the combined Latin+Devanagari list it has always used. This
+// function returns the EXACT same array for multi, so hi/en behaviour is unchanged.
+export function keytermsFor(dgLanguage: string): readonly string[] {
+  if (dgLanguage === "gu") return [...GU_LATIN_KEYTERMS, ...GUJARATI_KEYTERMS];
+  return PROPER_NOUN_KEYTERMS;
+}

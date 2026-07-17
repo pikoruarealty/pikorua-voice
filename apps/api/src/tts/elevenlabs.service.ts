@@ -38,6 +38,30 @@ const TTS_RESPELLINGS: Array<[RegExp, string]> = [
   [/\btake care[!.]*/gi, "Thank you."],
 ];
 
+// Gujarati counterpart of TTS_RESPELLINGS. Same job, same reasoning — the Latin
+// token mid-Gujarati-sentence gets English phonemes and sounds glitchy — but in
+// Gujarati script. Kept in step with the spellings used by i18n/prompt-gu.ts and
+// the Gujarati keyterms in stt/keyterms.ts; if you change a proper noun in one,
+// change it in all three.
+const GU_TTS_RESPELLINGS: Array<[RegExp, string]> = [
+  [/\bcrores?\b/gi, "કરોડ"],
+  [/\blakhs?\b/gi, "લાખ"],
+  [/\bISKCON\b/gi, "ઇસ્કોન"],
+  [/\bAmbli\b/gi, "અંબલી"],
+  [/\bBopal\b/gi, "બોપલ"],
+  [/\bAhmedabad\b/gi, "અમદાવાદ"],
+  [/\bbungalows\b/gi, "બંગલો"],
+  [/\bbungalow\b/gi, "બંગલો"],
+  [/\bBodakdev\b/gi, "બોડકદેવ"],
+  [/\bbrochures?\b/gi, "બ્રોશર"],
+  // Same rationale as the Hindi "इक्सेप्शनल": avoid opening with એક ("one"),
+  // which makes the engine pause after it.
+  [/\bexceptional\b/gi, "ઇક્સેપ્શનલ"],
+  [/\bgroup\b/gi, "ગ્રુપ"],
+  [/\brealty\b/gi, "રિયલ્ટી"],
+  [/\btake care[!.]*/gi, "Thank you."],
+];
+
 // Area units: in Hindi mode the engine reads "square feet" with English
 // phonemes mid-Hindi-sentence, which sounds glitchy — respell in Devanagari.
 const SQ_FT_PATTERNS: RegExp[] = [
@@ -225,6 +249,47 @@ function hindiNumberWords(n: number): string {
   return parts.join(" ");
 }
 
+// Gujarati 0–99. Mirrors HINDI_0_99 and is used for the same thing: a scheduling
+// time spoken aloud on a Gujarati call reads naturally as a Gujarati word
+// ("3 વાગ્યે" → "ત્રણ વાગ્યે"), not as a digit. Figures that must stay English on
+// every call (BHK counts, areas, distances, durations, dates, clock times) are
+// converted upstream and never reach this table.
+// NEEDS NATIVE REVIEW: the 40–99 forms in particular have regional variants.
+const GUJARATI_0_99 = [
+  "શૂન્ય", "એક", "બે", "ત્રણ", "ચાર", "પાંચ", "છ", "સાત", "આઠ", "નવ",
+  "દસ", "અગિયાર", "બાર", "તેર", "ચૌદ", "પંદર", "સોળ", "સત્તર", "અઢાર", "ઓગણીસ",
+  "વીસ", "એકવીસ", "બાવીસ", "ત્રેવીસ", "ચોવીસ", "પચીસ", "છવીસ", "સત્તાવીસ", "અઠ્ઠાવીસ", "ઓગણત્રીસ",
+  "ત્રીસ", "એકત્રીસ", "બત્રીસ", "તેત્રીસ", "ચોત્રીસ", "પાંત્રીસ", "છત્રીસ", "સાડત્રીસ", "આડત્રીસ", "ઓગણચાલીસ",
+  "ચાલીસ", "એકતાલીસ", "બેતાલીસ", "તેતાલીસ", "ચુંમાલીસ", "પિસ્તાલીસ", "છેતાલીસ", "સુડતાલીસ", "અડતાલીસ", "ઓગણપચાસ",
+  "પચાસ", "એકાવન", "બાવન", "ત્રેપન", "ચોપન", "પંચાવન", "છપ્પન", "સત્તાવન", "અઠ્ઠાવન", "ઓગણસાઠ",
+  "સાઠ", "એકસઠ", "બાસઠ", "ત્રેસઠ", "ચોસઠ", "પાંસઠ", "છાસઠ", "સડસઠ", "અડસઠ", "ઓગણસિત્તેર",
+  "સિત્તેર", "એકોતેર", "બોતેર", "તોતેર", "ચુમોતેર", "પંચોતેર", "છોતેર", "સિત્યોતેર", "ઇઠ્યોતેર", "ઓગણાએંસી",
+  "એંસી", "એક્યાસી", "બ્યાસી", "ત્યાસી", "ચોર્યાસી", "પંચ્યાસી", "છ્યાસી", "સિત્યાસી", "ઈઠ્યાસી", "નેવ્યાસી",
+  "નેવું", "એકાણું", "બાણું", "ત્રાણું", "ચોરાણું", "પંચાણું", "છન્નું", "સત્તાણું", "અઠ્ઠાણું", "નવ્વાણું",
+];
+
+function gujaratiNumberWords(n: number): string {
+  if (n < 100) return GUJARATI_0_99[n];
+  const parts: string[] = [];
+  const lakh = Math.floor(n / 100000);
+  if (lakh) {
+    parts.push(gujaratiNumberWords(lakh), "લાખ");
+    n %= 100000;
+  }
+  const thousand = Math.floor(n / 1000);
+  if (thousand) {
+    parts.push(gujaratiNumberWords(thousand), "હજાર");
+    n %= 1000;
+  }
+  const hundred = Math.floor(n / 100);
+  if (hundred) {
+    parts.push(GUJARATI_0_99[hundred], "સો");
+    n %= 100;
+  }
+  if (n) parts.push(GUJARATI_0_99[n]);
+  return parts.join(" ");
+}
+
 const EN_0_19 = [
   "zero",
   "one",
@@ -288,9 +353,16 @@ function englishNumberWords(n: number): string {
   return parts.join(" ");
 }
 
+// NOTE: gu used to return true here. That was the single most dangerous line of
+// the old Gujarati-as-Hindi aliasing: it ran the DEVANAGARI respelling tables
+// over Gujarati text, so a gu reply came out as a mix of two scripts. Gujarati
+// now has its own mode and its own tables below.
 function isHindiMode(languageCode: string): boolean {
-  const code = languageCode.toLowerCase();
-  return code.startsWith("hi") || code.startsWith("gu");
+  return languageCode.toLowerCase().startsWith("hi");
+}
+
+function isGujaratiMode(languageCode: string): boolean {
+  return languageCode.toLowerCase().startsWith("gu");
 }
 
 // Area-figure units (square feet / square yards) in the spellings the model
@@ -424,6 +496,10 @@ const CLOCK_AMPM_RE = /\b(\d{1,2})\s*(am|pm)\b/gi;
 export function normalizeForTts(text: string, languageCode = "hi"): string {
   let out = text;
   const hindi = isHindiMode(languageCode);
+  const gujarati = isGujaratiMode(languageCode);
+  // "Indic mode" = the rules that are about reading an Indian-language sentence
+  // rather than about Devanagari specifically (clock words, native number words).
+  const indic = hindi || gujarati;
 
   // Property sizes: number spoken in English in every mode. Runs first so the
   // unit respelling and general number pass below see English words, not digits.
@@ -449,6 +525,18 @@ export function normalizeForTts(text: string, languageCode = "hi"): string {
     for (const [pattern, replacement] of ROMAN_HINDI_WORDS) {
       out = out.replace(pattern, replacement);
     }
+  } else if (gujarati) {
+    for (const [pattern, replacement] of GU_TTS_RESPELLINGS) {
+      out = out.replace(pattern, replacement);
+    }
+    for (const pattern of SQ_FT_PATTERNS) {
+      out = out.replace(pattern, "સ્ક્વેર ફીટ");
+    }
+    // NOTE: no romanized-Gujarati transliteration table, unlike Hindi. The Hindi
+    // one exists because the model leaks romanized Hindi often enough to matter;
+    // whether it does the same in Gujarati is unknown until we have real call
+    // data. Add one here if transcripts show the leak — don't port the Hindi
+    // table, its tokens are Hindi words.
   } else {
     // Hard-block "take care" — replace with the correct sign-off at the TTS layer.
     out = out.replace(/\btake care[!.]*/gi, "Thank you.");
@@ -468,10 +556,11 @@ export function normalizeForTts(text: string, languageCode = "hi"): string {
     return half ? `${wordWhole} and a half BHK` : `${wordWhole} BHK`;
   });
 
-  // Clock times → English words in Hindi mode (English mode already reads the
-  // digits in English, so leave those as digits). The scheduling "N बजे" form is
-  // untouched here and stays Hindi ("ग्यारह बजे") via the general pass below.
-  if (hindi) {
+  // Clock times → English words in Hindi/Gujarati mode (English mode already
+  // reads the digits in English, so leave those as digits). The scheduling
+  // "N बजे" / "N વાગ્યે" form is untouched here and stays in the local language
+  // ("ग्यारह बजे" / "અગિયાર વાગ્યે") via the general pass below.
+  if (indic) {
     out = out.replace(CLOCK_COLON_RE, (_m, h, m, ap) =>
       clockToEnglishWords(parseInt(h, 10), parseInt(m, 10), ap),
     );
@@ -509,7 +598,9 @@ export function normalizeForTts(text: string, languageCode = "hi"): string {
     const before = str.slice(0, offset);
     if (/[:.]\s*$/.test(before)) return match;
     if (/^\s*:/.test(after)) return match;
-    return hindi ? hindiNumberWords(n) : englishNumberWords(n);
+    if (hindi) return hindiNumberWords(n);
+    if (gujarati) return gujaratiNumberWords(n);
+    return englishNumberWords(n);
   });
   return out;
 }

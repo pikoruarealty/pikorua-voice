@@ -501,6 +501,19 @@ export function normalizeForTts(text: string, languageCode = "hi"): string {
   // rather than about Devanagari specifically (clock words, native number words).
   const indic = hindi || gujarati;
 
+  // Drop the rupee sign if the model ever leaks it into a spoken amount ("₹2 Cr").
+  // The unit word ("crore"/"lakh") carries the meaning; the symbol itself has no
+  // spoken form and the engine either voices "rupee" mid-figure or emits a glitch.
+  out = out.replace(/₹\s*/g, "");
+
+  // Expand the crore abbreviation "Cr" / "CR" ("5 Cr") to the full word for EVERY
+  // mode, up front: left in Latin the engine spells the letters or mis-voices it
+  // (heard on gu calls as "કરોધ"). English then reads "crore" natively; the Hindi
+  // and Gujarati respelling tables below turn the expanded "crore" into करोड़/કરોડ,
+  // so the abbreviation and the full word can never diverge. "crore" itself is
+  // untouched — no word boundary sits inside "cr|ore".
+  out = out.replace(/\bcr\b\.?/gi, "crore");
+
   // Property sizes: number spoken in English in every mode. Runs first so the
   // unit respelling and general number pass below see English words, not digits.
   out = areaNumbersToEnglish(out);

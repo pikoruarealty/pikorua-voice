@@ -201,3 +201,32 @@ test("'see you at N' sign-off uses an English number in both modes", () => {
     "see you at four thirty PM. Thank you.",
   );
 });
+
+test("crore abbreviation 'Cr'/'CR' expands to the spoken word in every mode", () => {
+  const { normalizeForTts } = require("../../apps/api/dist/tts/elevenlabs.service");
+
+  // The script writes budgets as "5 Cr". Left in Latin the engine mis-voices the
+  // letters — on Gujarati calls this was heard as "કરોધ". It must read as the crore
+  // word: करोड़ (hi) / કરોડ (gu) / "crore" (en).
+  assert.equal(normalizeForTts("around 5 Cr", "gu"), "around પાંચ કરોડ");
+  assert.equal(normalizeForTts("2 CR", "gu"), "બે કરોડ");
+  assert.equal(normalizeForTts("5 Cr", "hi"), "पाँच करोड़");
+  assert.equal(normalizeForTts("5 Cr", "en"), "five crore");
+  // The full word and the abbreviation must land on the SAME spoken form.
+  assert.equal(normalizeForTts("5 Cr", "gu"), normalizeForTts("5 crore", "gu"));
+  assert.equal(normalizeForTts("5 Cr", "hi"), normalizeForTts("5 crore", "hi"));
+  // Must NOT fire inside ordinary words that merely start with "cr".
+  assert.equal(normalizeForTts("Cricket", "gu"), "Cricket");
+  assert.equal(normalizeForTts("describe the microwave", "gu"), "describe the microwave");
+});
+
+test("the rupee sign is dropped from spoken amounts in every mode", () => {
+  const { normalizeForTts } = require("../../apps/api/dist/tts/elevenlabs.service");
+
+  // "₹" has no spoken form; the unit word carries the meaning. The engine otherwise
+  // voices "rupee" mid-figure or glitches on the symbol.
+  assert.equal(normalizeForTts("₹2 Cr", "gu"), "બે કરોડ");
+  assert.equal(normalizeForTts("₹2 Cr", "hi"), "दो करोड़");
+  assert.equal(normalizeForTts("₹5 crore", "en"), "five crore");
+  assert.equal(normalizeForTts("₹ 3 crore", "gu"), "ત્રણ કરોડ");
+});

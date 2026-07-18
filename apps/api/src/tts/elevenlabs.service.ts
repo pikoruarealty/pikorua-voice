@@ -44,7 +44,14 @@ const TTS_RESPELLINGS: Array<[RegExp, string]> = [
 // the Gujarati keyterms in stt/keyterms.ts; if you change a proper noun in one,
 // change it in all three.
 const GU_TTS_RESPELLINGS: Array<[RegExp, string]> = [
-  [/\bcrores?\b/gi, "કરોડ"],
+  // CRORE IS THE EXCEPTION to this table's usual "Latin → Gujarati" direction.
+  // Bulbul mis-voices the Gujarati word કરોડ as "કરોધ" (karodh) but reads the LATIN
+  // word "crore" correctly (chosen by ear, tools/staging/sarvam-fix-check.js). The
+  // gu prompt writes budget anchors as "કરોડ", so convert THAT (and plural કરોડો)
+  // to Latin — the reverse direction — and never respell "crore"/"Cr" into Gujarati.
+  // The "Cr" abbreviation is already expanded to "crore" up top in normalizeForTts,
+  // so all three inputs (કરોડ / crore / Cr) land on the same well-voiced Latin word.
+  [/કરોડો?/g, "crore"],
   [/\blakhs?\b/gi, "લાખ"],
   [/\bISKCON\b/gi, "ઇસ્કોન"],
   [/\bAmbli\b/gi, "અંબલી"],

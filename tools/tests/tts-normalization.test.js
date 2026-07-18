@@ -202,16 +202,30 @@ test("'see you at N' sign-off uses an English number in both modes", () => {
   );
 });
 
-test("crore abbreviation 'Cr'/'CR' expands to the spoken word in every mode", () => {
+test("crore normalizes to the correctly-voiced form in every mode", () => {
   const { normalizeForTts } = require("../../apps/api/dist/tts/elevenlabs.service");
 
-  // The script writes budgets as "5 Cr". Left in Latin the engine mis-voices the
-  // letters — on Gujarati calls this was heard as "કરોધ". It must read as the crore
-  // word: करोड़ (hi) / કરોડ (gu) / "crore" (en).
-  assert.equal(normalizeForTts("around 5 Cr", "gu"), "around પાંચ કરોડ");
-  assert.equal(normalizeForTts("2 CR", "gu"), "બે કરોડ");
+  // GUJARATI: Bulbul mis-voices the Gujarati word કરોડ as "કરોધ" but reads the LATIN
+  // "crore" correctly (chosen by ear). The gu prompt writes anchors as "કરોડ", so
+  // the script word AND the "Cr" abbreviation must both land on Latin "crore".
+  assert.equal(normalizeForTts("3 કરોડ", "gu"), "ત્રણ crore");
+  assert.equal(
+    normalizeForTts("5 કરોડ, 10 કરોડ, 15 કરોડ", "gu"),
+    "પાંચ crore, દસ crore, પંદર crore",
+  );
+  assert.equal(normalizeForTts("કરોડો", "gu"), "crore");
+  assert.equal(normalizeForTts("around 5 Cr", "gu"), "around પાંચ crore");
+  assert.equal(normalizeForTts("2 CR", "gu"), "બે crore");
+  // gu must NEVER emit the mis-voiced Gujarati કરોડ back out.
+  assert.ok(!normalizeForTts("3 કરોડ", "gu").includes("કરોડ"));
+  assert.ok(!normalizeForTts("5 Cr", "gu").includes("કરોડ"));
+
+  // HINDI keeps the Devanagari word (ElevenLabs voices करोड़ fine) — unchanged.
   assert.equal(normalizeForTts("5 Cr", "hi"), "पाँच करोड़");
+  assert.equal(normalizeForTts("3 करोड़", "hi"), "तीन करोड़");
+  // ENGLISH reads the word natively.
   assert.equal(normalizeForTts("5 Cr", "en"), "five crore");
+
   // The full word and the abbreviation must land on the SAME spoken form.
   assert.equal(normalizeForTts("5 Cr", "gu"), normalizeForTts("5 crore", "gu"));
   assert.equal(normalizeForTts("5 Cr", "hi"), normalizeForTts("5 crore", "hi"));
@@ -225,8 +239,8 @@ test("the rupee sign is dropped from spoken amounts in every mode", () => {
 
   // "₹" has no spoken form; the unit word carries the meaning. The engine otherwise
   // voices "rupee" mid-figure or glitches on the symbol.
-  assert.equal(normalizeForTts("₹2 Cr", "gu"), "બે કરોડ");
+  assert.equal(normalizeForTts("₹2 Cr", "gu"), "બે crore");
   assert.equal(normalizeForTts("₹2 Cr", "hi"), "दो करोड़");
   assert.equal(normalizeForTts("₹5 crore", "en"), "five crore");
-  assert.equal(normalizeForTts("₹ 3 crore", "gu"), "ત્રણ કરોડ");
+  assert.equal(normalizeForTts("₹ 3 crore", "gu"), "ત્રણ crore");
 });

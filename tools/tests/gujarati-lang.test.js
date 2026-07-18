@@ -65,7 +65,11 @@ test("gu-mode TTS never emits Devanagari", () => {
   const out = normalizeForTts("5 crore, 3 lakh, bungalow in Ambli, Ahmedabad", "gu-IN");
   assert.ok(!DEVANAGARI.test(out), `gu output must not contain Devanagari: ${out}`);
   assert.ok(GUJARATI.test(out), `gu output should contain Gujarati script: ${out}`);
-  assert.match(out, /કરોડ/);
+  // crore is the deliberate EXCEPTION: Bulbul mis-voices the Gujarati કરોડ as
+  // "કરોધ", so gu mode keeps the LATIN word "crore" (chosen by ear) and must never
+  // respell it to Gujarati. Every OTHER Indian word below IS respelled to Gujarati.
+  assert.match(out, /\bcrore\b/);
+  assert.ok(!out.includes("કરોડ"), `crore must stay Latin in gu mode: ${out}`);
   assert.match(out, /લાખ/);
   assert.match(out, /બંગલો/);
   assert.match(out, /અંબલી/);

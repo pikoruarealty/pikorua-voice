@@ -597,80 +597,101 @@ export class CallRuntimeService implements OnApplicationShutdown {
     sink.signal.addEventListener("abort", abortTurn);
     const watchdog = setTimeout(abortTurn, this.turnTimeoutMs());
 
-    let sentenceIndex = 0;
-    let dispatchedText = "";
-    let ttsMsTotal = 0;
-    let ttsQueue: Promise<void> = Promise.resolve();
-    let ttfaMs: number | null = null;
-
-    const streamSentence = async (text: string, idx: number) => {
-      let first = true;
-      const res = await this.tts.synthesizeStream(text, {
-        languageCode: this.replyLanguageCode(text, state.locale),
-        outputFormat: opts?.outputFormat,
-        signal: turnController.signal,
-        onChunk: (chunk) => {
-          if (first) {
-            first = false;
-            if (ttfaMs === null) ttfaMs = Date.now() - turnStart;
-          }
-          sink.onAudioChunk(chunk, { sentenceIndex: idx, last: false });
-        },
-      });
-      sink.onAudioChunk(Buffer.alloc(0), { sentenceIndex: idx, last: true });
-      return res;
-    };
-
-    const dispatchSentence = (sentence: string) => {
-      const text = sentence.trim();
-      if (!text || turnController.signal.aborted) return;
-      if (this.guardrail.checkHard(text).triggered) return;
-      const idx = sentenceIndex++;
-      dispatchedText = dispatchedText ? `${dispatchedText} ${text}` : text;
-      sink.onReplyDelta?.(text);
-      ttsQueue = ttsQueue
-        .then(async () => {
-          if (turnController.signal.aborted) return;
-          const res = await streamSentence(text, idx);
-          ttsMsTotal += res.ttsMs;
-        })
-        .catch(() => {});
-    };
+    // The opening is a fixed template (no LLM call) — for the default flow it is
+    // identical to the intro example in the system prompt, so downstream turns
+    // reading it back from history stay coherent. reconfirm/feedback calls open
+    // with their own purpose-specific line (see greetingText).
+    const reply = this.greetingText(state);
+    const outputFormat = opts?.outputFormat;
 
     // Synthetic trigger — never spoken, just satisfies the provider requirement
     // that a conversation history must begin with a user message. Kept in history
     // so subsequent turns know step 1 (intro) is already done.
     const GREETING_TRIGGER: LlmMessage = { role: "user", content: "Begin the call." };
 
-    // The opening is a fixed template (no LLM call) — for the default flow it is
-    // identical to the intro example in the system prompt, so downstream turns
-    // reading it back from history stay coherent. reconfirm/feedback calls open
-    // with their own purpose-specific line (see greetingText).
-    const reply = this.greetingText(state);
+    let ttfaMs: number | null = null;
+    let ttsMsTotal = 0;
+
+    // Gujarati streams the greeting through the SAME turn-level Sarvam WS session
+    // the live turns use (openWsSession): one coherent synthesis — steady pitch,
+    // human pauses, first audio ~200ms — so the opening sounds identical to the
+    // rest of the call. It is synthesized FRESH every call ON PURPOSE: Sarvam's
+    // temperature gives natural variation, so the greeting sounds spoken, not
+    // recorded. (An earlier version cached the audio and replayed one frozen take —
+    // that identical-every-call delivery is exactly what read as "robotic".) hi/en
+    // stay on the single synthesizeStream request, unchanged.
+    const useWs = this.langMode(state.locale) === "gu";
 
     this.activeTurns += 1;
     try {
-      // Synthesize the WHOLE greeting in ONE TTS request (unlike turns, which are
-      // sentence-split for pipelining). Splitting made each clause an independent
-      // ElevenLabs generation, so prosody reset at every sentence boundary — an
-      // audible tone shift mid-greeting. One request keeps the opening continuous.
-      dispatchSentence(reply);
+      // Text on screen first so the reply appears the instant the greeting begins —
+      // audio follows immediately below with no lag.
+      sink.onReplyDelta?.(reply);
 
-      // Commit trigger + greeting to history before TTS drains so a barge-in
-      // that arrives during playback still sees a complete greeting in context.
+      if (useWs && !turnController.signal.aborted) {
+        await new Promise<void>((resolve) => {
+          let done = false;
+          const finish = () => {
+            if (done) return;
+            done = true;
+            sink.onAudioChunk(Buffer.alloc(0), { sentenceIndex: 0, last: true });
+            resolve();
+          };
+          const session = this.tts.openWsSession({
+            languageCode: this.ttsLanguageCode(state.locale) ?? "hi",
+            outputFormat,
+            signal: turnController.signal,
+            onChunk: (chunk) => {
+              if (ttfaMs === null) ttfaMs = Date.now() - turnStart;
+              sink.onAudioChunk(chunk, { sentenceIndex: 0, last: false });
+            },
+            onDone: finish,
+            onError: (err) => {
+              this.logger.warn(`Greeting WS TTS error call=${callId}: ${err}`);
+              finish();
+            },
+          });
+          // One coherent synthesis: send the whole greeting, then flush to tell
+          // Sarvam no more text is coming so it finalises instead of stalling.
+          session.sendText(reply);
+          session.flush();
+        });
+      } else if (!turnController.signal.aborted) {
+        // hi/en: synthesize the WHOLE greeting in ONE TTS request (unlike turns,
+        // which are sentence-split for pipelining — splitting made each clause an
+        // independent generation, resetting prosody at every boundary and shifting
+        // tone mid-greeting). One request keeps the opening continuous.
+        let first = true;
+        const res = await this.tts.synthesizeStream(reply, {
+          languageCode: this.replyLanguageCode(reply, state.locale),
+          outputFormat,
+          signal: turnController.signal,
+          onChunk: (chunk) => {
+            if (first) {
+              first = false;
+              if (ttfaMs === null) ttfaMs = Date.now() - turnStart;
+            }
+            sink.onAudioChunk(chunk, { sentenceIndex: 0, last: false });
+          },
+        });
+        sink.onAudioChunk(Buffer.alloc(0), { sentenceIndex: 0, last: true });
+        ttsMsTotal += res.ttsMs;
+      }
+
+      // Commit trigger + greeting to history before returning so a barge-in that
+      // arrives during playback still sees a complete greeting in context.
       state.history.push(GREETING_TRIGGER);
       state.history.push({ role: "assistant", content: reply });
-      await ttsQueue;
       this.persistState(callId, state);
 
       if (sink.signal.aborted) {
-        return { reply: dispatchedText, canceled: true, skipped: false };
+        return { reply, canceled: true, skipped: false };
       }
 
       this.logger.log(
         `Greeting call=${callId} templated ttfa=${ttfaMs ?? "?"}ms tts=${ttsMsTotal}ms`,
       );
-      return { reply: dispatchedText || reply, canceled: false, skipped: false };
+      return { reply, canceled: false, skipped: false };
     } finally {
       clearTimeout(watchdog);
       sink.signal.removeEventListener("abort", abortTurn);
@@ -2076,14 +2097,14 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
     // of one HTTP call per sentence. Sentences are dispatched as text frames;
     // ElevenLabs pipelines them so the next sentence starts generating while the
     // previous is still playing. Controlled by TTS_WS_STREAMING_ENABLED env var.
-    // Gujarati is excluded: WS input-streaming is an ElevenLabs capability and
-    // Sarvam's WebSocket API is not implemented, so a gu turn must take the
-    // HTTP-per-sentence path. Without this guard a gu call with
-    // TTS_WS_STREAMING_ENABLED=true would open an ElevenLabs WS and feed it
-    // Gujarati text it cannot speak.
+    //
+    // Gujarati ALWAYS uses this path (regardless of the env flag): the Sarvam
+    // turn session gives one coherent synthesis — steady pitch and human pauses —
+    // where per-sentence HTTP would reset the prosody between sentences. hi/en
+    // still opt in via the env flag only, so their behaviour is unchanged.
     const useWsStreaming =
-      this.config.get<boolean>("TTS_WS_STREAMING_ENABLED") === true &&
-      this.langMode(locale) !== "gu";
+      this.langMode(locale) === "gu" ||
+      this.config.get<boolean>("TTS_WS_STREAMING_ENABLED") === true;
     let wsSession: ReturnType<typeof this.tts.openWsSession> | null = null;
     let resolveWsDone: () => void = () => {};
     const wsAudioDone: Promise<void> | null = useWsStreaming

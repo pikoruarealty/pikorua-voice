@@ -94,11 +94,11 @@ export class TtsRouter {
     this.elevenlabs.prewarmClips(texts, opts);
   }
 
-  // WS input-streaming is an ElevenLabs-only capability — Sarvam's WebSocket API
-  // is not implemented here yet. The call runtime must not open a WS session for
-  // a Gujarati turn; it guards on langMode before calling this (see
-  // useWsStreaming in processUtteranceStream). Delegating unconditionally is
-  // therefore safe, and keeps the hi/en path byte-identical.
+  // Turn-level WS session, routed by language: Gujarati → Sarvam (coherent
+  // whole-turn synthesis, steady pitch, human pauses), everything else →
+  // ElevenLabs. A gu turn ALWAYS takes this path now (see useWsStreaming in
+  // processUtteranceStream) so its reply is one coherent synthesis instead of
+  // per-sentence fragments. hi/en behaviour is unchanged.
   openWsSession(
     opts: SynthesizeOptions & {
       onChunk: (chunk: Buffer) => void;
@@ -107,6 +107,6 @@ export class TtsRouter {
       signal?: AbortSignal;
     },
   ): { sendText: (text: string) => void; flush: () => void; close: () => void } {
-    return this.elevenlabs.openWsSession(opts);
+    return this.isGujarati(opts) ? this.sarvam.openWsSession(opts) : this.elevenlabs.openWsSession(opts);
   }
 }

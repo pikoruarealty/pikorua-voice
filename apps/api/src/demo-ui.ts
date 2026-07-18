@@ -221,6 +221,12 @@ export const DEMO_HTML = `<!doctype html>
 
     async function openMic() {
       audioContext = new AudioContext();
+      // Create the playback context now, inside the click gesture, so autoplay
+      // policy lets the first Gujarati audio play without a second interaction.
+      if (isGuSession() && !pcmCtx) {
+        pcmCtx = new (window.AudioContext || window.webkitAudioContext)();
+        pcmNextTime = pcmCtx.currentTime;
+      }
       stream = await navigator.mediaDevices.getUserMedia({
         audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
       });
@@ -336,9 +342,114 @@ export const DEMO_HTML = `<!doctype html>
       try { els.audio.pause(); } catch {}
       playing = false;
       assistantSpeaking = false;
+      pcmStop();
+    }
+
+    // ── Streaming PCM player (Gujarati / Sarvam path) ─────────────────────────
+    // Sarvam streams raw s16le 8 kHz PCM as the reply is synthesised. Play each
+    // chunk the instant it arrives via Web Audio, rather than buffering a whole
+    // sentence into an <audio> element — so Maya's voice starts as soon as the
+    // reply text does, with no per-sentence lag. Chunks are raw PCM (turn WS
+    // session) or a buffered WAV (greeting/fallback); a RIFF header is stripped.
+    let pcmCtx = null;
+    let pcmNextTime = 0;
+    let pcmSources = [];
+    let pcmDraining = false;
+    // Trailing byte of the previous chunk when it ended mid-sample. Carried into
+    // the next chunk so 16-bit samples never straddle a chunk boundary — a 1-byte
+    // misalignment turns every following sample into loud buzz, not a soft click.
+    let pcmResidual = null;
+
+    function isGuSession() {
+      return !!(session && String(session.language || "").toLowerCase().startsWith("gu"));
+    }
+
+    function pcmPush(rawBytes) {
+      if (!pcmCtx) pcmCtx = new (window.AudioContext || window.webkitAudioContext)();
+      if (pcmCtx.state === "suspended") pcmCtx.resume().catch(() => {});
+      let bytes = rawBytes;
+      let off = 0;
+      // "RIFF" → skip the 44-byte WAV header (buffered greeting/fallback chunks).
+      if (bytes.length >= 44 && bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46) off = 44;
+      // Prepend any leftover odd byte from the previous chunk so sample framing
+      // stays aligned across the boundary.
+      if (pcmResidual && pcmResidual.length) {
+        const tail = bytes.subarray(off);
+        const merged = new Uint8Array(pcmResidual.length + tail.length);
+        merged.set(pcmResidual, 0);
+        merged.set(tail, pcmResidual.length);
+        bytes = merged;
+        off = 0;
+      }
+      pcmResidual = null;
+      const avail = bytes.length - off;
+      const n = avail >> 1;
+      // Stash a trailing odd byte (a sample split across this chunk and the next).
+      if (avail & 1) pcmResidual = new Uint8Array(bytes.subarray(off + n * 2));
+      if (n <= 0) return;
+      const buf = pcmCtx.createBuffer(1, n, 8000);
+      const ch = buf.getChannelData(0);
+      for (let i = 0; i < n; i++) {
+        let s = (bytes[off + i * 2 + 1] << 8) | bytes[off + i * 2];
+        if (s >= 32768) s -= 65536;
+        ch[i] = s / 32768;
+      }
+      const src = pcmCtx.createBufferSource();
+      src.buffer = buf;
+      src.connect(pcmCtx.destination);
+      // Schedule back-to-back for gapless playback; if chunks fall behind
+      // realtime (network stall) restart from now so there's no long silence.
+      const at = Math.max(pcmCtx.currentTime + 0.02, pcmNextTime);
+      src.start(at);
+      pcmNextTime = at + buf.duration;
+      pcmSources.push(src);
+      assistantSpeaking = true;
+      src.onended = () => {
+        pcmSources = pcmSources.filter((s) => s !== src);
+        if (pcmSources.length === 0 && pcmDraining) pcmFinished();
+      };
+    }
+
+    function pcmFinished() {
+      pcmDraining = false;
+      pcmResidual = null;
+      assistantSpeaking = false;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        try { ws.send(JSON.stringify({ type: "playback-done" })); } catch {}
+      }
+      if (pendingEndCall) {
+        pendingEndCall = false;
+        void endConversation().then(() => setStatus("Call complete — lead details collected"));
+      } else if (conversationActive) {
+        setStatus("Listening");
+      }
+    }
+
+    // Called when the turn's audio is fully sent (reply-end/greeting-end): once
+    // the scheduled buffers finish, report playback-done.
+    function pcmMarkTurnEnd() {
+      if (pcmSources.length === 0) pcmFinished();
+      else pcmDraining = true;
+    }
+
+    function pcmStop() {
+      for (const s of pcmSources) { try { s.stop(); } catch {} }
+      pcmSources = [];
+      pcmDraining = false;
+      pcmResidual = null;
+      pcmNextTime = pcmCtx ? pcmCtx.currentTime : 0;
     }
 
     function handleAudioChunk(msg) {
+      // Gujarati: stream every chunk straight to the PCM player as it arrives —
+      // no per-sentence buffering, so audio tracks the reply text with no lag.
+      if (isGuSession()) {
+        if (msg.audioBase64) {
+          pcmPush(new Uint8Array(base64ToArrayBuffer(msg.audioBase64)));
+          if (assistantSpeaking) setStatus("Assistant speaking — you can interrupt");
+        }
+        return;
+      }
       const idx = Number(msg.sentenceIndex ?? 0);
       if (!sentenceChunks.has(idx)) sentenceChunks.set(idx, []);
       if (msg.audioBase64) sentenceChunks.get(idx).push(base64ToArrayBuffer(msg.audioBase64));
@@ -358,7 +469,7 @@ export const DEMO_HTML = `<!doctype html>
       if (msg.type === "partial") { els.transcript.textContent = msg.transcript + " …"; return; }
       if (msg.type === "holding") { els.transcript.textContent = (msg.transcript || "") + " …"; setStatus("Listening — please continue"); return; }
       if (msg.type === "turn-start") { els.transcript.textContent = msg.transcript || ""; els.reply.textContent = ""; setStatus(msg.transcript ? "Thinking…" : "Maya is connecting…"); return; }
-      if (msg.type === "greeting-end") { if (msg.reply) els.reply.textContent = msg.reply; setStatus("Listening — speak naturally, short pauses are fine"); return; }
+      if (msg.type === "greeting-end") { if (msg.reply) els.reply.textContent = msg.reply; if (isGuSession()) pcmMarkTurnEnd(); else setStatus("Listening — speak naturally, short pauses are fine"); return; }
       if (msg.type === "reply-chunk") { els.reply.textContent = (els.reply.textContent ? els.reply.textContent + " " : "") + (msg.text || ""); return; }
       if (msg.type === "filler") {
         if (!playing && playQueue.length === 0 && msg.audioBase64) enqueueAudio(new Uint8Array(base64ToArrayBuffer(msg.audioBase64)));
@@ -369,6 +480,12 @@ export const DEMO_HTML = `<!doctype html>
       if (msg.type === "reply-end") {
         els.transcript.textContent = msg.transcript || "(no transcript)";
         if (msg.reply) els.reply.textContent = msg.reply;
+        if (isGuSession()) {
+          // PCM is still playing out; defer end-call until the buffers drain.
+          if (msg.endCall) pendingEndCall = true;
+          if (!msg.canceled) pcmMarkTurnEnd();
+          return;
+        }
         if (msg.endCall) {
           if (playing || playQueue.length > 0) pendingEndCall = true;
           else { await endConversation(); setStatus("Call complete — lead details collected"); }

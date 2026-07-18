@@ -18,6 +18,18 @@ const GATEWAY = "apps/api/src/call-runtime/exotel-voicebot.gateway.ts";
 const DEEPGRAM = "apps/api/src/stt/deepgram-live.service.ts";
 const LLM = "apps/api/src/llm/llm.service.ts";
 const ENV = "apps/api/src/config/env.ts";
+const RUNTIME = "apps/api/src/call-runtime/call-runtime.service.ts";
+
+// Slice out the generateGreetingStream method body so assertions about the opening
+// can't be satisfied by unrelated code elsewhere in the (very large) service.
+function greetingStreamRegion(src) {
+  const start = src.indexOf("async generateGreetingStream");
+  assert.ok(start !== -1, "generateGreetingStream must exist");
+  // The next method after it in source order.
+  const end = src.indexOf("private allFallbackLines", start);
+  assert.ok(end !== -1 && end > start, "allFallbackLines must follow generateGreetingStream");
+  return src.slice(start, end);
+}
 
 // Pull the numeric default out of `agcNumber(process.env.NAME, <default>)`.
 const agcDefault = (src, name) => {
@@ -147,5 +159,43 @@ test("LLM timeout fallback literal matches the env schema default", () => {
     envDefault(env, "OPENROUTER_TIMEOUT_MS"),
     "the ?? literal is unreachable (zod .default() always fills the value) — " +
       "keep it equal to the schema default so it can't misrepresent it",
+  );
+});
+
+// The opening line is a fixed template — it must NEVER reach the LLM. A regression
+// that reintroduced an LLM call for the greeting would put a 1.5-2.5s round-trip
+// before Maya's very first word, the exact latency this design removed.
+test("the greeting is templated — no LLM call before Maya's first word", () => {
+  const region = greetingStreamRegion(read(RUNTIME));
+  assert.ok(
+    !/this\.llm\./.test(region),
+    "generateGreetingStream must not call this.llm.* — the opening is a fixed template",
+  );
+  // It resolves the wording from the template, not a model.
+  assert.match(region, /this\.greetingText\(state\)/);
+});
+
+// The Gujarati greeting streams through the SAME turn-level WS session the live
+// turns use, and is synthesized FRESH every call. This is deliberate: Sarvam's
+// temperature gives each synthesis natural variation, so the opening sounds spoken.
+// Caching the audio and replaying one frozen take made every call identical, which
+// read as "robotic" — so the greeting must NOT be served from a stored buffer.
+test("the Gujarati greeting streams fresh through the turn-level WS session", () => {
+  const region = greetingStreamRegion(read(RUNTIME));
+
+  // gu takes the openWsSession path (one coherent synthesis, ~200ms first audio).
+  assert.match(
+    region,
+    /this\.tts\.openWsSession\(/,
+    "the Gujarati greeting must stream through openWsSession like live turns",
+  );
+  assert.match(region, /session\.sendText\(reply\)/, "the whole greeting is sent as one text frame");
+  assert.match(region, /session\.flush\(\)/, "flush finalises the synthesis so it doesn't stall");
+
+  // No frozen-take cache: the greeting is never served from a stored audio buffer.
+  assert.ok(
+    !/greetingAudioCache/.test(region),
+    "the greeting must be synthesized fresh, not replayed from a cached buffer " +
+      "(a frozen take reads as robotic)",
   );
 });

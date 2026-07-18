@@ -444,4 +444,156 @@ export class SarvamService {
     );
     throw new ServiceUnavailableException("Sarvam synthesis failed");
   }
+
+  // Turn-level WebSocket session — ONE socket for the whole reply. Sentences are
+  // fed in via sendText() as the LLM produces them; Sarvam pipelines them into a
+  // single coherent synthesis and streams raw PCM back.
+  //
+  // WHY (vs the per-sentence synthesizeStream): a fresh socket per sentence makes
+  // Sarvam restart its prosody each time, so pitch jumps between sentences and the
+  // inter-sentence pauses sound mechanical. Feeding the whole turn into one
+  // session keeps ONE pitch contour and natural pauses at the punctuation — and
+  // it is LOWER latency than buffering each sentence, because audio streams out as
+  // soon as the first sentence is buffered (~200ms), not after each full sentence.
+  //
+  // Always emits RAW linear16 PCM (headers stripped): Exotel's PcmReframer and the
+  // browser demo's Web Audio player both consume raw PCM. Mirrors the shape of
+  // ElevenlabsService.openWsSession so TtsRouter can pick between them by language.
+  openWsSession(
+    opts: SynthesizeOptions & {
+      onChunk: (chunk: Buffer) => void;
+      onDone: () => void;
+      onError: (err: string) => void;
+      signal?: AbortSignal;
+    },
+  ): { sendText: (text: string) => void; flush: () => void; close: () => void } {
+    const cfg = this.requestConfig();
+    const url = `${SARVAM_TTS_WS_URL}?model=${encodeURIComponent(cfg.model)}&send_completion_event=true`;
+
+    let closed = false;
+    let finished = false;
+    let wsOpen = false;
+    const pending: string[] = []; // texts queued before the socket opened
+    let flushQueued = false;
+
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      opts.onDone();
+    };
+
+    const ws = new WebSocket(url, { headers: { "api-subscription-key": cfg.key } });
+
+    ws.on("open", () => {
+      if (closed) {
+        try {
+          ws.close();
+        } catch {}
+        return;
+      }
+      wsOpen = true;
+      try {
+        ws.send(
+          JSON.stringify({
+            type: "config",
+            data: {
+              target_language_code: "gu-IN",
+              speaker: cfg.speaker,
+              model: cfg.model,
+              output_audio_codec: "linear16",
+              speech_sample_rate: "8000",
+              pace: cfg.pace,
+              ...(cfg.temperature > 0 ? { temperature: cfg.temperature } : {}),
+              enable_preprocessing: cfg.preprocess,
+              min_buffer_size: SARVAM_MIN_BUFFER_SIZE,
+              max_chunk_length: SARVAM_MAX_CHUNK_LENGTH,
+            },
+          }),
+        );
+        for (const t of pending) ws.send(JSON.stringify({ type: "text", data: { text: t } }));
+        pending.length = 0;
+        if (flushQueued) ws.send(JSON.stringify({ type: "flush" }));
+      } catch (err) {
+        opts.onError(err instanceof Error ? err.message : String(err));
+        finish();
+      }
+    });
+
+    ws.on("message", (data) => {
+      if (closed) return; // drop stale audio after an abort/barge-in close
+      let msg: {
+        type?: string;
+        event_type?: string;
+        data?: { audio?: string; message?: string; event_type?: string };
+      };
+      try {
+        msg = JSON.parse(data.toString());
+      } catch {
+        return;
+      }
+      if (msg.type === "audio" && msg.data?.audio) {
+        const pcm = stripWavHeader(Buffer.from(msg.data.audio, "base64"));
+        if (pcm.length > 0) opts.onChunk(pcm);
+      } else if (
+        msg.type === "event" &&
+        (msg.event_type === "final" || msg.data?.event_type === "final")
+      ) {
+        finish();
+        try {
+          ws.close();
+        } catch {}
+      } else if (msg.type === "error") {
+        if (!closed) opts.onError(msg.data?.message ?? "Sarvam WS error");
+        finish();
+      }
+    });
+
+    ws.on("error", (err: Error) => {
+      if (!closed) opts.onError(err.message);
+      finish();
+    });
+    ws.on("close", () => finish());
+
+    opts.signal?.addEventListener("abort", () => {
+      closed = true;
+      try {
+        ws.close();
+      } catch {}
+    });
+
+    return {
+      sendText: (text: string) => {
+        if (closed) return;
+        const normalized = normalizeForTts(text, "gu");
+        if (!normalized.trim()) return;
+        if (wsOpen) {
+          try {
+            ws.send(JSON.stringify({ type: "text", data: { text: normalized } }));
+          } catch {}
+        } else {
+          pending.push(normalized);
+        }
+      },
+      flush: () => {
+        if (closed) return;
+        // Force generation of whatever text is still buffered and ask Sarvam for
+        // the `final` event so onDone fires once the last audio has drained.
+        if (wsOpen) {
+          try {
+            ws.send(JSON.stringify({ type: "flush" }));
+          } catch {}
+        } else {
+          flushQueued = true;
+        }
+      },
+      close: () => {
+        // Abort/barge-in/guardrail: stop immediately and unblock the caller.
+        closed = true;
+        try {
+          ws.close();
+        } catch {}
+        finish();
+      },
+    };
+  }
 }

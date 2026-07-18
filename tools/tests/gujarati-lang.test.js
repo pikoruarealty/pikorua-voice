@@ -185,16 +185,34 @@ test("nothing injects a concrete TTS provider directly — all go through TtsRou
   }
 });
 
-test("Gujarati turns never open an ElevenLabs WS session", () => {
-  // Sarvam has no WS implementation, so a gu turn must take the HTTP path.
-  // Without this guard, TTS_WS_STREAMING_ENABLED=true would feed Gujarati text
-  // to an ElevenLabs WS that cannot speak it.
-  const src = read("apps/api/src/call-runtime/call-runtime.service.ts");
+test("Gujarati turns always use the WS-turn path, routed to Sarvam (not ElevenLabs)", () => {
+  // Gujarati now uses a turn-level WS session for ONE coherent synthesis (steady
+  // pitch, human pauses). Two invariants keep it correct:
+  //  1. the runtime forces the WS path for gu (not gated on TTS_WS_STREAMING_ENABLED);
+  //  2. TtsRouter.openWsSession routes gu to SARVAM — ElevenLabs cannot speak it.
+  const runtime = read("apps/api/src/call-runtime/call-runtime.service.ts");
   assert.match(
-    src,
-    /TTS_WS_STREAMING_ENABLED[\s\S]{0,200}?langMode\(locale\)\s*!==\s*"gu"/,
-    "useWsStreaming must exclude the gu mode",
+    runtime,
+    /useWsStreaming\s*=\s*[\s\S]{0,120}?langMode\(locale\)\s*===\s*"gu"/,
+    "useWsStreaming must be forced on for gu",
   );
+
+  const router = read("apps/api/src/tts/tts-router.ts");
+  assert.match(
+    router,
+    /openWsSession[\s\S]{0,400}?isGujarati\(opts\)\s*\?\s*this\.sarvam\.openWsSession/,
+    "TtsRouter.openWsSession must route gu to Sarvam",
+  );
+});
+
+test("SarvamService exposes a turn-level openWsSession", () => {
+  const src = read("apps/api/src/tts/sarvam.service.ts");
+  assert.match(src, /openWsSession\(/, "Sarvam must implement openWsSession");
+  // It must feed multiple text frames into one socket (sendText) and finalise
+  // with flush — that is what makes the whole reply one coherent synthesis.
+  assert.match(src, /sendText:/);
+  assert.match(src, /flush:/);
+  assert.match(src, /type:\s*"flush"/);
 });
 
 function makeRouter(env = {}) {

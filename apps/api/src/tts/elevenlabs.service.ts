@@ -663,11 +663,23 @@ export class ElevenlabsService {
     // too slowly at 1.0) without the rushed feel of the 1.2 maximum. Clamped so
     // an out-of-range env value can't break synthesis. Tune via ELEVENLABS_SPEED.
     const speed = Math.min(1.2, Math.max(0.7, Number(this.config.get("ELEVENLABS_SPEED") ?? 1.1)));
-    const modelId = String(this.config.get("ELEVENLABS_MODEL") ?? "eleven_turbo_v2_5");
+    // Gujarati needs a DIFFERENT MODEL. The configured model (turbo_v2_5) cannot
+    // speak Gujarati at all — the API rejects it outright:
+    //   400 "Model 'eleven_turbo_v2_5' does not support language_code gu"
+    // eleven_v3 does speak Gujarati, and — the whole point — it can use the SAME
+    // voice_id, so Maya keeps one identity across all three languages.
+    //
+    // The trade is latency: measured ~820-1135ms to first audio vs turbo's
+    // ~230-320ms (tools/staging/elevenlabs-v3-gujarati-spike.js). That is why
+    // this is only used for gu, never for hi/en.
     // Forcing the language makes the model read romanized Hindi correctly
     // ("aapko", "kya") instead of mangling it with English phonemes. English
     // words then get a natural Indian accent — right for Hinglish calls.
     const languageCode = this.resolveLanguageCode(opts);
+    const gujarati = isGujaratiMode(languageCode);
+    const modelId = gujarati
+      ? String(this.config.get("ELEVENLABS_GU_MODEL") ?? "eleven_v3")
+      : String(this.config.get("ELEVENLABS_MODEL") ?? "eleven_turbo_v2_5");
     return { key, vid, stability, similarityBoost, style, speed, modelId, languageCode };
   }
 

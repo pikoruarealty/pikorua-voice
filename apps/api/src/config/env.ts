@@ -106,14 +106,17 @@ export const envSchema = z
     // block a boot that only serves hi/en.
     SARVAM_API_KEY: optionalNonEmpty,
     SARVAM_MODEL: z.string().default("bulbul:v3"),
-    // Maya is a woman — this MUST be a female voice. bulbul:v3 females: ritu,
-    // priya, neha, pooja, simran, kavya, ishita, shreya, roopa, tanya. Which one
-    // best matches her Hindi timbre is a listening decision — run
+    // Maya's Gujarati voice: "simran" (chosen by ear against Gargi's Hindi
+    // register). bulbul:v3 females: ritu, priya, neha, pooja, simran, kavya,
+    // ishita, shreya, roopa, tanya. Re-audition with
     // `node tools/staging/sarvam-tts-smoke.js --audition`. ("anushka" is a v2
     // voice and is rejected by v3.)
-    SARVAM_SPEAKER: z.string().default("ritu"),
-    // Sarvam's pace range is 0.5–2.0 (1.0 = natural), mirroring ELEVENLABS_SPEED's intent.
+    SARVAM_SPEAKER: z.string().default("simran"),
+    // pace 1.0 = natural speed. Lower = slower (0.8 drags). Range 0.5–2.0.
     SARVAM_PACE: z.coerce.number().min(0.5).max(2).default(1.0),
+    // temperature = bulbul:v3's expressiveness knob (replaced v2 pitch/loudness).
+    // 0 = most stable/neutral; raise toward ~0.7 for more varied intonation.
+    SARVAM_TEMPERATURE: z.coerce.number().min(0).max(1.5).default(0),
     // Kill switch for the whole Gujarati persona, independent of the key being
     // present. Set false to force gu-IN back to Hindi without unsetting the key.
     SARVAM_TTS_ENABLED: booleanFlag.default(true),

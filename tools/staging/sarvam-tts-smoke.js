@@ -176,7 +176,7 @@ async function main() {
   const model = process.env.SARVAM_MODEL || "bulbul:v3";
   // Default to a valid bulbul:v3 female voice. "anushka" is NOT valid for v3 —
   // the API rejects it with a list of the ones that are.
-  const speaker = process.env.SARVAM_SPEAKER || "ritu";
+  const speaker = process.env.SARVAM_SPEAKER || "simran";
   fs.mkdirSync(OUT_DIR, { recursive: true });
 
   console.log(`Sarvam Bulbul smoke — model=${model} speaker=${speaker} lang=gu-IN rate=8000\n`);

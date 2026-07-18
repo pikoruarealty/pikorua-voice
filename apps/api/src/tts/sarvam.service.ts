@@ -92,18 +92,26 @@ export class SarvamService {
     if (!key) {
       throw new ServiceUnavailableException("Sarvam API key is not configured");
     }
-    // Maya is a woman — the speaker MUST be female. bulbul:v3's female voices are
-    // ritu, priya, neha, pooja, simran, kavya, ishita, shreya, roopa, tanya (the
-    // API rejects an invalid name with the full list). Which one best matches her
-    // Hindi timbre is a listening decision — run
-    // `node tools/staging/sarvam-tts-smoke.js --audition` and pick by ear.
+    // Maya's Gujarati voice is "simran" (chosen by ear against Gargi's Hindi
+    // register — warm, calm, young, female). bulbul:v3's other female voices:
+    // ritu, priya, neha, pooja, kavya, ishita, shreya, roopa, tanya. Re-audition
+    // with `node tools/staging/sarvam-tts-smoke.js --audition`.
     // NOTE: "anushka" is a bulbul:v2 voice and is REJECTED by v3.
-    const speaker = String(this.config.get("SARVAM_SPEAKER") ?? "ritu");
+    const speaker = String(this.config.get("SARVAM_SPEAKER") ?? "simran");
     const model = String(this.config.get("SARVAM_MODEL") ?? "bulbul:v3");
-    // Mirrors ELEVENLABS_SPEED's intent (she reads a touch brisk). Sarvam's pace
-    // range is 0.5–2.0; clamped so a bad env value can't break synthesis.
+    // pace 1.0 = natural speed (chosen setting). Sweep in
+    // tools/staging/sarvam-tune-simran.js confirmed LOWER pace = slower speech
+    // (0.8→19s, 1.0→13s for the same line), so drop below 1.0 to slow her down.
+    // Range 0.5–2.0, clamped so a bad env value can't break synthesis.
     const pace = Math.min(2.0, Math.max(0.5, Number(this.config.get("SARVAM_PACE") ?? 1.0)));
-    return { key, speaker, model, pace };
+    // temperature = v3's expressiveness knob (it replaced v2's pitch+loudness).
+    // 0 = neutral (chosen setting) — but Sarvam REJECTS a literal temperature:0
+    // ("Input parameters has to be a valid dictionary"), so 0 means "omit the
+    // field and use Sarvam's own baseline", which IS the neutral "—" delivery.
+    // Raise toward ~0.7 for more varied, "human" intonation. NaN falls back to 0.
+    const rawTemp = Number(this.config.get("SARVAM_TEMPERATURE") ?? 0);
+    const temperature = Number.isFinite(rawTemp) ? Math.min(1.5, Math.max(0, rawTemp)) : 0;
+    return { key, speaker, model, pace, temperature };
   }
 
   private buildBody(text: string, cfg: ReturnType<SarvamService["requestConfig"]>) {
@@ -116,6 +124,8 @@ export class SarvamService {
       model: cfg.model,
       speech_sample_rate: EXOTEL_SAMPLE_RATE,
       pace: cfg.pace,
+      // Omit when 0 — Sarvam rejects temperature:0; absence = its neutral baseline.
+      ...(cfg.temperature > 0 ? { temperature: cfg.temperature } : {}),
     };
   }
 
@@ -280,10 +290,16 @@ export class SarvamService {
                 output_audio_codec: "linear16",
                 speech_sample_rate: "8000",
                 pace: cfg.pace,
+                // Omit when 0 — Sarvam rejects temperature:0 (same "valid
+                // dictionary" error as an out-of-range min_buffer_size); its
+                // absence is the neutral baseline delivery.
+                ...(cfg.temperature > 0 ? { temperature: cfg.temperature } : {}),
                 enable_preprocessing: false,
                 min_buffer_size: SARVAM_MIN_BUFFER_SIZE,
                 max_chunk_length: SARVAM_MAX_CHUNK_LENGTH,
-                // NOTE: pitch/loudness are bulbul:v2 fields — v3 does not take them.
+                // NOTE: pitch/loudness are bulbul:v2 fields — v3 replaced them
+                // with `temperature` (expressiveness). Verified accepted by v3 in
+                // tools/staging/sarvam-tune-simran.js.
               },
             }),
           );

@@ -165,7 +165,7 @@ async function main() {
     process.exit(2);
   }
   const model = process.env.SARVAM_MODEL || "bulbul:v3";
-  const speaker = process.env.SARVAM_SPEAKER || "ritu";
+  const speaker = process.env.SARVAM_SPEAKER || "simran";
   fs.mkdirSync(OUT_DIR, { recursive: true });
 
   console.log(`Sarvam WS streaming spike — model=${model} speaker=${speaker} gu-IN linear16@8000`);

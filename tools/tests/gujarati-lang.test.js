@@ -337,6 +337,26 @@ test("stripWavHeader yields exactly the PCM samples Exotel expects", () => {
   assert.doesNotThrow(() => stripWavHeader(Buffer.from([0x52, 0x49])));
 });
 
+test("pcmToWav wraps PCM in a valid 8kHz mono 16-bit header (browser demo path)", () => {
+  const { pcmToWav, stripWavHeader } = require("../../apps/api/dist/tts/sarvam.service");
+
+  const pcm = Buffer.alloc(1000, 0x11);
+  const wav = pcmToWav(pcm);
+
+  // A browser <audio>/decodeAudioData needs this container — raw PCM stays silent.
+  assert.equal(wav.subarray(0, 4).toString("ascii"), "RIFF");
+  assert.equal(wav.subarray(8, 12).toString("ascii"), "WAVE");
+  assert.equal(wav.readUInt16LE(22), 1, "mono");
+  assert.equal(wav.readUInt32LE(24), 8000, "8kHz");
+  assert.equal(wav.readUInt16LE(34), 16, "16-bit");
+  assert.equal(wav.readUInt32LE(40), pcm.length, "data chunk size matches PCM");
+  assert.equal(wav.length, 44 + pcm.length);
+
+  // The header the demo adds is exactly what stripWavHeader removes — so the
+  // telephony path (which strips) and the browser path (which wraps) are inverses.
+  assert.deepEqual(stripWavHeader(wav), pcm);
+});
+
 test("take care is hard-blocked in every mode including gu", () => {
   const { normalizeForTts } = require("../../apps/api/dist/tts/elevenlabs.service");
 

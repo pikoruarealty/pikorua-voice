@@ -283,6 +283,15 @@ export const DEMO_HTML = `<!doctype html>
       if (!playing) void playNext();
     }
 
+    // Pick the MIME type from the bytes, not the language: "RIFF" → WAV (Sarvam),
+    // otherwise MP3 (ElevenLabs). Content-sniffing means the demo doesn't need to
+    // know which TTS engine produced the reply.
+    function audioMimeType(bytes) {
+      const b = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+      const isRiff = b.length >= 4 && b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46;
+      return isRiff ? "audio/wav" : "audio/mpeg";
+    }
+
     async function playNext() {
       const next = playQueue.shift();
       if (!next) {
@@ -303,7 +312,10 @@ export const DEMO_HTML = `<!doctype html>
       playing = true;
       assistantSpeaking = true;
       setStatus("Assistant speaking — you can interrupt");
-      const blob = new Blob([next], { type: "audio/mpeg" });
+      // Sniff the container: ElevenLabs (hi/en) streams MP3; Sarvam (gu) returns
+      // WAV, which starts with the ASCII "RIFF" magic. Labelling WAV as audio/mpeg
+      // left Gujarati replies silent — the <audio> element couldn't decode them.
+      const blob = new Blob([next], { type: audioMimeType(next) });
       els.audio.src = URL.createObjectURL(blob);
       try {
         await new Promise((resolve, reject) => {
@@ -368,7 +380,7 @@ export const DEMO_HTML = `<!doctype html>
         els.reply.textContent = msg.reply || "(no reply)";
         const audioBytes = base64ToArrayBuffer(msg.audioBase64 || "");
         if (audioBytes.byteLength > 0) {
-          const audioBlob = new Blob([audioBytes], { type: "audio/mpeg" });
+          const audioBlob = new Blob([audioBytes], { type: audioMimeType(new Uint8Array(audioBytes)) });
           els.audio.src = URL.createObjectURL(audioBlob);
           assistantSpeaking = true;
           setStatus("Assistant speaking — you can interrupt");

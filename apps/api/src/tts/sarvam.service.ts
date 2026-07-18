@@ -72,6 +72,35 @@ export function stripWavHeader(buf: Buffer): Buffer {
 // Exotel's wire format. Sarvam accepts 8000 directly, so no resampling step.
 const EXOTEL_SAMPLE_RATE = 8000;
 
+// Wrap raw s16le mono PCM in a 44-byte WAV header. The telephony path wants
+// headerless PCM (PcmReframer), but a BROWSER <audio>/decodeAudioData needs a
+// container — raw PCM won't decode, which is exactly why the demo was silent on
+// Gujarati. So the non-telephony path returns WAV instead.
+export function pcmToWav(pcm: Buffer, sampleRate = EXOTEL_SAMPLE_RATE): Buffer {
+  const header = Buffer.alloc(44);
+  header.write("RIFF", 0, "ascii");
+  header.writeUInt32LE(36 + pcm.length, 4);
+  header.write("WAVE", 8, "ascii");
+  header.write("fmt ", 12, "ascii");
+  header.writeUInt32LE(16, 16); // PCM fmt chunk size
+  header.writeUInt16LE(1, 20); // audio format = PCM
+  header.writeUInt16LE(1, 22); // channels = mono
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(sampleRate * 2, 28); // byte rate = rate * blockAlign
+  header.writeUInt16LE(2, 32); // block align = channels * 16/8
+  header.writeUInt16LE(16, 34); // bits per sample
+  header.write("data", 36, "ascii");
+  header.writeUInt32LE(pcm.length, 40);
+  return Buffer.concat([header, pcm]);
+}
+
+// True for the telephony formats the Exotel gateway requests (pcm_8000 / ulaw).
+// A browser caller passes no outputFormat, so it gets WAV. This is the single
+// switch between "raw PCM streamed chunk-by-chunk" and "one WAV per sentence".
+function wantsRawPcm(outputFormat: string | undefined): boolean {
+  return /^(pcm|ulaw|mulaw|alaw|g711)/i.test(String(outputFormat ?? ""));
+}
+
 @Injectable()
 export class SarvamService {
   private readonly logger = new Logger("SarvamService");
@@ -228,7 +257,7 @@ export class SarvamService {
   // (Numbers from tools/staging/sarvam-ws-smoke.js — re-run it if this regresses.)
   private streamOverWs(
     text: string,
-    opts: { signal?: AbortSignal; onChunk: (chunk: Buffer) => void },
+    opts: { signal?: AbortSignal; onChunk: (chunk: Buffer) => void; raw: boolean },
   ): Promise<{ ttfbMs: number | null; bytes: number }> {
     const cfg = this.requestConfig();
     return new Promise((resolve, reject) => {
@@ -240,6 +269,10 @@ export class SarvamService {
       let bytes = 0;
       let settled = false;
       let failure: string | null = null;
+      // Browser (non-raw) mode buffers the whole sentence's PCM and emits ONE
+      // WAV at the end — a <audio> element can't play headerless PCM. Telephony
+      // (raw) mode forwards each chunk immediately for low latency + PcmReframer.
+      const pcmParts: Buffer[] = [];
 
       const cleanup = () => {
         clearTimeout(guard);
@@ -252,10 +285,21 @@ export class SarvamService {
         if (settled) return;
         settled = true;
         cleanup();
-        // A failure AFTER audio has been emitted cannot be retried — those bytes
-        // are already on the wire to the caller — so report what we sent.
-        if (failure && bytes === 0) reject(new Error(failure));
-        else resolve({ ttfbMs, bytes });
+        if (failure) {
+          // In browser mode nothing has been emitted yet (all buffered), so a
+          // failure is always retryable. In raw mode, bytes>0 means chunks are
+          // already on the wire and cannot be unsent — report the partial.
+          if (bytes === 0) return reject(new Error(failure));
+          return resolve({ ttfbMs, bytes });
+        }
+        // Browser mode: emit the whole sentence as one WAV now.
+        if (!opts.raw && pcmParts.length > 0 && !opts.signal?.aborted) {
+          const wav = pcmToWav(Buffer.concat(pcmParts));
+          bytes = wav.length;
+          if (ttfbMs === null) ttfbMs = Date.now() - start;
+          opts.onChunk(wav);
+        }
+        resolve({ ttfbMs, bytes });
       };
       const onAbort = () => {
         // Barge-in: stop generating immediately rather than paying for audio the
@@ -325,12 +369,18 @@ export class SarvamService {
           return; // ignore non-JSON frames
         }
         if (msg.type === "audio" && msg.data?.audio) {
-          if (ttfbMs === null) ttfbMs = Date.now() - start;
           // Only the first chunk carries a WAV header; stripWavHeader passes the
           // already-raw ones straight through.
           const pcm = stripWavHeader(Buffer.from(msg.data.audio, "base64"));
-          bytes += pcm.length;
-          if (!opts.signal?.aborted) opts.onChunk(pcm);
+          if (opts.raw) {
+            // Telephony: forward immediately; ttfb is real first-audio latency.
+            if (ttfbMs === null) ttfbMs = Date.now() - start;
+            bytes += pcm.length;
+            if (!opts.signal?.aborted) opts.onChunk(pcm);
+          } else {
+            // Browser: accumulate; the single WAV is emitted in done().
+            pcmParts.push(pcm);
+          }
         } else if (
           msg.type === "event" &&
           (msg.event_type === "final" || msg.data?.event_type === "final")
@@ -356,13 +406,17 @@ export class SarvamService {
   ): Promise<StreamSynthesisResult> {
     const start = Date.now();
     const normalized = normalizeForTts(text, "gu");
+    // Telephony (Exotel pcm_8000) → raw PCM streamed chunk-by-chunk. Anything
+    // else (the browser demo passes no outputFormat) → one WAV per sentence so
+    // an <audio> element can decode it. This is why gu was silent in the demo.
+    const raw = wantsRawPcm(opts.outputFormat);
 
     let lastErr: unknown;
     // Retry once, but only while nothing has been emitted — chunks already
     // forwarded to the caller cannot be unsent. Mirrors the ElevenLabs path.
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
-        const { ttfbMs, bytes } = await this.streamOverWs(normalized, opts);
+        const { ttfbMs, bytes } = await this.streamOverWs(normalized, { ...opts, raw });
         const ms = Date.now() - start;
         this.logger.log(`Sarvam WS TTS complete (${ms}ms ttfb=${ttfbMs}ms) bytes=${bytes}`);
         return { ttsMs: ms, ttfbMs, bytes };

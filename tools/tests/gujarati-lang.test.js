@@ -101,25 +101,28 @@ test("gu-mode keeps BHK/areas/distances/durations/dates in English words", () =>
   assert.match(normalizeForTts("see you at 4", "gu-IN"), /see you at four/);
 });
 
-test("gu-mode speaks a scheduling hour in Gujarati words", () => {
+test("gu-mode appointment hour: English number, Gujarati unit word", () => {
   const { normalizeForTts } = require("../../apps/api/dist/tts/elevenlabs.service");
 
-  // The "N વાગ્યે" scheduling form reads naturally as a Gujarati word, mirroring
-  // Hindi's "तीन बजे". This is the one place gu uses native number words.
+  // The "N વાગ્યે" scheduling time reads the NUMBER in English (every spoken time
+  // is an English number across languages), keeping the Gujarati unit word "વાગ્યે".
   const out = normalizeForTts("3 વાગ્યે", "gu-IN");
-  assert.equal(out, "ત્રણ વાગ્યે");
+  assert.equal(out, "three વાગ્યે");
   assert.ok(!DEVANAGARI.test(out));
 });
 
 test("hi mode is unchanged by the gu split (no regression)", () => {
   const { normalizeForTts } = require("../../apps/api/dist/tts/elevenlabs.service");
 
-  // Hindi must behave exactly as before: Devanagari respellings, Hindi numbers.
+  // Hindi respellings/number-wording behave as before (Devanagari respellings,
+  // Hindi number words for general figures).
   assert.equal(
     normalizeForTts("5BHK approx 7,600 square feet", "hi"),
     "five BHK approx seven thousand six hundred स्क्वेयर फीट",
   );
-  assert.equal(normalizeForTts("3 बजे", "hi"), "तीन बजे");
+  // Appointment-hour rule applies in hi too: the time number is English ("3 बजे" ->
+  // "three बजे"), the unit word stays Devanagari.
+  assert.equal(normalizeForTts("3 बजे", "hi"), "three बजे");
   assert.match(normalizeForTts("5 crore bungalow", "hi"), /करोड़/);
   assert.ok(!GUJARATI.test(normalizeForTts("5 crore bungalow", "hi")));
 });

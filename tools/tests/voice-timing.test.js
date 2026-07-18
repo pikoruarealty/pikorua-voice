@@ -199,3 +199,41 @@ test("the Gujarati greeting streams fresh through the turn-level WS session", ()
       "(a frozen take reads as robotic)",
   );
 });
+
+// Outbound Exotel calls bridge the callee's media leg a beat after the voicebot
+// `start`, so Maya's greeting is held until the callee is fully connected. The
+// hold was raised to 10s for all languages so no intro is clipped.
+test("outbound greeting hold defaults to 10s", () => {
+  const src = read(GATEWAY);
+  const m = src.match(/OUTBOUND_GREETING_DELAY_MS[\s\S]*?:\s*(\d+);/);
+  assert.ok(m, "OUTBOUND_GREETING_DELAY_MS must have a numeric fallback");
+  assert.equal(Number(m[1]), 10000, "outbound greeting hold should default to 10000ms");
+});
+
+// Exotel's voicebot stream call_sid frequently differs from the Sid returned by
+// /Calls/connect.json (stored as providerCallSid), so an outbound call's locale
+// (e.g. gu-IN) would be lost to CALL_LOCALE_DEFAULT. The gateway must recover the
+// just-dialed outbound call instead of defaulting.
+test("outbound call locale is recovered when Exotel's call_sid doesn't match", () => {
+  const src = read(GATEWAY);
+  assert.match(
+    src,
+    /findRecentOutboundAwaitingStream\(/,
+    "the gateway must adopt the recent outbound call when findByProviderCallSid misses",
+  );
+  // The recovered call is relinked to the real stream call_sid.
+  assert.match(src, /providerCallSid:\s*callSid/);
+});
+
+// A gu-IN call must never be auto-switched to hi/en by the caller-language
+// detector: gu is entered deliberately (campaign/dial), Deepgram can't cleanly
+// detect Gujarati, and a code-switched word would otherwise flip Maya out of
+// Gujarati on the first utterance.
+test("a Gujarati call is never auto-switched to hi/en mid-call", () => {
+  const src = read(GATEWAY);
+  assert.match(
+    src,
+    /isGuCall\s*\?\s*null\s*:\s*detectSpokenLanguage\(/,
+    "detectSpokenLanguage must be skipped when the session locale is already gu",
+  );
+});

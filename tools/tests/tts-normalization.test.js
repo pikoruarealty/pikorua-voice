@@ -10,16 +10,16 @@
  *    words, even in Hindi mode ("4,800 square feet" -> "four thousand eight
  *    hundred ..."), for the same reason as BHK. In Hindi mode the *unit* is still
  *    respelled to Devanagari ("स्क्वेयर फीट") for correct pronunciation.
- *  - Standalone numbers in a Hindi-context reply (e.g. a "X बजे" time) are spoken
- *    in Hindi words ("3 बजे" -> "तीन बजे") — speaking a scheduling time aloud in
- *    Hindi is the natural reading for a Hindi call.
+ *  - Appointment/clock times spoken in the local unit ("N बजे" / "N વાગ્યે") say the
+ *    NUMBER in English ("3 बजे" -> "three बजे", "11 વાગ્યે" -> "eleven વાગ્યે"); the
+ *    local unit word stays. Every spoken time is an English number across languages.
  *  - Distances always speak the number AND unit in English, in both modes
  *    ("3 km" -> "three kilometers") — the Hindi engine mangles "km" and reads the
  *    number in Hindi.
  *  - Clock times (H:MM / with AM/PM) speak in English WORDS in Hindi mode
  *    ("3:02 PM" -> "three oh two PM") so the Hindi engine doesn't read the digits
  *    in Hindi; in English mode they stay as digits ("9 AM" -> "9 AM", read in
- *    English natively). This is distinct from the "N बजे" scheduling form above.
+ *    English natively). The "N बजे" scheduling form above also uses an English number.
  *  - The "see you at N" sign-off speaks an English number in both modes
  *    ("see you at 4" -> "see you at four").
  */
@@ -67,14 +67,15 @@ test("area measurements use English number words outside Hindi-mode TTS", () => 
 test("romanized Hindi fragments are normalized in Hindi-mode TTS", () => {
   const { normalizeForTts } = require("../../apps/api/dist/tts/elevenlabs.service");
 
-  // Hindi-context times are spoken in Hindi number words ("3 बजे" -> "तीन बजे").
+  // The time NUMBER is spoken in English even in the local "N बजे" form
+  // ("3 बजे" -> "three बजे"); only the digit is Englished, the unit word stays.
   assert.equal(
     normalizeForTts("बिल्कुल, 3 बजे। Jo clients interest dikhate hain.", "hi-IN"),
-    "बिल्कुल, तीन बजे। जो clients interest दिखाते हैं.",
+    "बिल्कुल, three बजे। जो clients interest दिखाते हैं.",
   );
   assert.equal(
     normalizeForTts("Aaj 2 baje convenient rahega?", "hi-IN"),
-    "आज दो बजे convenient रहेगा?",
+    "आज two बजे convenient रहेगा?",
   );
   // English mode leaves romanized Hindi alone but still words English numbers.
   assert.equal(
@@ -127,10 +128,11 @@ test("distances speak the number + unit in English in both modes", () => {
 test("dates speak the day number in English in both modes", () => {
   const { normalizeForTts } = require("../../apps/api/dist/tts/elevenlabs.service");
 
-  // "20 July" -> "twenty July" (not the Hindi "बीस July"); बजे time stays Hindi.
+  // "20 July" -> "twenty July" (not the Hindi "बीस July"); the बजे time number is
+  // English too ("11 बजे" -> "eleven बजे").
   assert.equal(
     normalizeForTts("5 July, 11 बजे सुबह — confirm कर रही हूँ।", "hi"),
-    "five July, ग्यारह बजे सुबह — confirm कर रही हूँ।",
+    "five July, eleven बजे सुबह — confirm कर रही हूँ।",
   );
   assert.equal(normalizeForTts("आपकी visit July 20 को है।", "hi"), "आपकी visit July twenty को है।");
   // Ordinal suffix drops to a cardinal ("5th July" -> "five July").
@@ -176,10 +178,25 @@ test("clock times speak in English words in Hindi mode, digits in English mode",
   assert.equal(normalizeForTts("4 PM ठीक रहेगा।", "hi"), "four PM ठीक रहेगा।");
   // English mode: clock times stay as digits (the engine reads them in English).
   assert.equal(normalizeForTts("It is 3:02 PM right now.", "en"), "It is 3:02 PM right now.");
-  // The scheduling "N बजे" form is NOT a clock time — it stays in Hindi words.
+  // The scheduling "N बजे" form keeps its local unit word but the NUMBER is spoken
+  // in English ("11 बजे" -> "eleven बजे"), so every time reads as an English number.
   assert.equal(
     normalizeForTts("बिल्कुल, 11 बजे सुबह convenient रहेगा?", "hi"),
-    "बिल्कुल, ग्यारह बजे सुबह convenient रहेगा?",
+    "बिल्कुल, eleven बजे सुबह convenient रहेगा?",
+  );
+});
+
+test("Gujarati appointment times speak the number in English, unit word stays local", () => {
+  const { normalizeForTts } = require("../../apps/api/dist/tts/elevenlabs.service");
+
+  // "11 વાગ્યે" -> "eleven વાગ્યે"; the sign-off "see you at N" is English too.
+  assert.equal(
+    normalizeForTts("11 વાગ્યે સવારે કે 5 વાગ્યે સાંજે?", "gu"),
+    "eleven વાગ્યે સવારે કે five વાગ્યે સાંજે?",
+  );
+  assert.equal(
+    normalizeForTts("4 વાગ્યાની appointment — see you at 4.", "gu"),
+    "four વાગ્યાની appointment — see you at four.",
   );
 });
 

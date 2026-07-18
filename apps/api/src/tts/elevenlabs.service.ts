@@ -587,6 +587,14 @@ export function normalizeForTts(text: string, languageCode = "hi"): string {
     out = out.replace(CLOCK_AMPM_RE, (_m, h, ap) =>
       clockToEnglishWords(parseInt(h, 10), null, ap),
     );
+    // Appointment/clock times spoken in the LOCAL unit ("N વાગ્યે" / "N बजे") say
+    // the NUMBER in English too — "11 વાગ્યે" → "eleven વાગ્યે", "3 बजे" → "three
+    // बजे" — matching how BHK/area/dates/distances already read and the "see you at
+    // N" sign-off. The local time-unit word (વાગ્યે/बजे) is kept; only the figure is
+    // Englished. So every spoken time is an English number across all languages.
+    out = out.replace(/\b(\d{1,2})(?=\s*(?:વાગ|बज|वाग))/g, (_m, h) =>
+      englishNumberWords(parseInt(h, 10)),
+    );
   }
 
   // "see you at 4" → "see you at four": the sign-off time is spoken as an English

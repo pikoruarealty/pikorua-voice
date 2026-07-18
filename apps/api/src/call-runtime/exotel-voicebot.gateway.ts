@@ -52,7 +52,7 @@ const EXOTEL_HANGUP_GRACE_MS = 9000;
 // OUTBOUND_GREETING_DELAY_MS; set 0 to disable the hold.
 const OUTBOUND_GREETING_DELAY_MS = (() => {
   const n = Number(process.env.OUTBOUND_GREETING_DELAY_MS);
-  return Number.isFinite(n) && n >= 0 ? n : 5000;
+  return Number.isFinite(n) && n >= 0 ? n : 10000;
 })();
 
 // If the client says nothing for this long, Maya asks if they're still there.
@@ -545,6 +545,33 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
           } catch (err) {
             this.logger.warn(`Failed to resolve callId from callSid=${callSid}: ${String(err)}`);
           }
+
+          // Outbound fallback: Exotel's voicebot stream call_sid frequently differs
+          // from the Sid /Calls/connect.json returned (which the worker stored as
+          // providerCallSid), so the lookup above misses on outbound calls and the
+          // call would default to CALL_LOCALE_DEFAULT — silently turning a gu-IN
+          // target into a Hindi call. Recover the just-dialed outbound call and
+          // relink it to THIS stream's call_sid so its locale (and campaign/target)
+          // are preserved and the status webhook can resolve it later.
+          if (!state.callId) {
+            try {
+              const recent = await this.callRepo.findRecentOutboundAwaitingStream();
+              if (recent) {
+                state.callId = recent.id;
+                state.hasDbRow = true;
+                state.isOutbound = true;
+                if (recent.locale) state.locale = recent.locale;
+                await this.callRepo
+                  .update(recent.id, { providerCallSid: callSid, status: "in_progress" })
+                  .catch(() => undefined);
+                this.logger.log(
+                  `Adopted recent outbound call ${recent.id} for stream call_sid=${callSid} locale=${state.locale}`,
+                );
+              }
+            } catch (err) {
+              this.logger.warn(`Outbound-adopt lookup failed for call_sid=${callSid}: ${String(err)}`);
+            }
+          }
         }
 
         if (!state.callId) {
@@ -822,7 +849,15 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
       // Follow the caller's language: once they clearly speak English (or Hindi),
       // switch the session locale so the inactivity check-in, goodbye, and reply
       // TTS all match them. Short/ambiguous acks return null and don't switch.
-      const lang = detectSpokenLanguage(utterance);
+      //
+      // A GUJARATI CALL IS NEVER AUTO-SWITCHED. gu-IN is only ever entered
+      // deliberately (campaign/dial locale), and Deepgram cannot cleanly detect
+      // Gujarati — a gu caller's code-switched Hindi/English word (or Gujarati
+      // mis-read as Hindi) would otherwise flip Maya out of Gujarati on the very
+      // first utterance, undoing the whole call's language. Sarvam voices the
+      // English/Hindi bits within gu fine, so staying gu is correct.
+      const isGuCall = String(state.locale).toLowerCase().startsWith("gu");
+      const lang = isGuCall ? null : detectSpokenLanguage(utterance);
       if (lang) {
         const target = lang === "hi" ? "hi-IN" : "en-IN";
         if (state.locale !== target) {

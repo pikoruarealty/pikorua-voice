@@ -23,6 +23,9 @@ coverage/
 test-baseline.txt
 *.tmp
 
+# Staging spike output — generated audio (PCM/WAV/MP3) + compare pages
+tools/staging/out/
+
 # Caches
 .cache/
 .eslintcache

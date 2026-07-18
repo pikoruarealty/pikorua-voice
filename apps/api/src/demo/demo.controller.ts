@@ -1,7 +1,12 @@
-import { Controller, Get, Post } from "@nestjs/common";
+import { Controller, Get, Query } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { CampaignRepository, CampaignTargetRepository, CallRepository } from "@pikorua/db";
 import { Public } from "../auth/public.decorator";
+
+// Locales the demo may request via ?locale=. Whitelisted so a junk value can't
+// create a session in an unsupported language; anything else falls back to the
+// configured default.
+const DEMO_LOCALES = new Set(["hi-IN", "en-IN", "gu-IN"]);
 
 @Public()
 @Controller("demo")
@@ -14,8 +19,11 @@ export class DemoController {
   ) {}
 
   @Get("session")
-  async createSession() {
-    const locale = this.config.get<string>("CALL_LOCALE_DEFAULT") ?? "hi-IN";
+  async createSession(@Query("locale") localeParam?: string) {
+    const requested = String(localeParam ?? "");
+    const locale = DEMO_LOCALES.has(requested)
+      ? requested
+      : this.config.get<string>("CALL_LOCALE_DEFAULT") ?? "hi-IN";
     const token = this.config.get<string>("API_AUTH_TOKEN") ?? "";
 
     const campaign = await this.campaigns.create({

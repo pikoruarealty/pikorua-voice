@@ -160,7 +160,10 @@ export const DEMO_HTML = `<!doctype html>
 
     async function createSession() {
       setStatus("Creating session");
-      const res = await fetch("/api/demo/session");
+      // Pass ?locale= through from the page URL so a Gujarati/English demo can be
+      // requested (e.g. /?locale=gu-IN) without changing the server default.
+      const pageLocale = new URLSearchParams(location.search).get("locale");
+      const res = await fetch("/api/demo/session" + (pageLocale ? "?locale=" + encodeURIComponent(pageLocale) : ""));
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
       // Derive WebSocket URL from the current page host

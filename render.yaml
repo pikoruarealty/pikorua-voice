@@ -78,6 +78,26 @@ services:
       - key: ELEVENLABS_SPEED
         value: "1.1"
 
+      # ── TTS · Sarvam (Gujarati ONLY — bulbul:v3 "Simran") ────────────────
+      # ElevenLabs cannot speak Gujarati in realtime, so gu-IN calls use Sarvam.
+      # WITHOUT SARVAM_API_KEY the kill switch (TtsRouter.isGujaratiEnabled)
+      # collapses every gu-IN call back to the Hindi persona — the call still
+      # works but speaks Hindi. Set the key in the dashboard to enable Gujarati.
+      - key: SARVAM_API_KEY
+        sync: false # paste the Sarvam subscription key
+      - key: SARVAM_MODEL
+        value: bulbul:v3
+      - key: SARVAM_SPEAKER
+        value: simran
+      - key: SARVAM_PACE
+        value: "1.15"
+      - key: SARVAM_TEMPERATURE
+        value: "0.7"
+      - key: SARVAM_PREPROCESS
+        value: "true"
+      - key: SARVAM_TTS_ENABLED
+        value: "true"
+
       # ── LLM · OpenRouter (Claude Haiku primary, GPT-OSS fallback) ─────────
       - key: OPENROUTER_API_KEY
         sync: false

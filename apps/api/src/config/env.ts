@@ -115,8 +115,12 @@ export const envSchema = z
     // pace 1.0 = natural speed. Lower = slower (0.8 drags). Range 0.5–2.0.
     SARVAM_PACE: z.coerce.number().min(0.5).max(2).default(1.0),
     // temperature = bulbul:v3's expressiveness knob (replaced v2 pitch/loudness).
-    // 0 = most stable/neutral; raise toward ~0.7 for more varied intonation.
-    SARVAM_TEMPERATURE: z.coerce.number().min(0).max(1.5).default(0),
+    // 0 sounded robotic in call testing; 0.7 was chosen by ear as the most human.
+    // Raise toward ~0.9 for livelier intonation, lower for flatter/steadier.
+    SARVAM_TEMPERATURE: z.coerce.number().min(0).max(1.5).default(0.7),
+    // Sarvam's own text normaliser for mixed Gujarati/English/numbers. ON by
+    // default — off mispronounced code-switched English in call testing.
+    SARVAM_PREPROCESS: booleanFlag.default(true),
     // Kill switch for the whole Gujarati persona, independent of the key being
     // present. Set false to force gu-IN back to Hindi without unsetting the key.
     SARVAM_TTS_ENABLED: booleanFlag.default(true),

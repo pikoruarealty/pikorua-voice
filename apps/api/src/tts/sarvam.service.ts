@@ -138,9 +138,14 @@ export class SarvamService {
     // ("Input parameters has to be a valid dictionary"), so 0 means "omit the
     // field and use Sarvam's own baseline", which IS the neutral "—" delivery.
     // Raise toward ~0.7 for more varied, "human" intonation. NaN falls back to 0.
-    const rawTemp = Number(this.config.get("SARVAM_TEMPERATURE") ?? 0);
-    const temperature = Number.isFinite(rawTemp) ? Math.min(1.5, Math.max(0, rawTemp)) : 0;
-    return { key, speaker, model, pace, temperature };
+    const rawTemp = Number(this.config.get("SARVAM_TEMPERATURE") ?? 0.7);
+    const temperature = Number.isFinite(rawTemp) ? Math.min(1.5, Math.max(0, rawTemp)) : 0.7;
+    // Sarvam's own text normaliser for mixed Gujarati/English/numbers. ON by
+    // default: with it off, code-switched English and figures were mispronounced
+    // in call testing. Runs AFTER our normalizeForTts (Gujarati respellings +
+    // number words), handling the English tokens we deliberately leave in Latin.
+    const preprocess = this.config.get("SARVAM_PREPROCESS") !== false;
+    return { key, speaker, model, pace, temperature, preprocess };
   }
 
   private buildBody(text: string, cfg: ReturnType<SarvamService["requestConfig"]>) {
@@ -153,6 +158,7 @@ export class SarvamService {
       model: cfg.model,
       speech_sample_rate: EXOTEL_SAMPLE_RATE,
       pace: cfg.pace,
+      enable_preprocessing: cfg.preprocess,
       // Omit when 0 — Sarvam rejects temperature:0; absence = its neutral baseline.
       ...(cfg.temperature > 0 ? { temperature: cfg.temperature } : {}),
     };
@@ -338,7 +344,7 @@ export class SarvamService {
                 // dictionary" error as an out-of-range min_buffer_size); its
                 // absence is the neutral baseline delivery.
                 ...(cfg.temperature > 0 ? { temperature: cfg.temperature } : {}),
-                enable_preprocessing: false,
+                enable_preprocessing: cfg.preprocess,
                 min_buffer_size: SARVAM_MIN_BUFFER_SIZE,
                 max_chunk_length: SARVAM_MAX_CHUNK_LENGTH,
                 // NOTE: pitch/loudness are bulbul:v2 fields — v3 replaced them

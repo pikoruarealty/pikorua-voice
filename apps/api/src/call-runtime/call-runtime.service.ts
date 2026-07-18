@@ -25,7 +25,6 @@ import {
   resolveLangMode,
   pickByLangMode,
   hasDevanagari,
-  hasGujarati,
   type LangMode,
 } from "../i18n/lang-mode";
 import { buildSystemPromptGu } from "../i18n/prompt-gu";
@@ -394,20 +393,18 @@ export class CallRuntimeService implements OnApplicationShutdown {
     return l.startsWith("en") ? "en" : undefined;
   }
 
-  // Pick the number-word language from the reply's own SCRIPT, not the call
-  // locale — the model follows the client's language, so a gu-IN call can end up
-  // answering in English if the caller switched.
+  // Pick the number-word language / TTS engine for a reply.
   //
-  // Gujarati is tested FIRST and this order matters: a Gujarati reply is
-  // code-switched ("તમારું budget કેટલું છે?") and so contains Latin letters. With
-  // the old Latin check running first it would have been mis-tagged "en" and read
-  // with English phonetics.
+  // A GUJARATI CALL STAYS ENTIRELY ON THE GUJARATI VOICE (Sarvam/Simran). Maya
+  // often answers a Gujarati caller with an English or English-heavy sentence
+  // ("Got it, Bapunagar.", the fully-English sign-off) — if we routed those by
+  // script they'd play in the ElevenLabs (Gargi) voice, so the caller would hear
+  // Maya's voice CHANGE mid-call. One caller must hear one voice, start to
+  // finish. Sarvam voices English within gu-IN fine, so pin the whole call to
+  // "gu" regardless of the reply's script. (For hi/en calls the old
+  // script-based routing stands.)
   private replyLanguageCode(text: string, locale: string): string | undefined {
-    // Gated for the same reason as ttsLanguageCode: with Gujarati disabled the
-    // prompt is Hindi, so Gujarati text should not appear — but if it somehow
-    // does, routing it to a "gu" code we can't voice is worse than reading it
-    // with the Hindi engine.
-    if (hasGujarati(text) && this.langMode(locale) === "gu") return "gu";
+    if (this.langMode(locale) === "gu") return "gu";
     if (hasDevanagari(text)) return undefined; // has Devanagari → Hindi mode
     if (/[a-zA-Z]/.test(text)) return "en"; // Latin script only → English mode
     return this.ttsLanguageCode(locale);

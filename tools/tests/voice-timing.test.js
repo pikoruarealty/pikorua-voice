@@ -225,15 +225,19 @@ test("outbound call locale is recovered when Exotel's call_sid doesn't match", (
   assert.match(src, /providerCallSid:\s*callSid/);
 });
 
-// A gu-IN call must never be auto-switched to hi/en by the caller-language
-// detector: gu is entered deliberately (campaign/dial), Deepgram can't cleanly
-// detect Gujarati, and a code-switched word would otherwise flip Maya out of
-// Gujarati on the first utterance.
-test("a Gujarati call is never auto-switched to hi/en mid-call", () => {
+// Maya switches across all THREE languages mid-call based on what the caller is
+// comfortable with. Crossing the Gujarati boundary changes the Deepgram model
+// (gu ↔ multi), so the STT must be re-opened; hi↔en stays on multi. Switching INTO
+// gu is gated on Sarvam being configured (else the reply would collapse to Hindi
+// while STT ran in gu).
+test("mid-call language switch covers hi/en/gu and re-opens STT on the gu boundary", () => {
   const src = read(GATEWAY);
-  assert.match(
-    src,
-    /isGuCall\s*\?\s*null\s*:\s*detectSpokenLanguage\(/,
-    "detectSpokenLanguage must be skipped when the session locale is already gu",
-  );
+  // The detector classifies all three languages.
+  assert.match(src, /function detectSpokenLanguage\([^)]*\):\s*"hi"\s*\|\s*"en"\s*\|\s*"gu"\s*\|\s*null/);
+  // The switch maps to a gu-IN target...
+  assert.match(src, /lang === "gu"\s*\?\s*"gu-IN"/);
+  // ...gated on the Gujarati kill switch...
+  assert.match(src, /target !== "gu-IN" \|\| this\.tts\.isGujaratiEnabled\(\)/);
+  // ...and re-opens the STT only when crossing the gu/multi boundary.
+  assert.match(src, /if \(wasGu !== nowGu\)\s*\{[\s\S]*?this\.openSttSession\(client, state\)/);
 });

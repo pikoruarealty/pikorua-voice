@@ -74,8 +74,22 @@ const SIDE_CONVERSATION_HANGUP_MS = 35_000;
 // (Hindi ⇄ English). Devanagari → Hindi; Latin with >=2 words → English (a lone
 // English word is often a loanword inside Hindi speech). Null for short/ambiguous
 // input (a bare "ok"/"haan") so a single word can't thrash the locale.
-function detectSpokenLanguage(text: string): "hi" | "en" | null {
-  if (/[ऀ-ॿ]/.test(text)) return "hi";
+// Which of Maya's three languages the caller is comfortable in, from their last
+// utterance — drives the mid-call locale switch. Returns null for short/ambiguous
+// acks so a one-word "ok" never flips the language.
+//
+// An explicit request ("gujarati me", "speak english", "हिंदी में") wins over the
+// script it is written in. This matters most for Gujarati: while the STT is in the
+// `multi` model (a hi/en call), the caller's Gujarati comes back as Hindi/Latin, so
+// gu can ONLY be reached by an explicit request. Once in gu the STT runs the `gu`
+// model and Gujarati script is detected directly.
+function detectSpokenLanguage(text: string): "hi" | "en" | "gu" | null {
+  if (/gujarati|gujrati|ગુજરાતી|गुजराती/i.test(text)) return "gu";
+  if (/\benglish\b|इंग्लिश|अंग्रेज़ी|अंग्रेजी|ઇંગ્લિશ|અંગ્રેજી/i.test(text)) return "en";
+  if (/\bhindi\b|हिंदी|हिन्दी|હિન્દી/i.test(text)) return "hi";
+  // Otherwise follow the script actually spoken.
+  if (/[઀-૿]/.test(text)) return "gu"; // Gujarati block (STT already in gu mode)
+  if (/[ऀ-ॿ]/.test(text)) return "hi"; // Devanagari → Hindi
   const words = text.trim().split(/\s+/).filter(Boolean);
   if (/[a-zA-Z]/.test(text) && words.length >= 2) return "en";
   return null;
@@ -846,25 +860,36 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
     } else {
       state.inactivityStrikes = 0;
       state.lastNoiseAt = 0;
-      // Follow the caller's language: once they clearly speak English (or Hindi),
-      // switch the session locale so the inactivity check-in, goodbye, and reply
-      // TTS all match them. Short/ambiguous acks return null and don't switch.
-      //
-      // A GUJARATI CALL IS NEVER AUTO-SWITCHED. gu-IN is only ever entered
-      // deliberately (campaign/dial locale), and Deepgram cannot cleanly detect
-      // Gujarati — a gu caller's code-switched Hindi/English word (or Gujarati
-      // mis-read as Hindi) would otherwise flip Maya out of Gujarati on the very
-      // first utterance, undoing the whole call's language. Sarvam voices the
-      // English/Hindi bits within gu fine, so staying gu is correct.
-      const isGuCall = String(state.locale).toLowerCase().startsWith("gu");
-      const lang = isGuCall ? null : detectSpokenLanguage(utterance);
+      // Follow the caller across all THREE languages: switch the session locale to
+      // whichever of hi/en/gu they're comfortable in, so STT, replies, check-ins
+      // and goodbye all match them. Short/ambiguous acks return null and don't
+      // switch.
+      const lang = detectSpokenLanguage(utterance);
       if (lang) {
-        const target = lang === "hi" ? "hi-IN" : "en-IN";
-        if (state.locale !== target) {
+        const target = lang === "gu" ? "gu-IN" : lang === "hi" ? "hi-IN" : "en-IN";
+        // Never switch INTO Gujarati when Sarvam is unconfigured (kill switch):
+        // the reply would collapse to the Hindi persona (TtsRouter) while the STT
+        // ran in the gu model — an inconsistent, half-broken call. Leaving gu is
+        // always allowed.
+        const guUsable = target !== "gu-IN" || this.tts.isGujaratiEnabled();
+        if (guUsable && state.locale !== target) {
+          const wasGu = String(state.locale).toLowerCase().startsWith("gu");
+          const nowGu = target === "gu-IN";
           this.logger.log(
             `Caller language=${lang} → session locale ${target} (callId=${state.callId})`,
           );
           state.locale = target;
+          // Crossing the Gujarati boundary changes the Deepgram model (gu ↔ multi),
+          // so the STT must be re-opened in the new language. hi↔en both use
+          // `multi`, so no re-open is needed there. Done here — after a completed
+          // utterance, before Maya's reply — so no in-flight partial is lost.
+          if (wasGu !== nowGu) {
+            state.stt?.close();
+            state.stt = this.openSttSession(client, state);
+            this.logger.log(
+              `STT re-opened for ${target} (Deepgram ${nowGu ? "gu" : "multi"}) callId=${state.callId}`,
+            );
+          }
         }
       }
       this.resetInactivityTimer(client, state);

@@ -581,6 +581,18 @@ export function normalizeForTts(text: string, languageCode = "hi"): string {
     return half ? `${wordWhole} and a half BHK` : `${wordWhole} BHK`;
   });
 
+  // The sign-off time is ALWAYS an English clock reading in every language —
+  // "see you at four", "see you at four PM", "see you at four thirty" — never the
+  // localized "see you at चार बजे". This runs BEFORE the clock rules below so they
+  // don't localize the figure first, and it swallows a trailing बजे/વાગ્યે/baje so
+  // nothing mixes. ("see you at" is English, so an English time reads naturally
+  // after it in Hinglish/Gujarati too.)
+  out = out.replace(
+    /\b(see you at)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*(?:baje|बजे|વાગ્યે)?/gi,
+    (_m, phrase, h, m, ap) =>
+      `${phrase} ${clockToEnglishWords(parseInt(h, 10), m != null ? parseInt(m, 10) : null, ap)}`,
+  );
+
   // Clock times must NEVER MIX languages. A spoken time is either fully local or
   // fully English — never "eleven बजे" and never "ग्यारह AM".
   //   Hinglish/Gujarati → "ग्यारह बजे" / "અગિયાર વાગ્યે"  (number AND unit local)
@@ -613,14 +625,6 @@ export function normalizeForTts(text: string, languageCode = "hi"): string {
     // "eleven baje" — turn it into "o'clock".
     out = out.replace(/\s*(?:\bbaje\b|बजे|વાગ્યે)/gi, " o'clock");
   }
-
-  // "see you at 4" → "see you at four": the sign-off time is spoken as an English
-  // number in both modes (never the Hindi "चार"). Skips colon / AM-PM forms —
-  // those are handled by the clock rules above.
-  out = out.replace(
-    /\b(see you at)\s+(\d{1,2})(?!\s*(?::|am|pm))\b/gi,
-    (_m, phrase, num) => `${phrase} ${englishNumberWords(parseInt(num, 10))}`,
-  );
 
   // Convert numbers to words so the engine doesn't mispronounce them.
   // Exclusions (kept as digits — engine handles these natively or word-form is worse):

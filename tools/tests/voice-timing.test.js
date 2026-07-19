@@ -241,3 +241,35 @@ test("mid-call language switch covers hi/en/gu and re-opens STT on the gu bounda
   // ...and re-opens the STT only when crossing the gu/multi boundary.
   assert.match(src, /if \(wasGu !== nowGu\)\s*\{[\s\S]*?this\.openSttSession\(client, state\)/);
 });
+
+// The gateway flips its session locale on a switch, but the RUNTIME owns the TTS
+// vendor and the LLM persona — and getOrCreateState only honours a locale hint
+// when it FIRST creates the state. Without the runtime adopting the switch, a
+// gu-IN caller who asks for English keeps getting Gujarati replies in the Simran
+// voice (the bug that made a switched caller say "I didn't understand you"). Every
+// turn must adopt the hint, and a persona change must rebuild the system prompt so
+// the LLM actually replies in the new language — with history (context) preserved.
+test("the runtime adopts a mid-call locale switch — vendor + persona follow the caller", () => {
+  const src = read(RUNTIME);
+  // prepareUtterance (front half of BOTH turn paths) adopts the hint every turn.
+  assert.match(src, /await this\.adoptLocaleSwitch\(callId, state, localeHint\)/);
+  // adoptLocaleSwitch updates the locale (so ttsLanguageCode → the right vendor)...
+  assert.match(
+    src,
+    /private async adoptLocaleSwitch\([\s\S]*?state\.locale = localeHint/,
+    "adoptLocaleSwitch must set state.locale so the TTS vendor follows the switch",
+  );
+  // ...and rebuilds the persona ONLY when the langMode actually changes.
+  assert.match(
+    src,
+    /if \(nextMode !== prevMode\)\s*\{[\s\S]*?state\.systemPrompt = await this\.systemPromptForMode/,
+    "a persona change (gu/hi/en) must rebuild the system prompt so the LLM switches language",
+  );
+  // The rebuilt prompt is memoized per persona (no DB re-hit on a language flip-flop).
+  assert.match(src, /state\.promptByMode\[mode\] = prompt/);
+  // History is NOT cleared on a switch — context carries across the handover.
+  assert.ok(
+    !/adoptLocaleSwitch[\s\S]*?state\.history\s*=\s*\[\]/.test(src),
+    "a language switch must preserve conversation history (context), not reset it",
+  );
+});

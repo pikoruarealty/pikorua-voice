@@ -57,6 +57,18 @@ type CallState = {
   // Human-readable scheduled visit time for reconfirm/feedback greetings (from the
   // dial target metadata); null on the default flow.
   apptWhen: string | null;
+  // Owning campaign/target + resolved lead name, retained so the persona/system
+  // prompt can be REBUILT when the caller switches language mid-call. A gu-IN
+  // caller who asks for English must get the English Maya (Gargi voice) replying
+  // in English — not Gujarati text spoken by the Simran voice. null on
+  // inbound/unmatched calls, where the prompt falls back to generic context.
+  campaignId: string | null;
+  targetId: string | null;
+  leadName: string;
+  // System prompts already built for this call, memoized per persona ("hi"/"en"/
+  // "gu") so a caller flipping between languages doesn't re-hit the DB each time.
+  // Plain object, NOT a Map: the whole state is JSON.stringify'd into Redis.
+  promptByMode: Partial<Record<LangMode, string>>;
 };
 
 // Trailing words that signal the caller paused mid-thought rather than finishing.
@@ -335,6 +347,14 @@ export class CallRuntimeService implements OnApplicationShutdown {
       s.lastApologyAt ??= 0;
       s.silenceStrikes ??= 0;
       s.lastSilenceAt ??= 0;
+      // Mid-call language-switch fields (may be absent on a state written by an
+      // older instance). Seed the memo with the current persona so a switch back
+      // to it reuses the loaded prompt.
+      s.campaignId ??= null;
+      s.targetId ??= null;
+      s.leadName ??= "the caller";
+      s.promptByMode ??= {};
+      s.promptByMode[resolveLangMode(s.locale)] ??= s.systemPrompt;
       return s;
     } catch {
       return null;
@@ -815,6 +835,12 @@ export class CallRuntimeService implements OnApplicationShutdown {
           lastSilenceAt: 0,
           scriptRef,
           apptWhen,
+          campaignId: call?.campaignId ?? null,
+          targetId: call?.targetId ?? null,
+          leadName,
+          // Seed the memo with the starting persona so a later switch back to it
+          // reuses this prompt instead of rebuilding.
+          promptByMode: { [resolveLangMode(locale)]: systemPrompt },
         };
         this.calls.set(callId, state);
         this.persistState(callId, state);
@@ -1617,6 +1643,16 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
     localeHint?: string,
   ): Promise<{ state: CallState; utterance: string; hold: boolean }> {
     const state = await this.getOrCreateState(callId, localeHint);
+    // Follow a mid-call language switch. The gateway flips its session locale the
+    // instant the caller asks for another language (detectSpokenLanguage) and
+    // passes it as localeHint, but getOrCreateState only honours the hint when it
+    // FIRST creates the state — so without this the runtime keeps replying in the
+    // original language and voice. Adopt the new locale here so the TTS vendor
+    // (Sarvam/Gargi), reply language, number words, acks and goodbye all follow
+    // the caller; when the persona actually changes (gu↔hi↔en) rebuild the system
+    // prompt too so the LLM speaks the new language. History is untouched, so the
+    // conversation context carries across the handover.
+    await this.adoptLocaleSwitch(callId, state, localeHint);
     // Real speech received — reset silence counter.
     state.silenceStrikes = 0;
 
@@ -1638,6 +1674,41 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
     }
 
     return { state, utterance, hold: false };
+  }
+
+  // Adopt a mid-call language switch onto the runtime state. No-op unless the hint
+  // is a real, different locale. Updates state.locale unconditionally (so the TTS
+  // vendor / number-word language track the caller even for an en↔hi flip), and
+  // rebuilds the system prompt only when the PERSONA changes (gu/hi/en) — the
+  // rebuilt prompt is memoized per persona so a flip-flop doesn't re-hit the DB.
+  private async adoptLocaleSwitch(callId: string, state: CallState, localeHint?: string) {
+    if (!localeHint || localeHint === state.locale) return;
+    const prevMode = resolveLangMode(state.locale);
+    const nextMode = resolveLangMode(localeHint);
+    state.locale = localeHint;
+    if (nextMode !== prevMode) {
+      state.systemPrompt = await this.systemPromptForMode(state, localeHint);
+      this.logger.log(
+        `Caller switched language ${prevMode}→${nextMode} mid-call (call=${callId}) — ` +
+          `persona + voice handed over, context preserved`,
+      );
+    }
+    this.persistState(callId, state);
+  }
+
+  // System prompt for the given locale's persona, memoized on the call state.
+  // First use for a persona builds it (a DB lookup for lead/campaign context on
+  // the default flow); subsequent switches back to it reuse the cached string.
+  private async systemPromptForMode(state: CallState, locale: string): Promise<string> {
+    const mode = resolveLangMode(locale);
+    const cached = state.promptByMode[mode];
+    if (cached) return cached;
+    const prompt =
+      state.scriptRef === "reconfirm" || state.scriptRef === "feedback"
+        ? this.buildScriptPrompt(state.scriptRef, locale, state.leadName, state.apptWhen)
+        : await this.buildSystemPrompt(locale, state.campaignId, state.targetId);
+    state.promptByMode[mode] = prompt;
+    return prompt;
   }
 
   private appendUserMessage(state: CallState, utterance: string) {

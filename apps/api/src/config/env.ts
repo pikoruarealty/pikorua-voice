@@ -55,7 +55,7 @@ export const envSchema = z
 
     // Worker wake-up: the worker is a Render free-tier web service that spins down
     // when idle, and a queued BullMQ job can't wake it. Set this to the worker's
-    // URL (e.g. https://pikorua-voice-worker.onrender.com/health) and the API pings
+    // URL (e.g. https://pikorua-voice-web-worker.onrender.com/health) and the API pings
     // it whenever it queues work (post-call after any call, or an outbound dial), so
     // the worker cold-starts and drains the queue. Unset/local = no-op.
     WORKER_WAKE_URL: optionalNonEmpty,

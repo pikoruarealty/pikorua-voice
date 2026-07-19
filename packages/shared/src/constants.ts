@@ -5,7 +5,7 @@
 
 export const SERVICE = {
   API: "pikorua-voice-api",
-  WORKER: "pikorua-voice-worker",
+  WORKER: "pikorua-voice-web-worker",
 } as const;
 
 export type ServiceName = (typeof SERVICE)[keyof typeof SERVICE];

@@ -41,7 +41,7 @@ services:
       # Set this to your Render service URL after first deploy
       - key: PUBLIC_BASE_URL
         sync: false
-      # Worker's own URL (e.g. https://pikorua-voice-worker.onrender.com/health).
+      # Worker's own URL (e.g. https://pikorua-voice-web-worker.onrender.com/health).
       # The API pings it whenever it queues work (post-call after any inbound/outbound
       # call, or an outbound dial) so the spun-down free-tier worker wakes and drains
       # the queue. Leave blank to disable.
@@ -147,7 +147,7 @@ services:
   # web-service health check. Switch to `type: worker` once on a paid plan —
   # it spins down on idle and the first dial after idle pays a ~30s cold start.
   - type: web
-    name: pikorua-voice-worker
+    name: pikorua-voice-web-worker
     plan: free
     env: docker
     dockerfilePath: ./apps/worker/Dockerfile

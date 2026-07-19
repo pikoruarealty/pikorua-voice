@@ -152,8 +152,13 @@ export class DialService implements OnModuleDestroy {
         if (publicBaseUrl) {
           params.set("StatusCallback", `${publicBaseUrl}/api/webhooks/exotel`);
           params.set("StatusCallbackContentType", "application/json");
-          params.append("StatusCallbackEvents[]", "answered");
-          params.append("StatusCallbackEvents[]", "terminal");
+          // NOTE: do NOT send StatusCallbackEvents[]. This account's connect.json
+          // rejects it outright — "Invalid Call Parameters: Invalid
+          // 'StatusCallbackEvents' specified" (HTTP 400) — which fails the ENTIRE
+          // dial, so the callee's phone never rings. Exotel still POSTs the status
+          // callback on the terminal (call-completed) event by default, which is
+          // all post-call processing needs. Re-introduce per-event subscription
+          // only against an account/plan confirmed to accept it.
         }
 
         const resp = await axios.post(url, params.toString(), {
@@ -169,11 +174,22 @@ export class DialService implements OnModuleDestroy {
         await this.targetRepo.updateDialStatus(target.id, "dialing");
         this.logger.log(`Placed Exotel call for ${call.id} (providerSid=${providerSid ?? "n/a"})`);
       } catch (err) {
+        // Surface Exotel's ACTUAL rejection, not just the axios stack. connect.json
+        // returns the reason in the body ({"RestException":{"Message":"..."}}); a
+        // bare "status code 400" hides which param it refused and turned a
+        // one-line diagnosis into a live-call guessing game.
+        const body = axios.isAxiosError(err) ? err.response?.data : undefined;
+        const exotelMsg =
+          (body as { RestException?: { Message?: string } })?.RestException?.Message ??
+          (typeof body === "string" ? body : body ? JSON.stringify(body) : undefined);
         this.logger.error(
-          `Exotel call failed for call ${call.id}`,
+          `Exotel call failed for call ${call.id}${exotelMsg ? ` — ${exotelMsg}` : ""}`,
           err instanceof Error ? err.stack : String(err),
         );
-        await this.callRepo.update(call.id, { status: "failed", error: String(err) });
+        await this.callRepo.update(call.id, {
+          status: "failed",
+          error: exotelMsg ? String(exotelMsg) : String(err),
+        });
         await this.targetRepo.updateDialStatus(
           target.id,
           attempts >= (target.maxAttempts ?? 3) ? "exhausted" : "failed",

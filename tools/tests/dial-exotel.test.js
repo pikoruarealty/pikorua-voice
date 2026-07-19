@@ -71,3 +71,19 @@ test("the Voicebot applet is passed as an ExoML flow Url, not AppId", () => {
     'AppId is rejected by connect.json with "Invalid \'To\' specified"',
   );
 });
+
+// This account's connect.json rejects StatusCallbackEvents outright — "Invalid Call
+// Parameters: Invalid 'StatusCallbackEvents' specified" (HTTP 400) — and because it
+// is one request, the WHOLE dial 400s: the callee's phone never rings. Verified live
+// against Exotel. StatusCallback (the URL) alone is accepted and fires on the
+// terminal event by default, which is all post-call processing needs.
+test("no StatusCallbackEvents[] is sent — this account 400s the entire dial on it", () => {
+  const region = connectRegion(read(DIAL));
+  // Match the actual param construction, not a mention in an explanatory comment.
+  assert.ok(
+    !/params\.(?:set|append)\(\s*["']StatusCallbackEvents/.test(region),
+    "StatusCallbackEvents[] makes connect.json 400 and no call is placed at all",
+  );
+  // The callback URL itself is still registered (fires on the terminal event).
+  assert.match(region, /params\.set\(\s*"StatusCallback"\s*,/);
+});

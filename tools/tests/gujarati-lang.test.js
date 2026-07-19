@@ -101,13 +101,13 @@ test("gu-mode keeps BHK/areas/distances/durations/dates in English words", () =>
   assert.match(normalizeForTts("see you at 4", "gu-IN"), /see you at four/);
 });
 
-test("gu-mode appointment hour: English number, Gujarati unit word", () => {
+test("gu-mode appointment hour is FULLY Gujarati — number and unit word", () => {
   const { normalizeForTts } = require("../../apps/api/dist/tts/elevenlabs.service");
 
-  // The "N વાગ્યે" scheduling time reads the NUMBER in English (every spoken time
-  // is an English number across languages), keeping the Gujarati unit word "વાગ્યે".
+  // A spoken time must never mix languages: "3 વાગ્યે" -> "ત્રણ વાગ્યે", never the
+  // mixed "three વાગ્યે". (English mode gets the fully-English "three PM" instead.)
   const out = normalizeForTts("3 વાગ્યે", "gu-IN");
-  assert.equal(out, "three વાગ્યે");
+  assert.equal(out, "ત્રણ વાગ્યે");
   assert.ok(!DEVANAGARI.test(out));
 });
 
@@ -120,9 +120,9 @@ test("hi mode is unchanged by the gu split (no regression)", () => {
     normalizeForTts("5BHK approx 7,600 square feet", "hi"),
     "five BHK approx seven thousand six hundred स्क्वेयर फीट",
   );
-  // Appointment-hour rule applies in hi too: the time number is English ("3 बजे" ->
-  // "three बजे"), the unit word stays Devanagari.
-  assert.equal(normalizeForTts("3 बजे", "hi"), "three बजे");
+  // Appointment-hour rule applies in hi too, fully local: "3 बजे" -> "तीन बजे",
+  // never the mixed "three बजे".
+  assert.equal(normalizeForTts("3 बजे", "hi"), "तीन बजे");
   assert.match(normalizeForTts("5 crore bungalow", "hi"), /करोड़/);
   assert.ok(!GUJARATI.test(normalizeForTts("5 crore bungalow", "hi")));
 });

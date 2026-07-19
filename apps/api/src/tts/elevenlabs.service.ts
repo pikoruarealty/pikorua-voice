@@ -494,6 +494,11 @@ function clockToEnglishWords(hour: number, minute: number | null, ampm?: string)
   const suffix = ampm ? ` ${ampm.toUpperCase()}` : "";
   return `${hourWord}${minutePart}${suffix}`;
 }
+// A whole-hour clock time in the LOCAL language — number and unit both local, so
+// it is never mixed: "चार बजे" (Hindi/Hinglish) or "ચાર વાગ્યે" (Gujarati).
+function localClockTime(hour: number, hindi: boolean): string {
+  return hindi ? `${hindiNumberWords(hour)} बजे` : `${gujaratiNumberWords(hour)} વાગ્યે`;
+}
 const CLOCK_COLON_RE = /\b(\d{1,2}):(\d{2})(?:\s*(am|pm))?\b/gi;
 const CLOCK_AMPM_RE = /\b(\d{1,2})\s*(am|pm)\b/gi;
 
@@ -576,25 +581,37 @@ export function normalizeForTts(text: string, languageCode = "hi"): string {
     return half ? `${wordWhole} and a half BHK` : `${wordWhole} BHK`;
   });
 
-  // Clock times → English words in Hindi/Gujarati mode (English mode already
-  // reads the digits in English, so leave those as digits). The scheduling
-  // "N बजे" / "N વાગ્યે" form is untouched here and stays in the local language
-  // ("ग्यारह बजे" / "અગિયાર વાગ્યે") via the general pass below.
+  // Clock times must NEVER MIX languages. A spoken time is either fully local or
+  // fully English — never "eleven बजे" and never "ग्यारह AM".
+  //   Hinglish/Gujarati → "ग्यारह बजे" / "અગિયાર વાગ્યે"  (number AND unit local)
+  //   English           → "eleven AM"                      (number AND unit English)
+  // Whole hours are scheduling times and take the local बजे/વાગ્યે form. A time WITH
+  // minutes is a precise clock reading (e.g. answering "what time is it now?") and
+  // reads in English words — still unmixed, and keeps the "11:30 AM" answer format.
   if (indic) {
+    out = out.replace(CLOCK_COLON_RE, (_m, h, m, ap) => {
+      const hour = parseInt(h, 10);
+      const minute = parseInt(m, 10);
+      return minute === 0
+        ? localClockTime(hour, hindi)
+        : clockToEnglishWords(hour, minute, ap);
+    });
+    // A bare hour with AM/PM is a scheduling time → local form ("4 PM" → "चार बजे").
+    out = out.replace(CLOCK_AMPM_RE, (_m, h) => localClockTime(parseInt(h, 10), hindi));
+    // "N बजे" / "N વાગ્યે" is left alone here on purpose: the general number pass
+    // below renders the figure in the LOCAL words, giving "ग्यारह बजे".
+  } else {
+    // English mode: spell the clock out in English words so it always reads
+    // "Eleven AM", instead of leaving bare digits to the engine.
     out = out.replace(CLOCK_COLON_RE, (_m, h, m, ap) =>
       clockToEnglishWords(parseInt(h, 10), parseInt(m, 10), ap),
     );
     out = out.replace(CLOCK_AMPM_RE, (_m, h, ap) =>
       clockToEnglishWords(parseInt(h, 10), null, ap),
     );
-    // Appointment/clock times spoken in the LOCAL unit ("N વાગ્યે" / "N बजे") say
-    // the NUMBER in English too — "11 વાગ્યે" → "eleven વાગ્યે", "3 बजे" → "three
-    // बजे" — matching how BHK/area/dates/distances already read and the "see you at
-    // N" sign-off. The local time-unit word (વાગ્યે/बजे) is kept; only the figure is
-    // Englished. So every spoken time is an English number across all languages.
-    out = out.replace(/\b(\d{1,2})(?=\s*(?:વાગ|बज|वाग))/g, (_m, h) =>
-      englishNumberWords(parseInt(h, 10)),
-    );
+    // A stray local time-unit in an English reply must not produce the mixed
+    // "eleven baje" — turn it into "o'clock".
+    out = out.replace(/\s*(?:\bbaje\b|बजे|વાગ્યે)/gi, " o'clock");
   }
 
   // "see you at 4" → "see you at four": the sign-off time is spoken as an English

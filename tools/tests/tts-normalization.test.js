@@ -10,16 +10,18 @@
  *    words, even in Hindi mode ("4,800 square feet" -> "four thousand eight
  *    hundred ..."), for the same reason as BHK. In Hindi mode the *unit* is still
  *    respelled to Devanagari ("स्क्वेयर फीट") for correct pronunciation.
- *  - Appointment/clock times spoken in the local unit ("N बजे" / "N વાગ્યે") say the
- *    NUMBER in English ("3 बजे" -> "three बजे", "11 વાગ્યે" -> "eleven વાગ્યે"); the
- *    local unit word stays. Every spoken time is an English number across languages.
+ *  - CLOCK TIMES NEVER MIX LANGUAGES. A spoken time is either fully local or fully
+ *    English — never "eleven बजे" and never "ग्यारह AM":
+ *      Hinglish/Gujarati -> "ग्यारह बजे" / "અગિયાર વાગ્યે"  (number AND unit local)
+ *      English           -> "eleven AM"                      (number AND unit English)
+ *    A WHOLE hour is a scheduling time and takes the local बजे/વાગ્યે form (so
+ *    "4 PM" -> "चार बजे" in Hinglish). A time WITH minutes is a precise clock
+ *    reading (answering "what time is it now?") and reads in English words
+ *    ("11:30 AM" -> "eleven thirty AM") — still unmixed. In English mode a stray
+ *    "baje" becomes "o'clock" so it can never produce "two baje".
  *  - Distances always speak the number AND unit in English, in both modes
  *    ("3 km" -> "three kilometers") — the Hindi engine mangles "km" and reads the
  *    number in Hindi.
- *  - Clock times (H:MM / with AM/PM) speak in English WORDS in Hindi mode
- *    ("3:02 PM" -> "three oh two PM") so the Hindi engine doesn't read the digits
- *    in Hindi; in English mode they stay as digits ("9 AM" -> "9 AM", read in
- *    English natively). The "N बजे" scheduling form above also uses an English number.
  *  - The "see you at N" sign-off speaks an English number in both modes
  *    ("see you at 4" -> "see you at four").
  */
@@ -71,28 +73,30 @@ test("romanized Hindi fragments are normalized in Hindi-mode TTS", () => {
   // ("3 बजे" -> "three बजे"); only the digit is Englished, the unit word stays.
   assert.equal(
     normalizeForTts("बिल्कुल, 3 बजे। Jo clients interest dikhate hain.", "hi-IN"),
-    "बिल्कुल, three बजे। जो clients interest दिखाते हैं.",
+    "बिल्कुल, तीन बजे। जो clients interest दिखाते हैं.",
   );
   assert.equal(
     normalizeForTts("Aaj 2 baje convenient rahega?", "hi-IN"),
-    "आज two बजे convenient रहेगा?",
+    "आज दो बजे convenient रहेगा?",
   );
-  // English mode leaves romanized Hindi alone but still words English numbers.
+  // English mode must never emit the MIXED "two baje" — the local time-unit word
+  // becomes "o'clock" so the whole time reads in one language.
   assert.equal(
     normalizeForTts("Aaj 2 baje convenient rahega?", "en-IN"),
-    "Aaj two baje convenient rahega?",
+    "Aaj two o'clock convenient rahega?",
   );
 });
 
-test("clock times with AM/PM stay as digits (spaced and unspaced)", () => {
+test("English-mode clock times read as English words (Eleven AM)", () => {
   const { normalizeForTts } = require("../../apps/api/dist/tts/elevenlabs.service");
 
-  // The model emits the spaced form "9 AM"; it must not become "nine AM".
+  // Spelled out rather than left as digits, so it always reads "nine AM" and is
+  // never at the engine's mercy.
   assert.equal(
     normalizeForTts("Our office is open 9 AM to 6 PM", "en"),
-    "Our office is open 9 AM to 6 PM",
+    "Our office is open nine AM to six PM",
   );
-  assert.equal(normalizeForTts("Call me at 9AM", "en"), "Call me at 9AM");
+  assert.equal(normalizeForTts("Call me at 9AM", "en"), "Call me at nine AM");
   // A number that merely precedes a word starting with "am" is NOT a time.
   assert.equal(normalizeForTts("9 American homes", "en"), "nine American homes");
 });
@@ -132,7 +136,7 @@ test("dates speak the day number in English in both modes", () => {
   // English too ("11 बजे" -> "eleven बजे").
   assert.equal(
     normalizeForTts("5 July, 11 बजे सुबह — confirm कर रही हूँ।", "hi"),
-    "five July, eleven बजे सुबह — confirm कर रही हूँ।",
+    "five July, ग्यारह बजे सुबह — confirm कर रही हूँ।",
   );
   assert.equal(normalizeForTts("आपकी visit July 20 को है।", "hi"), "आपकी visit July twenty को है।");
   // Ordinal suffix drops to a cardinal ("5th July" -> "five July").
@@ -161,11 +165,11 @@ test("durations in minutes speak the number in English in both modes", () => {
   assert.equal(normalizeForTts("करीब 30 मिनट।", "hi"), "करीब thirty minutes।");
 });
 
-test("clock times speak in English words in Hindi mode, digits in English mode", () => {
+test("clock times never mix languages — fully local in Hinglish, fully English in English", () => {
   const { normalizeForTts } = require("../../apps/api/dist/tts/elevenlabs.service");
 
-  // Hindi mode: the engine reads bare digits in Hindi, so a clock time is spelled
-  // out in English words. Minutes 1-9 read "oh N"; :00 drops the minute.
+  // A time WITH minutes is a precise clock reading (answering "what time is it
+  // now?") and reads in English words — unmixed. Minutes 1-9 read "oh N".
   assert.equal(
     normalizeForTts("अभी 3:02 PM हो रहा है।", "hi"),
     "अभी three oh two PM हो रहा है।",
@@ -174,29 +178,35 @@ test("clock times speak in English words in Hindi mode, digits in English mode",
     normalizeForTts("अभी 11:30 AM हो रहा है।", "hi"),
     "अभी eleven thirty AM हो रहा है।",
   );
-  assert.equal(normalizeForTts("आपका 3:00 PM का slot।", "hi"), "आपका three PM का slot।");
-  assert.equal(normalizeForTts("4 PM ठीक रहेगा।", "hi"), "four PM ठीक रहेगा।");
-  // English mode: clock times stay as digits (the engine reads them in English).
-  assert.equal(normalizeForTts("It is 3:02 PM right now.", "en"), "It is 3:02 PM right now.");
-  // The scheduling "N बजे" form keeps its local unit word but the NUMBER is spoken
-  // in English ("11 बजे" -> "eleven बजे"), so every time reads as an English number.
+  // A WHOLE hour is a scheduling time → fully Hindi "N बजे", never "three PM".
+  assert.equal(normalizeForTts("आपका 3:00 PM का slot।", "hi"), "आपका तीन बजे का slot।");
+  assert.equal(normalizeForTts("4 PM ठीक रहेगा।", "hi"), "चार बजे ठीक रहेगा।");
+  // English mode: the same time is fully English.
+  assert.equal(
+    normalizeForTts("It is 3:02 PM right now.", "en"),
+    "It is three oh two PM right now.",
+  );
+  // The scheduling "N बजे" form is fully Hindi — number AND unit word. It must
+  // never become the mixed "eleven बजे".
   assert.equal(
     normalizeForTts("बिल्कुल, 11 बजे सुबह convenient रहेगा?", "hi"),
-    "बिल्कुल, eleven बजे सुबह convenient रहेगा?",
+    "बिल्कुल, ग्यारह बजे सुबह convenient रहेगा?",
   );
 });
 
-test("Gujarati appointment times speak the number in English, unit word stays local", () => {
+test("Gujarati appointment times are FULLY Gujarati — number and unit word", () => {
   const { normalizeForTts } = require("../../apps/api/dist/tts/elevenlabs.service");
 
-  // "11 વાગ્યે" -> "eleven વાગ્યે"; the sign-off "see you at N" is English too.
+  // Never the mixed "eleven વાગ્યે" — the figure reads in Gujarati too.
   assert.equal(
     normalizeForTts("11 વાગ્યે સવારે કે 5 વાગ્યે સાંજે?", "gu"),
-    "eleven વાગ્યે સવારે કે five વાગ્યે સાંજે?",
+    "અગિયાર વાગ્યે સવારે કે પાંચ વાગ્યે સાંજે?",
   );
+  // The "see you at N" sign-off stays an English number by design (it is an
+  // English phrase, so it is unmixed English).
   assert.equal(
     normalizeForTts("4 વાગ્યાની appointment — see you at 4.", "gu"),
-    "four વાગ્યાની appointment — see you at four.",
+    "ચાર વાગ્યાની appointment — see you at four.",
   );
 });
 

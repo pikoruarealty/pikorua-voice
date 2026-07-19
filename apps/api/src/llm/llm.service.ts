@@ -252,6 +252,15 @@ export class LlmService {
       this.recordSuccess(breakerKey);
       return { text, llmMs: ms, model, promptTokens, completionTokens };
     } catch (err) {
+      // A barge-in aborts the turn, which surfaces here as an axios CanceledError.
+      // That is US hanging up on the provider, not the provider failing — counting
+      // it opens the breaker on a caller who simply interrupts a few times in a
+      // row, and the NEXT genuine turn gets "No LLM provider available" and dead
+      // air. Seen in production: three barge-ins tripped the breaker mid-call.
+      if (opts.signal?.aborted) {
+        this.logger.log("OpenRouter stream aborted (barge-in) — not counted against the breaker");
+        throw err;
+      }
       this.recordFailure(breakerKey);
       this.logger.warn("OpenRouter stream failed", err instanceof Error ? err.stack : String(err));
       throw err;
@@ -323,6 +332,8 @@ export class LlmService {
       this.recordSuccess("openrouter");
       return { text, llmMs: ms, model: openRouterModel, promptTokens, completionTokens };
     } catch (err) {
+      // Same as the streaming path: an aborted turn is not a provider fault.
+      if (opts?.signal?.aborted) return null;
       this.recordFailure("openrouter");
       this.logger.error(
         "OpenRouter request failed",

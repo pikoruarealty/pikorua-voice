@@ -128,15 +128,27 @@ export class DialService implements OnModuleDestroy {
     if (sid && key && token) {
       try {
         const url = `https://${subdomain}/v1/Accounts/${String(sid)}/Calls/connect.json`;
+        // Exotel's `From` is the leg it dials FIRST — i.e. the person we want to
+        // reach — NOT the number we call from. `CallerId` is what they see. Passing
+        // the exophone as `From` (as this did) makes Exotel ring its own virtual
+        // number, connect THAT to the applet, and play the whole pitch to a dead
+        // leg: the callee's phone never rings, yet the call bills and records
+        // normally, so it looks like a delivered call in every log.
+        //
+        // Our DB keeps fromNumber=exophone / toNumber=callee (business → customer,
+        // which is what the CRM payload expects), so the mapping is deliberately
+        // inverted here rather than at the column level.
         const params = new URLSearchParams({
-          From: call.fromNumber ?? "",
-          To: call.toNumber ?? "",
+          From: call.toNumber ?? "",
           CallerId: String(this.config.get("EXOTEL_CALLER_ID") ?? ""),
         });
-        // Route the answered call through the Voicebot app configured in the
-        // Exotel dashboard. Without AppId, Exotel has no behaviour to run.
+        // The Voicebot applet is the SECOND leg, so no `To` is sent. It must be
+        // passed as a flow `Url`; `AppId` is rejected by connect.json with
+        // "Invalid 'To' specified" because that param expects a real destination.
         const appId = this.config.get("EXOTEL_APP_ID");
-        if (appId) params.set("AppId", String(appId));
+        if (appId) {
+          params.set("Url", `http://my.exotel.com/${String(sid)}/exoml/start_voice/${String(appId)}`);
+        }
         if (publicBaseUrl) {
           params.set("StatusCallback", `${publicBaseUrl}/api/webhooks/exotel`);
           params.set("StatusCallbackContentType", "application/json");

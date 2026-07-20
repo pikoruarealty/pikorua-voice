@@ -23,7 +23,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
@@ -31,9 +31,14 @@ jobs:
       - run: pnpm type-check
         name: Type-check all packages
 
-      - run: pnpm lint
-        name: Lint
-        continue-on-error: true # lint warnings don't block merges
+      # NOTE: `pnpm lint` is currently just an alias of `type-check`, so running
+      # it here would type-check twice and report nothing new. Formatting is the
+      # check that actually adds signal — non-blocking because several files
+      # (call-runtime.service.ts among them) already fail prettier from before
+      # this was wired up. Run `pnpm format` to clear them, then make it blocking.
+      - run: pnpm format:check
+        name: Formatting (advisory)
+        continue-on-error: true
 
   build:
     name: Build
@@ -47,7 +52,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
@@ -66,21 +71,27 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
         name: Build before running tests (tests require compiled dist)
 
-      - run: node --test tools/tests/production-hardening.test.js
-        name: Production hardening tests
-
-      - run: node --test tools/tests/llm-routing.test.js
-        name: LLM routing tests
-
-      - run: node --test tools/tests/guardrail.test.js
-        name: Guardrail tests
+      # The file list is derived from the directory, NOT enumerated by hand.
+      # Hand-listing is why voice-timing, gujarati-lang, tts-normalization,
+      # appointments, worker-waker, persist-fk-detection and guardrail-streaming
+      # silently never ran here — a new suite was only covered if someone
+      # remembered to add a step for it, and nobody did.
+      #
+      # integration.test.js is the one exclusion: requireApi() hard-fails (rather
+      # than skipping) when CI=true and no API is reachable, and GitHub Actions
+      # always sets CI=true. It has its own job below, with the stack running.
+      - name: Unit tests (every suite except integration)
+        run: |
+          files=$(ls tools/tests/*.test.js | grep -v 'integration\.test\.js$')
+          echo "Running:"; echo "$files"
+          node --test $files
 
   integration-tests:
     name: Integration tests
@@ -126,7 +137,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile

@@ -128,11 +128,14 @@ export class SarvamService {
     // NOTE: "anushka" is a bulbul:v2 voice and is REJECTED by v3.
     const speaker = String(this.config.get("SARVAM_SPEAKER") ?? "simran");
     const model = String(this.config.get("SARVAM_MODEL") ?? "bulbul:v3");
-    // pace 1.0 = natural speed (chosen setting). Sweep in
+    // pace 1.15 = the chosen setting (slightly brisker than the 1.0 baseline,
+    // which dragged on longer sentences). Sweep in
     // tools/staging/sarvam-tune-simran.js confirmed LOWER pace = slower speech
-    // (0.8→19s, 1.0→13s for the same line), so drop below 1.0 to slow her down.
-    // Range 0.5–2.0, clamped so a bad env value can't break synthesis.
-    const pace = Math.min(2.0, Math.max(0.5, Number(this.config.get("SARVAM_PACE") ?? 1.0)));
+    // (0.8→19s, 1.0→13s for the same line), so drop below 1.15 to slow her down.
+    // Range 0.5–2.0, clamped so a bad env value can't break synthesis. The literal
+    // below must match the env schema default (zod always fills it, so it is
+    // unreachable — but a differing number would misrepresent the real default).
+    const pace = Math.min(2.0, Math.max(0.5, Number(this.config.get("SARVAM_PACE") ?? 1.15)));
     // temperature = v3's expressiveness knob (it replaced v2's pitch+loudness).
     // 0 = neutral (chosen setting) — but Sarvam REJECTS a literal temperature:0
     // ("Input parameters has to be a valid dictionary"), so 0 means "omit the

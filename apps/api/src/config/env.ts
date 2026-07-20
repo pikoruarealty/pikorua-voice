@@ -112,8 +112,11 @@ export const envSchema = z
     // `node tools/staging/sarvam-tts-smoke.js --audition`. ("anushka" is a v2
     // voice and is rejected by v3.)
     SARVAM_SPEAKER: z.string().default("simran"),
-    // pace 1.0 = natural speed. Lower = slower (0.8 drags). Range 0.5–2.0.
-    SARVAM_PACE: z.coerce.number().min(0.5).max(2).default(1.0),
+    // 1.15 was chosen by ear (slightly brisker than the 1.0 baseline, which
+    // dragged on longer sentences). Lower = slower (0.8 drags). Range 0.5–2.0.
+    // Keep this in step with SARVAM_PACE in .env — the tuned value must survive a
+    // deploy that never sets the variable.
+    SARVAM_PACE: z.coerce.number().min(0.5).max(2).default(1.15),
     // temperature = bulbul:v3's expressiveness knob (replaced v2 pitch/loudness).
     // 0 sounded robotic in call testing; 0.7 was chosen by ear as the most human.
     // Raise toward ~0.9 for livelier intonation, lower for flatter/steadier.

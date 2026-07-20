@@ -175,6 +175,28 @@ test("the greeting is templated — no LLM call before Maya's first word", () =>
   assert.match(region, /this\.greetingText\(state\)/);
 });
 
+// SARVAM_PACE was tuned by ear and lives in .env. The zod schema default is what a
+// deploy that never sets the variable actually gets, and sarvam.service.ts carries
+// its own `?? <n>` literal. All three drifting apart is how a hand-tuned voice
+// silently reverts in production — this pins the two in-repo copies together.
+test("the Sarvam pace default matches between the env schema and the service", () => {
+  const env = read(ENV);
+  const svc = read("apps/api/src/tts/sarvam.service.ts");
+
+  const envM = env.match(/SARVAM_PACE:[^\n]*\.default\(([\d.]+)\)/);
+  assert.ok(envM, "SARVAM_PACE must have a numeric .default() in the env schema");
+
+  const svcM = svc.match(/this\.config\.get\("SARVAM_PACE"\)\s*\?\?\s*([\d.]+)/);
+  assert.ok(svcM, "sarvam.service.ts must read SARVAM_PACE with a numeric guard");
+
+  assert.equal(
+    Number(svcM[1]),
+    Number(envM[1]),
+    "the ?? literal is unreachable (zod .default() always fills the value) — " +
+      "keep it equal to the schema default so it can't misrepresent it",
+  );
+});
+
 // The Gujarati greeting streams through the SAME turn-level WS session the live
 // turns use, and is synthesized FRESH every call. This is deliberate: Sarvam's
 // temperature gives each synthesis natural variation, so the opening sounds spoken.

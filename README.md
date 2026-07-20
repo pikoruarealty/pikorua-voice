@@ -31,7 +31,8 @@ Inbound + outbound AI voice concierge for ultra-luxury real estate. The system *
 │  STT:   DeepgramLiveService  (WS, VAD endpointing, live path)   │
 │         DeepgramService      (HTTP buffer, REST path only)      │
 │  LLM:   LlmService → OpenRouter  (streaming SSE + CB)          │
-│  TTS:   ElevenlabsService    (HTTP stream per sentence / WS)    │
+│  TTS:   TtsRouter ─┬→ ElevenlabsService  (hi/en, Turbo v2.5)   │
+│                    └→ SarvamService      (gu, Bulbul v3)       │
 │  Guard: GuardrailService     (hard regex + optional LLM check)  │
 └─────────────────────────────────────────────────────────────────┘
          │ BullMQ (Redis)                    │ BullMQ (Redis)
@@ -60,16 +61,18 @@ Inbound + outbound AI voice concierge for ultra-luxury real estate. The system *
 
 | Layer     | Technology                                       |
 | --------- | ------------------------------------------------ |
-| Runtime   | Node.js 20, TypeScript 5                         |
-| Framework | NestJS 10                                        |
-| Monorepo  | Turborepo + pnpm workspaces                      |
-| Database  | PostgreSQL via Neon (serverless)                 |
-| ORM       | Drizzle ORM                                      |
-| Queue     | BullMQ on Redis (Upstash)                        |
-| STT       | Deepgram Nova-3 (WebSocket live streaming)       |
-| LLM       | OpenRouter → Claude Haiku 4-5 (streaming SSE)    |
-| TTS       | ElevenLabs Turbo v2.5 (HTTP stream or WebSocket) |
-| Telephony | Exotel Voicebot WebSocket                        |
+| Runtime   | Node.js 22, TypeScript 5                                |
+| Framework | NestJS 10                                               |
+| Monorepo  | Turborepo + pnpm workspaces                             |
+| Database  | PostgreSQL via Neon (serverless)                        |
+| ORM       | Drizzle ORM                                             |
+| Queue     | BullMQ on Redis (Upstash)                               |
+| STT       | Deepgram Nova-3 (WebSocket live streaming)              |
+| LLM       | OpenRouter → Claude Haiku 4-5 (streaming SSE)           |
+| TTS       | ElevenLabs Turbo v2.5 (hi/en) · Sarvam Bulbul v3 (gu)   |
+| Telephony | Exotel Voicebot WebSocket                               |
+
+Languages: **Hindi, English, Gujarati** — switchable mid-call (see [Languages](#languages--hi--en--gu)).
 
 ---
 
@@ -94,8 +97,10 @@ pikorua-voice/
 │   │       ├── metrics/            # In-process Prometheus metrics
 │   │       ├── postcall/           # BullMQ producer (postcall queue)
 │   │       ├── redis/              # Shared Redis client module
-│   │       ├── stt/                # Deepgram clients
-│   │       ├── tts/                # ElevenLabs client + TTS normalizer
+│   │       ├── stt/                # Deepgram clients + keyterm boosting
+│   │       ├── tts/                # tts-router (locale → vendor)
+│   │       │                       #   elevenlabs.service (hi/en) + normalizer
+│   │       │                       #   sarvam.service     (gu)
 │   │       └── webhooks/           # Exotel status callbacks
 │   └── worker/                     # Async worker process
 │       └── src/
@@ -150,7 +155,29 @@ pnpm format           # prettier --write
 pnpm db:generate      # generate Drizzle migration SQL
 pnpm db:migrate       # apply pending migrations
 pnpm db:studio        # open Drizzle Studio
+pnpm test             # build, then run every suite in tools/tests/
 ```
+
+---
+
+## Tests
+
+```bash
+pnpm test                                   # everything (integration self-skips)
+node --test tools/tests/voice-timing.test.js  # one suite
+```
+
+Most suites are **invariant tests**: they assert couplings between constants and
+behaviours that live in different files, have no compile-time link, and fail silently
+on a live call rather than in a type-check — a near-end hold shorter than Deepgram's
+`utterance_end_ms`, an LLM attempt chain that outlives its own watchdog, an Exotel
+dial addressed to the wrong leg. Each test states the invariant and the failure it
+prevents; read the comment before "fixing" one.
+
+CI derives the file list from the directory rather than naming files, so a new suite
+is covered the moment it lands. `integration.test.js` is the one exclusion — it
+hard-fails instead of skipping when `CI=true` and no API is reachable, so it runs in
+its own job with Postgres and Redis alongside.
 
 ---
 
@@ -160,7 +187,8 @@ pnpm db:studio        # open Drizzle Studio
 1. Campaign created → POST /api/campaigns  (status: "active" enqueues targets)
 2. DialService places outbound call → Exotel API
 3. Exotel connects call, opens WebSocket to /exotel-stream
-4. Gateway generates Maya's opening greeting (LLM + TTS, streamed)
+4. Gateway speaks Maya's opening greeting — a fixed TEMPLATE per locale +
+   scriptRef, never the LLM, so no model round-trip precedes her first word
 5. Deepgram Live streams caller audio → onPartial / onUtterance callbacks
 6. onPartial  → barge-in detection: abort active turn + send Exotel "clear"
 7. onUtterance → enqueueTurn → runTurn
@@ -183,6 +211,23 @@ gateway creates a `calls` row on the fly (capturing the caller's number for the 
 and on hang-up it finalizes the call and drives post-call itself. So every call —
 inbound or outbound — is scored and synced.
 
+### Outbound dialing — Exotel `connect.json` gotchas
+
+Three parameter rules, each of which fails *silently* or fatally if broken. All are
+pinned by `tools/tests/dial-exotel.test.js`.
+
+| Rule | Why |
+| ---- | --- |
+| `From` = **the callee**, not the ExoPhone | `From` is the leg Exotel dials **first**. Passing the ExoPhone makes Exotel ring its own virtual number, bridge that to the applet, and play the whole pitch to a dead leg — while returning 200 with a Sid, billing, and writing a recording. The callee's phone never rings and *nothing in any log says so*. |
+| No `To` | With a flow, the applet **is** the second leg. |
+| Applet via `Url`, never `AppId` | `connect.json` rejects `AppId` with `Invalid 'To' specified`. |
+| No `StatusCallbackEvents[]` | This account 400s the **entire** dial on it, so the phone never rings at all. `StatusCallback` alone still fires on the terminal event. |
+
+The stream's `call_sid` frequently **differs** from the Sid returned by `connect.json`
+(stored as `providerCallSid`), so the gateway falls back to adopting the most recent
+outbound call awaiting a stream and relinks it. Without that, an outbound call loses
+its locale and reverts to `CALL_LOCALE_DEFAULT` — a `gu-IN` call answers in Hindi.
+
 ---
 
 ## Audio pipeline (Exotel ↔ ElevenLabs)
@@ -190,6 +235,29 @@ inbound or outbound — is scored and synced.
 Exotel speaks and listens in **raw 16-bit linear PCM, 8 kHz, mono, little-endian** in both directions. ElevenLabs `pcm_8000` output format produces exactly this — no transcoding step needed.
 
 Exotel requires frames to be a **multiple of 320 bytes** (20 ms per frame at 8 kHz). The `PcmReframer` class accumulates ElevenLabs HTTP chunks and emits 3200-byte frames (100 ms), zero-padding the final frame if needed.
+
+---
+
+## Languages — hi / en / gu
+
+Maya runs in **Hindi, English and Gujarati**, and the caller can move between all
+three *mid-call*: `detectSpokenLanguage` (Exotel gateway) classifies each finished
+utterance and the session re-targets to `hi-IN` / `en-IN` / `gu-IN`. Switching hands
+over the **persona, the TTS voice and the STT model together**, preserving the
+conversation so far — the caller does not repeat themselves.
+
+Detection reads an explicit request first (`gujarati`, `ગુજરાતી`, `हिंदी`, `english`,
+`ઇંગ્લિશ`…), then falls back to the script actually spoken. The explicit-request path
+is load-bearing for Gujarati: a `multi`-mode transcript never *contains* Gujarati
+script (see below), so a Gujarati speaker can only be recognised by asking.
+
+**Crossing into or out of `gu` re-opens the Deepgram socket**, because it is a
+different model (`gu` vs `multi`); `hi ↔ en` stays on one socket. Switching *into*
+`gu` is additionally gated on the Sarvam kill switch.
+
+Two costs worth knowing: each switch is a **full prompt-cache miss** (the persona
+prefix changes), and the Gujarati system prompt is materially larger than the Hindi
+one, so `gu` turns carry a higher token count and a slightly longer time-to-first-audio.
 
 ---
 
@@ -224,6 +292,12 @@ The session reconnects up to 3 times with exponential backoff (300 → 600 → 1
 2. One attempt on `OPENROUTER_FALLBACK_MODEL` if configured
 3. Circuit breaker: after 3 consecutive failures a provider is skipped for 10 s
 
+> A turn aborted by **barge-in** surfaces here as an axios `CanceledError`, and is
+> explicitly **not** counted against the breaker — that is us cancelling, not the
+> provider failing. Counting it meant three interruptions in a row opened the breaker
+> and the next genuine turn died with "No LLM provider available", leaving the caller
+> in silence. Guarded by `tools/tests/llm-breaker.test.js`.
+
 A per-turn watchdog (`TURN_TIMEOUT_MS`, default 12 s) aborts in-flight provider calls if the whole turn overruns.
 
 > **Invariant:** attempts × `OPENROUTER_TIMEOUT_MS` ≤ `TURN_TIMEOUT_MS`. The attempts run **serially inside one watchdog**, so a per-request cap above `TURN_TIMEOUT_MS / 3` means the watchdog kills the turn before the fallback model is ever tried — the chain stops being a fallback chain exactly when the primary is already failing. Defaults (4000 × 3 = 12 s) and prod (5000 × 3 = 15 s < 18 s) both hold. Raise `OPENROUTER_TIMEOUT_MS` only alongside `TURN_TIMEOUT_MS`. Guarded by `tools/tests/voice-timing.test.js`.
@@ -236,9 +310,27 @@ A per-turn watchdog (`TURN_TIMEOUT_MS`, default 12 s) aborts in-flight provider 
 
 ---
 
-## TTS — ElevenLabs
+## TTS — ElevenLabs (hi/en) + Sarvam (gu)
 
-Two modes, controlled by `TTS_WS_STREAMING_ENABLED`:
+`TtsRouter` picks the vendor from the call's locale. The split is not a preference —
+**ElevenLabs cannot speak Gujarati at all** (the Indian multilingual voice renders it
+as accented Hindi), so `gu` is synthesized by **Sarvam Bulbul v3** (speaker `simran`,
+native 8 kHz, which is exactly Exotel's rate — no resampling).
+
+**Kill switch.** `isGujaratiEnabled()` is false when `SARVAM_API_KEY` is unset or
+`SARVAM_TTS_ENABLED=false`. Gujarati then collapses to the Hindi persona rather than
+failing the call — and the mid-call switch into `gu-IN` is gated on the same flag, so
+STT can never run in Gujarati while the reply comes back in Hindi.
+
+**Pace.** `SARVAM_PACE` defaults to `1.15`, tuned by ear against real call audio;
+`1.0` sounds noticeably slow on a phone line. The env schema default and `.env` must
+stay in step — the schema default is what production actually gets.
+
+**No caching, deliberately.** Sarvam's `temperature` gives each synthesis natural
+variation, so the greeting is re-synthesized every call. An earlier version cached one
+take and replayed it; every call became bit-identical and callers heard it as robotic.
+
+Two ElevenLabs modes, controlled by `TTS_WS_STREAMING_ENABLED`:
 
 | Mode           | How                                                               | Characteristic                                                 |
 | -------------- | ----------------------------------------------------------------- | -------------------------------------------------------------- |
@@ -397,6 +489,13 @@ Turn row convention: caller turns use `turnIndex * 2`, assistant turns use `turn
 | `ELEVENLABS_SPEED`            | `1.1`                        | Playback speed (clamped 0.7–1.2)                            |
 | `ELEVENLABS_MODEL`            | `eleven_turbo_v2_5`          |                                                             |
 | `ELEVENLABS_LANGUAGE_CODE`    | `hi`                         | Forces Hindi phonetics for romanized Hindi                  |
+| `SARVAM_API_KEY`              | required for Gujarati        | Unset ⇒ `gu` falls back to the Hindi persona (kill switch)  |
+| `SARVAM_TTS_ENABLED`          | `true`                       | Explicit kill switch for Gujarati TTS                       |
+| `SARVAM_MODEL`                | `bulbul:v3`                  | Sarvam TTS model                                            |
+| `SARVAM_SPEAKER`              | `simran`                     | Gujarati voice                                              |
+| `SARVAM_PACE`                 | `1.15`                       | Tuned by ear on real calls; `1.0` drags on a phone line     |
+| `SARVAM_TEMPERATURE`          | `0.7`                        | Per-synthesis variation (why the greeting is never cached)  |
+| `SARVAM_PREPROCESS`           | `true`                       | Sarvam-side text normalization                              |
 | `OPENROUTER_API_KEY`          | required (prod)              |                                                             |
 | `OPENROUTER_MODEL`            | `anthropic/claude-haiku-4-5` | Primary LLM model                                           |
 | `OPENROUTER_FALLBACK_MODEL`   | —                            | Optional second model if primary fails                      |
@@ -639,7 +738,7 @@ When Exotel reports DTMF digits **via the status webhook**, the digit is mapped 
 | `3`   | `gu-IN` |
 | other | `hi-IN` |
 
-> **Note:** this resolves locale at call setup (from `custom_parameters.locale` / the call row). A DTMF press arriving _mid-stream_ on the `/exotel-stream` socket is logged but does **not** hot-swap the running conversation's language — the system prompt and Deepgram language are pinned when the stream starts. Use the IVR keypad step before the voicebot applet connects.
+> **Note:** this resolves the locale at call setup (from `custom_parameters.locale` / the call row). A DTMF press arriving _mid-stream_ still does **not** hot-swap the language — only *speech* does, via the detector described in [Languages](#languages--hi--en--gu). Use the IVR keypad step before the voicebot applet connects, or just let the caller ask.
 
 ---
 

@@ -46,7 +46,7 @@ const TTS_RESPELLINGS: Array<[RegExp, string]> = [
 const GU_TTS_RESPELLINGS: Array<[RegExp, string]> = [
   // CRORE IS THE EXCEPTION to this table's usual "Latin → Gujarati" direction.
   // Bulbul mis-voices the Gujarati word કરોડ as "કરોધ" (karodh) but reads the LATIN
-  // word "crore" correctly (chosen by ear, tools/staging/sarvam-fix-check.js). The
+  // word "crore" correctly (chosen by ear against real synthesized audio). The
   // gu prompt writes budget anchors as "કરોડ", so convert THAT (and plural કરોડો)
   // to Latin — the reverse direction — and never respell "crore"/"Cr" into Gujarati.
   // The "Cr" abbreviation is already expanded to "crore" up top in normalizeForTts,
@@ -719,8 +719,7 @@ export class ElevenlabsService {
     // voice_id, so Maya keeps one identity across all three languages.
     //
     // The trade is latency: measured ~820-1135ms to first audio vs turbo's
-    // ~230-320ms (tools/staging/elevenlabs-v3-gujarati-spike.js). That is why
-    // this is only used for gu, never for hi/en.
+    // ~230-320ms. That is why this is only used for gu, never for hi/en.
     // Forcing the language makes the model read romanized Hindi correctly
     // ("aapko", "kya") instead of mangling it with English phonemes. English
     // words then get a natural Indian accent — right for Hinglish calls.

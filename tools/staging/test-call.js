@@ -1,6 +1,14 @@
 /**
  * One-shot test call via Exotel API.
- * Mirrors dial.service.ts payload exactly.
+ * Mirrors dial.service.ts — keep the two in step; see dial-exotel.test.js for the
+ * rules this payload has to obey, every one of which fails silently or fatally:
+ *
+ *   From = the CALLEE (the leg Exotel dials first). Sending the ExoPhone here rings
+ *          Exotel's own virtual number and plays the pitch to a dead leg, while
+ *          still returning 200 + a Sid + a recording. The phone never rings.
+ *   To     omitted — with a flow, the applet IS the second leg.
+ *   Url    not AppId — connect.json rejects AppId ("Invalid 'To' specified").
+ *   No StatusCallbackEvents[] — this account 400s the WHOLE dial on it.
  *
  * Usage:
  *   node tools/staging/test-call.js <toNumber>
@@ -43,20 +51,25 @@ async function main() {
   if (!callerId) throw new Error("EXOTEL_CALLER_ID not set");
 
   const params = new URLSearchParams({
-    From: callerId,
-    To: toNumber,
+    From: toNumber,
     CallerId: callerId,
   });
-  if (appId) params.set("AppId", appId);
+  if (appId) params.set("Url", `http://my.exotel.com/${sid}/exoml/start_voice/${appId}`);
   if (publicBaseUrl) {
-    params.set("StatusCallback", `${publicBaseUrl}/api/webhooks/exotel`);
+    // The secret rides in the URL — Exotel does not sign status callbacks, so this
+    // is the only channel that authenticates them (see dial.service.ts).
+    const webhookSecret = process.env.EXOTEL_WEBHOOK_SECRET ?? "";
+    params.set(
+      "StatusCallback",
+      webhookSecret
+        ? `${publicBaseUrl}/api/webhooks/exotel?token=${encodeURIComponent(webhookSecret)}`
+        : `${publicBaseUrl}/api/webhooks/exotel`,
+    );
     params.set("StatusCallbackContentType", "application/json");
-    params.append("StatusCallbackEvents[]", "answered");
-    params.append("StatusCallbackEvents[]", "terminal");
   }
 
   const url = `https://${subdomain}/v1/Accounts/${sid}/Calls/connect.json`;
-  console.log(`Placing call: ${callerId} → ${toNumber}`);
+  console.log(`Placing call: ${callerId} (CallerId) → ${toNumber} (From/first leg)`);
   console.log(`Exotel URL:   ${url}`);
   console.log(`App ID:       ${appId ?? "(none)"}`);
   console.log(`Callback:     ${publicBaseUrl ? publicBaseUrl + "/api/webhooks/exotel" : "(none)"}`);

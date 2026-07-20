@@ -18,6 +18,12 @@ async function main() {
   checks.push(checkDeepgram());
   checks.push(checkElevenLabs());
   checks.push(checkOpenRouter());
+  // Sarvam is the ONLY vendor that can speak Gujarati; without it `gu` silently
+  // collapses to the Hindi persona (the isGujaratiEnabled kill switch), which is a
+  // working call in every log and the wrong language to the caller. Not in
+  // `required` — hi/en are fully functional without it.
+  if (process.env.SARVAM_API_KEY) checks.push(checkSarvam());
+  else console.warn("SARVAM_API_KEY unset — Gujarati will fall back to Hindi");
 
   const results = await Promise.allSettled(checks);
   const failed = results.filter((result) => result.status === "rejected");
@@ -62,6 +68,25 @@ async function checkOpenRouter() {
   });
   if (!res.ok) throw new Error(`OpenRouter smoke failed: ${res.status}`);
   return "OpenRouter auth ok";
+}
+
+async function checkSarvam() {
+  const res = await fetch("https://api.sarvam.ai/text-to-speech", {
+    method: "POST",
+    headers: {
+      "api-subscription-key": process.env.SARVAM_API_KEY,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      text: "નમસ્તે",
+      target_language_code: "gu-IN",
+      model: process.env.SARVAM_MODEL ?? "bulbul:v3",
+      speaker: process.env.SARVAM_SPEAKER ?? "simran",
+      speech_sample_rate: 8000,
+    }),
+  });
+  if (!res.ok) throw new Error(`Sarvam auth failed: ${res.status} ${await res.text()}`);
+  return "Sarvam auth ok (Gujarati available)";
 }
 
 main().catch((err) => {

@@ -499,8 +499,8 @@ Turn row convention: caller turns use `turnIndex * 2`, assistant turns use `turn
 | `OPENROUTER_API_KEY`          | required (prod)              |                                                             |
 | `OPENROUTER_MODEL`            | `anthropic/claude-haiku-4-5` | Primary LLM model                                           |
 | `OPENROUTER_FALLBACK_MODEL`   | —                            | Optional second model if primary fails                      |
-| `CRM_API_BASE_URL`            | `http://localhost:4000`      |                                                             |
-| `CRM_API_TOKEN`               | —                            |                                                             |
+| `CRM_API_BASE_URL`            | `http://localhost:4000`      | **Base only** — `/call-results` is appended in code. Prod: `https://crm.pikoruarealty.com/api/v1/voice` |
+| `CRM_API_TOKEN`               | —                            | CRM's `VOICE_API_BEARER_TOKEN`                              |
 
 ### apps/worker
 
@@ -657,7 +657,9 @@ When Exotel fires a `completed` webhook:
    - Positive: `interested`, `site visit`, `book`, `appointment`, `buy`, `purchase`, `schedule`, `when can`, `call me`, `contact me`
    - Negative: `not interested`, `don't call`, `do not call`, `stop`, `unsubscribe`, `no thanks`
 4. Score ≥ 75 → **HOT alert** written to `call_events`
-5. **CRM sync**: POST a structured call-result payload to `CRM_API_BASE_URL/call-results`, signed with a `Bearer` token + `X-Signature` (HMAC-SHA256 over the raw body) + `X-Timestamp`, and deduped by an `Idempotency-Key`. Failures retried by `CrmRetryWorker` every 5 minutes (up to 5 attempts)
+5. **CRM sync**: POST a structured call-result payload (score, label, timeline, objections, transcript turns, appointment) to `CRM_API_BASE_URL/call-results` — in production `https://crm.pikoruarealty.com/api/v1/voice/call-results` — signed with a `Bearer` token + `X-Signature` (HMAC-SHA256 over the raw body) + `X-Timestamp`, and deduped by an `Idempotency-Key`. Failures retried by `CrmRetryWorker` every 5 minutes (up to 5 attempts)
+
+> `CRM_API_BASE_URL` is the **base**; `crm-client.ts` appends `/call-results`. Setting it to the full endpoint yields `…/call-results/call-results` and every sync 404s — and because CRM sync is intentionally non-fatal, calls keep completing normally while no lead ever reaches the CRM.
 
 ---
 

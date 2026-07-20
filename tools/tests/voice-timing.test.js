@@ -295,3 +295,27 @@ test("the runtime adopts a mid-call locale switch — vendor + persona follow th
     "a language switch must preserve conversation history (context), not reset it",
   );
 });
+
+// "5 BHK" spoken letter-by-letter arrives from the Gujarati STT as "ફાઇ પી એચ કે".
+// The final letter K transliterates to "કે" — which is also the Gujarati
+// conjunction "or/that" in CONTINUATION_CUES — so the fragment-hold classified the
+// product's single most important qualifying answer as a sentence trailing off.
+// The turn was held, Maya said nothing, and the caller endured 15s of dead air
+// before saying "હલો" to unstick the call. Observed in production.
+test("a spelled-out BHK is not held as a mid-thought fragment", () => {
+  const src = read(RUNTIME);
+
+  assert.match(src, /const SPELLED_BHK\s*=/, "the BHK/conjunction collision must be guarded");
+  // The guard has to run INSIDE looksIncomplete, before the trailing-cue check.
+  const start = src.indexOf("function looksIncomplete");
+  assert.ok(start !== -1, "looksIncomplete must exist");
+  const region = src.slice(start, src.indexOf("END_CALL_TOKEN", start));
+  const guardAt = region.indexOf("SPELLED_BHK.test");
+  const cueAt = region.indexOf("CONTINUATION_CUES.has");
+  assert.ok(guardAt !== -1, "looksIncomplete must consult SPELLED_BHK");
+  assert.ok(cueAt !== -1, "looksIncomplete must still apply the trailing-cue rule");
+  assert.ok(guardAt < cueAt, "the BHK guard must short-circuit BEFORE the cue check");
+
+  // "કે" must stay in the cue list — a genuine trailing conjunction still holds.
+  assert.match(src, /"કે", \/\/ or \/ that/);
+});

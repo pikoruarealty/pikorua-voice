@@ -174,11 +174,23 @@ export function isNoisyTranscript(text: string): boolean {
   return words.every((w) => NOISE_WORDS.has(w));
 }
 
+// "5 BHK" said letter-by-letter comes back from the Gujarati STT as
+// "ફાઇ પી એચ કે" — and the final letter K transliterates to "કે", which is ALSO
+// the Gujarati conjunction "or/that" in CONTINUATION_CUES. That collision made
+// the single most important qualifying answer in this product look like a
+// trailing fragment: the turn was held, Maya stayed silent, and the caller sat
+// through 15s of dead air before saying "હલો" to unstick it. Seen in production
+// (call 9a0e2705, 11:44:41 → 11:44:56). Devanagari included — a Hindi caller
+// spells it out the same way.
+const SPELLED_BHK = /(?:એચ|एच)\s*(?:કે|के)[\s.?!।]*$/;
+
 function looksIncomplete(text: string): boolean {
   const trimmed = text.trim();
   if (!trimmed) return false;
   // Trailing comma or dash — sentence clearly cut off
   if (/[,\-–—]$/.test(trimmed)) return true;
+  // A spelled-out BHK is a COMPLETE answer, not a sentence trailing off on "કે".
+  if (SPELLED_BHK.test(trimmed)) return false;
   const words = trimmed
     .toLowerCase()
     .replace(/[.?!।]+$/, "")

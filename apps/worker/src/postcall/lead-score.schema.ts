@@ -39,30 +39,39 @@ export type Objection = z.infer<typeof ObjectionSchema>;
 // CRM (via crm-payload) so an agent can see WHY a lead scored the way it did —
 // not just the number. Every field is null/false when the caller didn't disclose
 // it, so the CRM can distinguish "not asked" from "answered".
+// EVERY field below is .catch()-guarded on purpose. `.default()` only fills an
+// ABSENT (undefined) key — a key the model explicitly sends as `null`, or with the
+// wrong type, still throws and fails the WHOLE parse, which silently discards the
+// entire LLM result and drops post-call scoring to the crude keyword heuristic.
+// That is exactly what happened in production: `"siteVisit": {"intent": null}`
+// binned an otherwise-perfect score. One malformed field must never cost us the
+// other twelve.
 export const LeadBreakdownSchema = z.object({
-  professionCategory: professionCategory.default("unknown"),
+  professionCategory: professionCategory.catch("unknown").default("unknown"),
   // Free-text profession as stated ("doctor", "runs a textile business", …).
-  profession: z.string().nullable().default(null),
+  profession: z.string().nullable().catch(null).default(null),
   // Budget only if a specific figure was given ("5 crore"); null for vague answers.
-  budget: z.string().nullable().default(null),
+  budget: z.string().nullable().catch(null).default(null),
   // Requirement / configuration ("4 BHK", "5 BHK, ~5000 sqft").
-  requirements: z.string().nullable().default(null),
+  requirements: z.string().nullable().catch(null).default(null),
   // Preferred location / micro-market ("SBR", "Iskon-Ambli", "Thaltej").
-  location: z.string().nullable().default(null),
+  location: z.string().nullable().catch(null).default(null),
   // Where the caller currently lives.
-  currentResidence: z.string().nullable().default(null),
+  currentResidence: z.string().nullable().catch(null).default(null),
   siteVisit: z
     .object({
-      // Did the caller agree to / ask for a visit?
-      intent: z.boolean().default(false),
+      // Did the caller agree to / ask for a visit? `.catch(false)` because the
+      // model sends an explicit null here when the visit never came up.
+      intent: z.boolean().catch(false).default(false),
       // Free-text timing as discussed ("this Sunday", "next week").
-      when: z.string().nullable().default(null),
+      when: z.string().nullable().catch(null).default(null),
       // Days from the call to the proposed visit; drives the visit points.
-      gapDays: z.number().int().nullable().default(null),
+      gapDays: z.number().int().nullable().catch(null).default(null),
     })
+    .catch({ intent: false, when: null, gapDays: null })
     .default({ intent: false, when: null, gapDays: null }),
   // Interest in seeing the sample house / model flat.
-  sampleHouseInterest: z.boolean().nullable().default(null),
+  sampleHouseInterest: z.boolean().nullable().catch(null).default(null),
   // Reasons the caller is hesitating / not proceeding. Empty when none surfaced.
   // .catch([]) so a malformed objections field never fails the whole score parse.
   objections: z.array(ObjectionSchema).catch([]).default([]),
@@ -70,13 +79,24 @@ export const LeadBreakdownSchema = z.object({
 export type LeadBreakdown = z.infer<typeof LeadBreakdownSchema>;
 
 export const LeadScoreLlmSchema = z.object({
+  // `score` stays STRICT deliberately: it is the one field with no safe fallback,
+  // and a result without a usable score is better handled by the caller's
+  // heuristic than by inventing a number here.
   score: z.number().int().min(0).max(100),
-  label: z.enum(["hot", "warm", "cold"]),
-  rationale: z.string().min(1),
-  timeline: z.enum(["immediate", "short_term", "long_term", "exploring", "unknown"]),
-  matchedPos: z.array(z.string()).default([]),
-  matchedNeg: z.array(z.string()).default([]),
-  breakdown: LeadBreakdownSchema.default({}),
+  // `.catch` value is irrelevant — clampResult() recomputes the label from the
+  // final (override-adjusted) score and overwrites whatever the model said. This
+  // guard exists purely so a junk label ("invalid", seen in production) cannot
+  // throw away the score, rationale and breakdown alongside it.
+  label: z.enum(["hot", "warm", "cold"]).catch("cold"),
+  // nullish → the caller's `?? heuristic rationale` fallback fires, instead of us
+  // fabricating a reason the model never gave.
+  rationale: z.string().min(1).nullish().catch(null),
+  timeline: z
+    .enum(["immediate", "short_term", "long_term", "exploring", "unknown"])
+    .catch("unknown"),
+  matchedPos: z.array(z.string()).catch([]).default([]),
+  matchedNeg: z.array(z.string()).catch([]).default([]),
+  breakdown: LeadBreakdownSchema.catch(() => LeadBreakdownSchema.parse({})).default({}),
 });
 
 export type LeadScoreLlmResult = z.infer<typeof LeadScoreLlmSchema>;

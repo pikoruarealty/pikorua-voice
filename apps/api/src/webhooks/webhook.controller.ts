@@ -31,6 +31,17 @@ export class WebhookController {
       throw new BadRequestException("Invalid webhook payload");
     }
 
-    return this.svc.handleExotel(raw, parsed.data, signature ?? null);
+    // Exotel does NOT sign status callbacks (no documented signature header), so
+    // the shared secret travels in the callback URL we registered instead — see
+    // handleExotel. Accept it from either the query string or a bearer-style
+    // header, whichever the caller used.
+    const urlToken =
+      typeof req.query?.token === "string"
+        ? req.query.token
+        : typeof req.query?.secret === "string"
+          ? req.query.secret
+          : null;
+
+    return this.svc.handleExotel(raw, parsed.data, signature ?? null, urlToken);
   }
 }

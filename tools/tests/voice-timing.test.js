@@ -223,13 +223,13 @@ test("the Gujarati greeting streams fresh through the turn-level WS session", ()
 });
 
 // Outbound Exotel calls bridge the callee's media leg a beat after the voicebot
-// `start`, so Maya's greeting is held until the callee is fully connected. The
-// hold was raised to 10s for all languages so no intro is clipped.
-test("outbound greeting hold defaults to 10s", () => {
+// `start`, so Maya's greeting is held until the callee is fully connected. 5s was
+// measured as enough on real calls (10s left too much dead air before the intro).
+test("outbound greeting hold defaults to 5s", () => {
   const src = read(GATEWAY);
   const m = src.match(/OUTBOUND_GREETING_DELAY_MS[\s\S]*?:\s*(\d+);/);
   assert.ok(m, "OUTBOUND_GREETING_DELAY_MS must have a numeric fallback");
-  assert.equal(Number(m[1]), 10000, "outbound greeting hold should default to 10000ms");
+  assert.equal(Number(m[1]), 5000, "outbound greeting hold should default to 5000ms");
 });
 
 // Exotel's voicebot stream call_sid frequently differs from the Sid returned by

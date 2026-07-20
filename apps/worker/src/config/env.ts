@@ -27,6 +27,11 @@ export const workerEnvSchema = z
     // Exotel App ID for the Voicebot app configured in the Exotel dashboard.
     // Required for outbound calls to route through the voicebot.
     EXOTEL_APP_ID: optionalNonEmpty,
+    // Shared secret appended to the StatusCallback URL we register with Exotel.
+    // Exotel does not sign its callbacks, so the URL is the only channel we have
+    // to authenticate them — the API rejects a callback that carries neither this
+    // token nor a valid HMAC. Must match the API's EXOTEL_WEBHOOK_SECRET.
+    EXOTEL_WEBHOOK_SECRET: optionalNonEmpty,
     PUBLIC_BASE_URL: z.string().url().default("http://localhost:4100"),
 
     // Keep-alive self-ping (see KeepAliveScheduler). Manual on/off switch,

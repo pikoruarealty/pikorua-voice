@@ -484,3 +484,91 @@ test("call-runtime totalMs uses real elapsed durations from captured timestamps"
 // (deepgram-live.service.ts). Its failure-handling test was deleted with it.
 // Live-session reconnect/error behaviour is covered by the gateway integration
 // tests; see deepgram-live.service.ts onError -> callbacks.onError.
+
+// A single malformed field from the scoring model must not discard the entire
+// LLM result. `.default()` only fills an ABSENT key — an explicit `null` (or a
+// junk enum) still throws and fails the whole parse, which silently drops
+// post-call scoring to the crude keyword heuristic and loses the structured
+// breakdown the CRM shows agents as "why". This is the exact payload that threw
+// in production (worker log 2026-07-19): label "invalid" + siteVisit.intent null.
+test("lead score survives a malformed field instead of binning the whole result", () => {
+  const { LeadScoreLlmSchema } = require("../../apps/worker/dist/postcall/lead-score.schema");
+
+  const parsed = LeadScoreLlmSchema.parse({
+    score: 82,
+    label: "invalid", // not in the enum — was fatal
+    rationale: "Serious buyer, 10 crore budget.",
+    timeline: "short_term",
+    breakdown: {
+      professionCategory: "end_user",
+      budget: "10 crore",
+      location: "Bapunagar",
+      siteVisit: { intent: null, when: "tomorrow 3pm", gapDays: 1 }, // null — was fatal
+    },
+  });
+
+  // The valuable content survives — that's the point of the guard.
+  assert.equal(parsed.score, 82);
+  assert.equal(parsed.breakdown.budget, "10 crore");
+  assert.equal(parsed.breakdown.location, "Bapunagar");
+  assert.equal(parsed.breakdown.siteVisit.intent, false); // coerced, not thrown
+  assert.equal(parsed.breakdown.siteVisit.when, "tomorrow 3pm");
+
+  // Nulled containers and junk enums are all survivable too.
+  for (const payload of [
+    { score: 50, label: "warm", rationale: "x", timeline: "unknown", breakdown: null },
+    { score: 50, label: "warm", rationale: "x", timeline: "bogus", breakdown: { siteVisit: null } },
+    { score: 50, label: "hot", rationale: null, timeline: "unknown" },
+    { score: 50, label: "hot", rationale: "x", timeline: "unknown", matchedPos: null },
+    {
+      score: 50,
+      label: "hot",
+      rationale: "x",
+      timeline: "unknown",
+      breakdown: { professionCategory: "astronaut" },
+    },
+  ]) {
+    assert.ok(
+      LeadScoreLlmSchema.safeParse(payload).success,
+      `malformed payload must still parse: ${JSON.stringify(payload)}`,
+    );
+  }
+
+  // `score` stays strict on purpose — there is no safe fallback for it, so the
+  // caller's heuristic should take over rather than us inventing a number.
+  assert.ok(
+    !LeadScoreLlmSchema.safeParse({ label: "hot", rationale: "x", timeline: "unknown" }).success,
+    "a result with no usable score must fail so the heuristic fallback takes over",
+  );
+});
+
+// Exotel does NOT sign status callbacks — there is no documented signature
+// header — so requiring an HMAC rejected every genuine callback with a 401.
+// Call-lifecycle updates and post-call processing silently never ran while the
+// voice path looked perfectly healthy. The secret now rides in the callback URL
+// (the only channel Exotel gives us) and the HMAC path is still accepted.
+test("Exotel webhook authenticates by URL token as well as HMAC", () => {
+  const svc = read("apps/api/src/webhooks/webhook.service.ts");
+  const ctl = read("apps/api/src/webhooks/webhook.controller.ts");
+  const dial = read("apps/worker/src/dial/dial.service.ts");
+
+  // Rejection requires BOTH factors to fail — a valid token alone is enough.
+  assert.match(
+    svc,
+    /if \(secret && !signatureValid && !tokenValid\)/,
+    "a valid URL token must authenticate the callback on its own",
+  );
+  // The token is compared in constant time, like the HMAC.
+  assert.match(svc, /timingSafeEqual\(a, b\)/);
+  // The controller actually reads it off the query string.
+  assert.match(ctl, /req\.query\?\.token/);
+  // ...and the worker registers a callback URL that carries it, or Exotel would
+  // call an endpoint it can never authenticate against.
+  assert.match(
+    dial,
+    /webhooks\/exotel\?token=\$\{encodeURIComponent\(webhookSecret\)\}/,
+    "the worker must append the shared secret to the StatusCallback URL",
+  );
+  // The audit column records "was it authenticated", not "did the HMAC match".
+  assert.match(svc, /signatureValid: signatureValid \|\| tokenValid/);
+});

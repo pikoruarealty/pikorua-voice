@@ -52,7 +52,7 @@ const EXOTEL_HANGUP_GRACE_MS = 9000;
 // OUTBOUND_GREETING_DELAY_MS; set 0 to disable the hold.
 const OUTBOUND_GREETING_DELAY_MS = (() => {
   const n = Number(process.env.OUTBOUND_GREETING_DELAY_MS);
-  return Number.isFinite(n) && n >= 0 ? n : 10000;
+  return Number.isFinite(n) && n >= 0 ? n : 5000;
 })();
 
 // If the client says nothing for this long, Maya asks if they're still there.

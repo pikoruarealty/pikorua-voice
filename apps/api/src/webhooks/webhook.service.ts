@@ -48,11 +48,45 @@ export class WebhookService {
     }
   }
 
-  async handleExotel(rawBody: string, payload: ExotelWebhookDto, headerSig?: string | null) {
-    const secret = this.config.get("EXOTEL_WEBHOOK_SECRET");
-    const signatureValid = this.verifySignature(secret as string | undefined, rawBody, headerSig);
-    if (secret && !signatureValid) {
-      throw new UnauthorizedException("Invalid Exotel webhook signature");
+  // Constant-time compare of the shared secret carried in the callback URL.
+  private urlTokenValid(secret: string | undefined, token?: string | null): boolean {
+    if (!secret || !token) return false;
+    const a = Buffer.from(String(secret));
+    const b = Buffer.from(String(token));
+    return a.length === b.length && crypto.timingSafeEqual(a, b);
+  }
+
+  async handleExotel(
+    rawBody: string,
+    payload: ExotelWebhookDto,
+    headerSig?: string | null,
+    urlToken?: string | null,
+  ) {
+    const secret = this.config.get("EXOTEL_WEBHOOK_SECRET") as string | undefined;
+    const signatureValid = this.verifySignature(secret, rawBody, headerSig);
+    // EXOTEL DOES NOT SIGN STATUS CALLBACKS. There is no documented signature
+    // header, so requiring an HMAC rejected every single callback with a 401 —
+    // call lifecycle updates and post-call processing never ran, while the voice
+    // path looked fine. The secret therefore travels in the callback URL we
+    // register with Exotel (dial.service builds it), which is the only channel
+    // Exotel gives us. The HMAC path is kept and still accepted, so a signed
+    // caller (or a future Exotel that signs) keeps working unchanged.
+    //
+    // TRADE-OFF, ACCEPTED DELIBERATELY: a URL-borne secret can leak into access
+    // logs and Referer headers in a way an HMAC header would not. It is still
+    // strictly better than the alternatives here — unsetting the secret leaves
+    // this PUBLIC endpoint able to fake call events for any call. Rotate
+    // EXOTEL_WEBHOOK_SECRET if the URL is ever exposed.
+    const tokenValid = this.urlTokenValid(secret, urlToken);
+    if (secret && !signatureValid && !tokenValid) {
+      // Say WHICH check failed — the old bare 401 gave nothing to debug with and
+      // cost a long hunt to trace back to "Exotel never sends a signature".
+      this.logger.warn(
+        `Rejected Exotel webhook: signature=${headerSig ? "present-but-invalid" : "absent"}, ` +
+          `urlToken=${urlToken ? "present-but-invalid" : "absent"}. Exotel does not sign callbacks — ` +
+          "register the StatusCallback URL with ?token=<EXOTEL_WEBHOOK_SECRET>.",
+      );
+      throw new UnauthorizedException("Invalid Exotel webhook credentials");
     }
 
     const providerCallSid = String(payload.CallSid ?? payload.Sid ?? "");
@@ -103,7 +137,10 @@ export class WebhookService {
         providerCallSid: providerCallSid || null,
         callId: call?.id ?? null,
         rawPayload: payload as unknown as Record<string, unknown>,
-        signatureValid: !!signatureValid,
+        // "was this callback authenticated", not "did an HMAC match". Exotel never
+        // sends a signature, so keying this to the HMAC alone would stamp every
+        // genuinely-verified event as unverified and make the audit column a lie.
+        signatureValid: signatureValid || tokenValid,
       });
       this.logger.log(
         `Inbound webhook: id=${eventRow.id} sid=${providerCallSid} event=${eventType}`,

@@ -393,3 +393,48 @@ test("take care is hard-blocked in every mode including gu", () => {
     );
   }
 });
+
+// Maya-gu is a GUJARATI-ONLY persona. She used to carry the shared "match the
+// client's language" rule, so an English-speaking caller got an English reply —
+// read out by Sarvam/Simran, the only voice a gu call has. That is the "Gujarati
+// Maya speaking Hinglish" bug. Language changes are handled one level up now
+// (gateway detects → adoptLocaleSwitch hands over to the hi/en persona + Gargi),
+// so this prompt must never tell her to follow the caller into another language.
+test("the Gujarati persona never switches language itself", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const gu = fs.readFileSync(
+    path.resolve(__dirname, "../../apps/api/src/i18n/prompt-gu.ts"),
+    "utf8",
+  );
+
+  // The old switch-away instructions must be gone.
+  assert.ok(
+    !/બાકીના આખા call માટે સંપૂર્ણપણે English માં જવાબ આપો/.test(gu),
+    "prompt-gu must not tell Maya to answer entirely in English",
+  );
+  assert.ok(
+    !/જો તેઓ Hindi બોલે, તો Hindi માં જ જવાબ આપો/.test(gu),
+    "prompt-gu must not tell Maya to answer in Hindi",
+  );
+  // ...and replaced by an explicit Gujarati-only rule.
+  assert.match(gu, /તમે ફક્ત Gujarati માં જ વાત કરો છો/);
+  assert.match(gu, /જાતે ભાષા ન બદલો/);
+});
+
+// The mirror invariant: ElevenLabs/Gargi CANNOT speak Gujarati, so the hi/en
+// persona must never be told to follow a caller into Gujarati — that would emit
+// Gujarati script into a voice physically unable to say it.
+test("the hi/en persona is fenced off from Gujarati", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const runtime = fs.readFileSync(
+    path.resolve(__dirname, "../../apps/api/src/call-runtime/call-runtime.service.ts"),
+    "utf8",
+  );
+  assert.match(
+    runtime,
+    /GUJARATI IS NOT YOURS: never reply in Gujarati/,
+    "the hi/en prompt must explicitly forbid replying in Gujarati",
+  );
+});

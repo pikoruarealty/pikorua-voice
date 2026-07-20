@@ -150,7 +150,15 @@ export class DialService implements OnModuleDestroy {
           params.set("Url", `http://my.exotel.com/${String(sid)}/exoml/start_voice/${String(appId)}`);
         }
         if (publicBaseUrl) {
-          params.set("StatusCallback", `${publicBaseUrl}/api/webhooks/exotel`);
+          // Exotel does not sign status callbacks, so the shared secret rides in
+          // the URL — it is the only channel Exotel gives us to authenticate the
+          // callback. Without it the API rejects every callback with a 401 and no
+          // call lifecycle / post-call processing ever runs.
+          const webhookSecret = String(this.config.get("EXOTEL_WEBHOOK_SECRET") ?? "");
+          const callbackUrl = webhookSecret
+            ? `${publicBaseUrl}/api/webhooks/exotel?token=${encodeURIComponent(webhookSecret)}`
+            : `${publicBaseUrl}/api/webhooks/exotel`;
+          params.set("StatusCallback", callbackUrl);
           params.set("StatusCallbackContentType", "application/json");
           // NOTE: do NOT send StatusCallbackEvents[]. This account's connect.json
           // rejects it outright — "Invalid Call Parameters: Invalid

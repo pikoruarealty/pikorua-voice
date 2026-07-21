@@ -70,24 +70,31 @@ const BARGE_IN_MIN_CHARS = 3;
 // no real reply to Maya) before we gracefully bow out and hang up.
 const SIDE_CONVERSATION_HANGUP_MS = 35_000;
 
-// Detect the language a caller utterance is in, so the session can follow them
-// (Hindi ⇄ English). Devanagari → Hindi; Latin with >=2 words → English (a lone
-// English word is often a loanword inside Hindi speech). Null for short/ambiguous
-// input (a bare "ok"/"haan") so a single word can't thrash the locale.
-// Which of Maya's three languages the caller is comfortable in, from their last
-// utterance — drives the mid-call locale switch. Returns null for short/ambiguous
-// acks so a one-word "ok" never flips the language.
+// An EXPLICIT request to be spoken to in a language ("gujarati me", "speak
+// english", "हिंदी में"). Unambiguous intent, so it is acted on immediately — unlike
+// a language merely INFERRED from script, which needs corroboration (see the
+// hysteresis in enqueueTurn).
 //
-// An explicit request ("gujarati me", "speak english", "हिंदी में") wins over the
-// script it is written in. This matters most for Gujarati: while the STT is in the
-// `multi` model (a hi/en call), the caller's Gujarati comes back as Hindi/Latin, so
-// gu can ONLY be reached by an explicit request. Once in gu the STT runs the `gu`
-// model and Gujarati script is detected directly.
-function detectSpokenLanguage(text: string): "hi" | "en" | "gu" | null {
+// This is the ONLY route into Gujarati from a hi/en call: while the STT runs the
+// `multi` model, a caller's Gujarati comes back as Hindi/Latin, so the script can
+// never reveal it. Once in gu the STT runs the `gu` model and Gujarati script is
+// detected directly.
+function explicitLanguageRequest(text: string): "hi" | "en" | "gu" | null {
   if (/gujarati|gujrati|ગુજરાતી|गुजराती/i.test(text)) return "gu";
   if (/\benglish\b|इंग्लिश|अंग्रेज़ी|अंग्रेजी|ઇંગ્લિશ|અંગ્રેજી/i.test(text)) return "en";
   if (/\bhindi\b|हिंदी|हिन्दी|હિન્દી/i.test(text)) return "hi";
-  // Otherwise follow the script actually spoken.
+  return null;
+}
+
+// Which of Maya's three languages the caller appears to be speaking. Returns null
+// for short/ambiguous input (a bare "ok"/"haan") so a single word never counts as
+// evidence of a switch.
+function detectSpokenLanguage(text: string): "hi" | "en" | "gu" | null {
+  const explicit = explicitLanguageRequest(text);
+  if (explicit) return explicit;
+  // Otherwise follow the script actually spoken. NOTE: the >=2-Latin-words rule is
+  // genuinely unreliable — STT mis-hearing Hindi emits Latin gibberish that trips it
+  // — which is exactly why an inferred switch is never acted on alone.
   if (/[઀-૿]/.test(text)) return "gu"; // Gujarati block (STT already in gu mode)
   if (/[ऀ-ॿ]/.test(text)) return "hi"; // Devanagari → Hindi
   const words = text.trim().split(/\s+/).filter(Boolean);
@@ -337,6 +344,14 @@ type SessionState = {
   // speaking to someone else, line disturbance). Distinguishes a noisy/occupied
   // line from a genuinely silent one when the inactivity timer fires.
   lastNoiseAt: number;
+  // A language INFERRED from the last utterance's script that hasn't been acted on
+  // yet. A mid-call switch swaps the persona, the prompt and (for gu) the voice and
+  // the STT model, so one garbled transcript must not be able to trigger it: STT
+  // mis-hearing Hindi can emit Latin gibberish ("La cucinattima bat corona?"), which
+  // the >=2-Latin-words rule read as English and used to flip the whole session on
+  // the spot. The switch now needs the SAME language inferred twice in a row. An
+  // explicit request ("speak english") bypasses this entirely.
+  pendingLangSwitch: "hi" | "en" | "gu" | null;
   // When the current run of side-conversation turns began (0 = not in one). The
   // caller is speaking to a third party in clear sentences; after
   // SIDE_CONVERSATION_HANGUP_MS of it with no real reply, the call is ended.
@@ -418,6 +433,7 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
       ),
       inactivityTimer: null,
       inactivityStrikes: 0,
+      pendingLangSwitch: null,
       lastNoiseAt: 0,
       sideConversationSince: 0,
       hasDbRow: false,
@@ -864,7 +880,35 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
       // whichever of hi/en/gu they're comfortable in, so STT, replies, check-ins
       // and goodbye all match them. Short/ambiguous acks return null and don't
       // switch.
-      const lang = detectSpokenLanguage(utterance);
+      // An explicit request is acted on at once; a language merely inferred from the
+      // script must be seen twice in a row before it moves the session (see
+      // pendingLangSwitch). Without that, a single mis-transcription flips the
+      // persona, the voice and the STT model mid-call.
+      const explicit = explicitLanguageRequest(utterance);
+      const inferred = detectSpokenLanguage(utterance);
+      const currentLang = String(state.locale).toLowerCase().startsWith("gu")
+        ? "gu"
+        : String(state.locale).toLowerCase().startsWith("en")
+          ? "en"
+          : "hi";
+      let lang: "hi" | "en" | "gu" | null = null;
+      if (explicit) {
+        lang = explicit;
+        state.pendingLangSwitch = null;
+      } else if (inferred && inferred !== currentLang) {
+        if (state.pendingLangSwitch === inferred) {
+          lang = inferred;
+          state.pendingLangSwitch = null;
+        } else {
+          state.pendingLangSwitch = inferred;
+          this.logger.log(
+            `Caller may have switched to ${inferred} — waiting for a second utterance before moving the session (callId=${state.callId})`,
+          );
+        }
+      } else {
+        // Back on the current language (or ambiguous): any half-formed switch lapses.
+        state.pendingLangSwitch = null;
+      }
       if (lang) {
         const target = lang === "gu" ? "gu-IN" : lang === "hi" ? "hi-IN" : "en-IN";
         // Never switch INTO Gujarati when Sarvam is unconfigured (kill switch):

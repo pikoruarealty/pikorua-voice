@@ -205,9 +205,20 @@ test("Gujarati turns always use the WS-turn path, routed to Sarvam (not ElevenLa
   );
 
   const router = read("apps/api/src/tts/tts-router.ts");
+  // Assert the ROUTING INVARIANT, not one particular expression shape: non-gu leaves
+  // immediately for ElevenLabs, and the gu path opens a Sarvam session. (The gu branch
+  // wraps that session to fail over if Sarvam dies — see the breaker — so this is
+  // deliberately not pinned to a ternary.)
+  const wsBody = router.match(/openWsSession\([\s\S]*?\n {2}\}/);
+  assert.ok(wsBody, "could not locate TtsRouter.openWsSession");
   assert.match(
-    router,
-    /openWsSession[\s\S]{0,400}?isGujarati\(opts\)\s*\?\s*this\.sarvam\.openWsSession/,
+    wsBody[0],
+    /if\s*\(!this\.isGujarati\(opts\)\)\s*return this\.elevenlabs\.openWsSession/,
+    "non-Gujarati must go straight to ElevenLabs",
+  );
+  assert.match(
+    wsBody[0],
+    /this\.sarvam\.openWsSession\(/,
     "TtsRouter.openWsSession must route gu to Sarvam",
   );
 });
@@ -261,6 +272,51 @@ test("router: an English reply on a gu call still goes to ElevenLabs", async () 
   await router.synthesize("Certainly, which budget?", { languageCode: "en" });
   assert.deepEqual(calls.sarvam, []);
   assert.equal(calls.elevenlabs.length, 1);
+});
+
+test("BREAKER: a Sarvam that FAILS falls back to Hindi instead of going silent", async () => {
+  // Configuration is not health. A key that is set but rejected — out of credits,
+  // revoked, rate-limited — passes isConfigured() and then fails every synthesis.
+  // Observed in production as "WS TTS error: No credits available." on every gu turn,
+  // with the caller hearing NOTHING until they hung up. That is strictly worse than
+  // the wrong-language fallback this router exists to guarantee, so a runtime failure
+  // must collapse gu to the Hindi persona just like a missing key does.
+  const { TtsRouter } = require("../../apps/api/dist/tts/tts-router");
+  const calls = { elevenlabs: [], sarvam: [] };
+  const fakeEleven = {
+    synthesize: async (t) => (calls.elevenlabs.push(t), { audio: Buffer.alloc(2), ttsMs: 1 }),
+    synthesizeStream: async (t) => (calls.elevenlabs.push(t), { ttsMs: 1, ttfbMs: 1, bytes: 2 }),
+    getClip: async (t) => (calls.elevenlabs.push(t), Buffer.alloc(2)),
+    prewarmClips: (ts) => calls.elevenlabs.push(...ts),
+    openWsSession: () => ({ sendText() {}, flush() {}, close() {} }),
+  };
+  const fakeSarvam = {
+    isConfigured: () => true, // key IS set — it just doesn't work
+    synthesize: async (t) => {
+      calls.sarvam.push(t);
+      throw new Error("No credits available.");
+    },
+    synthesizeStream: async () => { throw new Error("No credits available."); },
+    getClip: async () => null,
+    prewarmClips: () => {},
+    openWsSession: () => ({ sendText() {}, flush() {}, close() {} }),
+  };
+  const router = new TtsRouter(fakeEleven, fakeSarvam, { get: () => undefined });
+
+  assert.equal(router.isGujaratiEnabled(), true, "healthy Sarvam starts enabled");
+
+  // The failing turn is not lost — it comes back voiced by ElevenLabs.
+  const out = await router.synthesize("ગુજરાતી લખાણ", { languageCode: "gu" });
+  assert.ok(out.audio.length > 0, "a Sarvam failure must still produce audio");
+  assert.equal(calls.sarvam.length, 1, "Sarvam was attempted");
+  assert.equal(calls.elevenlabs.length, 1, "and ElevenLabs covered for it");
+
+  // And the breaker is now open, so the persona collapses to Hindi for later turns
+  // rather than re-attempting a vendor known to be down.
+  assert.equal(router.isGujaratiEnabled(), false, "a failure must trip the breaker");
+  await router.synthesize("ગુજરાતી ફરી", { languageCode: "gu" });
+  assert.equal(calls.sarvam.length, 1, "must not retry a Sarvam known to be failing");
+  assert.equal(calls.elevenlabs.length, 2);
 });
 
 test("KILL SWITCH: no SARVAM_API_KEY disables Gujarati entirely", async () => {

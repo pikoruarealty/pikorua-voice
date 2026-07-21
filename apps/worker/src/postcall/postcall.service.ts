@@ -142,6 +142,10 @@ export class PostCallProcessingService {
     const heuristicBreakdown: LeadBreakdown | null = isBrokerHeuristic
       ? {
           professionCategory: "broker",
+          // The heuristic path never runs the LLM, so no name/company is extracted.
+          // For outbound calls the CRM still gets a name from the campaign target.
+          name: null,
+          company: null,
           profession: matchedBroker[0] ?? null,
           budget: null,
           requirements: null,
@@ -231,10 +235,17 @@ export class PostCallProcessingService {
       this.logger.warn("Appointment sync failed", err instanceof Error ? err.stack : String(err)),
     );
 
+    // Dial-list row, for the human-entered fullName on the CRM lead card. Only
+    // outbound campaign calls have one; best-effort like the campaign lookup.
+    const target = call.targetId
+      ? await this.targetRepo.findById(call.targetId).catch(() => null)
+      : null;
+
     const crmPayload = buildCallResultPayload({
       call,
       turns,
       campaign,
+      target,
       score: {
         value: score,
         label,

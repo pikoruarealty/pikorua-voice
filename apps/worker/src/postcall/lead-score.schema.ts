@@ -48,6 +48,14 @@ export type Objection = z.infer<typeof ObjectionSchema>;
 // other twelve.
 export const LeadBreakdownSchema = z.object({
   professionCategory: professionCategory.catch("unknown").default("unknown"),
+  // The caller's own name, as they said it. Maya asks for this in the call flow and
+  // callers answer ("મેરા નામ નિખિલે"), but it used to survive only inside the raw
+  // transcript — so every CRM lead card rendered as "Unknown". For outbound calls
+  // the campaign target's fullName is the stronger source and wins (see crm-payload).
+  name: z.string().nullable().catch(null).default(null),
+  // Employer / business name ("Matangi traders"). Distinct from `profession`:
+  // the CRM shows COMPANY and PROFESSION as separate fields.
+  company: z.string().nullable().catch(null).default(null),
   // Free-text profession as stated ("doctor", "runs a textile business", …).
   profession: z.string().nullable().catch(null).default(null),
   // Budget only if a specific figure was given ("5 crore"); null for vague answers.

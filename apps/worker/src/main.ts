@@ -69,6 +69,20 @@ async function bootstrap() {
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
 }
 
+// LAST-RESORT NET. Node terminates on an unhandled rejection, and this process is a
+// pack of interval-driven schedulers (dial repair, appointments, CRM retry, keep-alive)
+// whose ticks talk to Postgres and Redis. A single transient network blip inside one
+// of them would otherwise kill the worker every cycle — the same "Exited with status 1"
+// crash loop the unlistened BullMQ error events produced. Queued jobs survive a crash,
+// but the restart cycle stalls dialing and post-call sync, so stay up and log.
+process.on("unhandledRejection", (reason) => {
+  console.error(
+    "Unhandled promise rejection (worker stayed up; fix the source)",
+    reason instanceof Error ? reason.stack : reason,
+  );
+});
+// uncaughtException is deliberately NOT swallowed — see the API's main.ts.
+
 bootstrap().catch((err) => {
   // Bootstrap failed before the Nest logger is usable — fall back to console.
   console.error("Fatal: worker failed to start", err);

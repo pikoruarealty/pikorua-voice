@@ -121,18 +121,40 @@ export class TtsRouter {
     }
   }
 
+  // NEVER REJECTS. This is the last-resort lookup the call runtime performs from
+  // INSIDE its "TTS is down" catch block: it loops over fallback lines looking for a
+  // pre-warmed clip. A rejection here escapes that catch, aborts the loop on the first
+  // line, skips failCall(), and replaces the original TTS error with this one — and it
+  // rejects precisely when it matters, because the vendor being down is the whole
+  // reason we are in that catch. Returning null lets the loop try the next line.
   async getClip(text: string, opts?: SynthesizeOptions): Promise<Buffer | null> {
-    return this.isGujarati(opts)
-      ? this.sarvam.getClip(text, opts)
-      : this.elevenlabs.getClip(text, opts);
+    if (this.isGujarati(opts)) {
+      try {
+        return await this.sarvam.getClip(text, opts);
+      } catch (err) {
+        this.noteSarvamFailure(String(err));
+        // fall through to ElevenLabs
+      }
+    }
+    try {
+      return await this.elevenlabs.getClip(text, opts);
+    } catch {
+      return null;
+    }
   }
 
+  // Fire-and-forget warmup. A failure here must never surface: it is an optimisation,
+  // and the caller does not await it.
   prewarmClips(texts: string[], opts?: SynthesizeOptions) {
-    if (this.isGujarati(opts)) {
-      this.sarvam.prewarmClips(texts, opts);
-      return;
+    try {
+      if (this.isGujarati(opts)) {
+        this.sarvam.prewarmClips(texts, opts);
+        return;
+      }
+      this.elevenlabs.prewarmClips(texts, opts);
+    } catch (err) {
+      this.logger.warn(`Clip prewarm failed (non-fatal): ${String(err)}`);
     }
-    this.elevenlabs.prewarmClips(texts, opts);
   }
 
   // Turn-level WS session, routed by language: Gujarati → Sarvam (coherent
@@ -162,25 +184,48 @@ export class TtsRouter {
     // still surfaced to the caller's onError.
     let failedOver = false;
     let gotChunk = false;
-    let closed = false;
     const buffered: string[] = [];
     let pendingFlush = false;
     let fallback: ReturnType<ElevenlabsService["openWsSession"]> | null = null;
 
+    // EVERY Sarvam callback is gated on this. A WebSocket emits 'error' and then
+    // 'close' on its own schedule, so a session we have already given up on will
+    // still call back afterwards — and those late callbacks are not harmless:
+    // onDone resolves the turn in the runtime and emits the last-chunk marker, so a
+    // dead Sarvam's onDone arriving before the ElevenLabs fallback has streamed
+    // TRUNCATES the very reply this failover exists to deliver, and a stray onChunk
+    // splices dead-vendor audio into it. Verified: without this gate the runtime saw
+    // onDone twice, the first one early.
+    let sarvamLive = true;
+
     const sarvamSession = this.sarvam.openWsSession({
       ...opts,
       onChunk: (chunk) => {
+        if (!sarvamLive) return;
         gotChunk = true;
         opts.onChunk(chunk);
       },
+      onDone: () => {
+        if (!sarvamLive) return;
+        opts.onDone();
+      },
       onError: (err) => {
+        if (!sarvamLive) return;
         this.noteSarvamFailure(err);
-        if (gotChunk || failedOver || closed) {
+        // Audio already went out in Sarvam's voice — failing over now would splice
+        // two different voices mid-reply, so surface the error instead.
+        if (gotChunk) {
           opts.onError(err);
           return;
         }
+        sarvamLive = false;
         failedOver = true;
         this.logger.warn(`Sarvam WS failed before any audio — replaying this turn on ElevenLabs`);
+        try {
+          sarvamSession?.close();
+        } catch {
+          // already dead; nothing to do
+        }
         fallback = this.elevenlabs.openWsSession(opts);
         for (const text of buffered) fallback.sendText(text);
         if (pendingFlush) fallback.flush();
@@ -205,7 +250,7 @@ export class TtsRouter {
         sarvamSession.flush();
       },
       close: () => {
-        closed = true;
+        sarvamLive = false;
         fallback?.close();
         sarvamSession.close();
       },

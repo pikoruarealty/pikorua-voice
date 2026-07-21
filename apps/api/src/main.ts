@@ -78,6 +78,23 @@ async function bootstrap() {
   logger.log(`Listening on 0.0.0.0:${port}/api [${nodeEnv}]`);
 }
 
+// LAST-RESORT NET. Node terminates the process on an unhandled rejection (verified:
+// a rejected promise from a timer exits rather than continuing). In this service that
+// is never a contained failure — the API holds every live Exotel WebSocket, so one
+// stray rejection anywhere hangs up on EVERY caller mid-sentence. A dropped call is
+// far worse than a leaked error, so log it loudly and stay up.
+//
+// This is a net, not a licence: anything that lands here is a bug with a real
+// stack trace attached, and belongs fixed at its source.
+process.on("unhandledRejection", (reason) => {
+  console.error(
+    "Unhandled promise rejection (API stayed up; fix the source)",
+    reason instanceof Error ? reason.stack : reason,
+  );
+});
+// uncaughtException is deliberately NOT swallowed: after one, process state is
+// untrustworthy, and Render restarts us cleanly.
+
 bootstrap().catch((err) => {
   // Bootstrap failed before the Nest logger is usable — fall back to console.
   console.error("Fatal: API failed to start", err);

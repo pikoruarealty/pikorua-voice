@@ -1016,10 +1016,21 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
       this.logger.log(`Barge-in (utterance) callId=${state.callId} — stopping playback`);
       this.stopSpeaking(client, state);
     }
-    state.queue = state.queue.then(async () => {
-      if (!state.callId || client.readyState !== WebSocket.OPEN) return;
-      await this.runTurn(client, state, utterance);
-    });
+    // The .catch is load-bearing, not decoration. This promise is the call's serial
+    // turn queue: every later turn chains onto it. If one link ever rejects, the
+    // queue becomes a permanently-rejected promise, every subsequent .then rejects
+    // too, and — because nothing awaits it — Node treats that as an unhandled
+    // rejection and TERMINATES the process, dropping every concurrent call, not just
+    // this one. runTurn currently catches internally; this makes that a defence in
+    // depth rather than a single point of failure.
+    state.queue = state.queue
+      .then(async () => {
+        if (!state.callId || client.readyState !== WebSocket.OPEN) return;
+        await this.runTurn(client, state, utterance);
+      })
+      .catch((err) => {
+        this.logger.error(`Turn queue error callId=${state.callId}: ${String(err)}`);
+      });
   }
 
   private async runTurn(client: WebSocket, state: SessionState, utterance: string) {
@@ -1227,6 +1238,11 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
         await this.waitForPacerDrain(state, 10_000);
         await new Promise<void>((r) => setTimeout(r, EXOTEL_HANGUP_GRACE_MS));
         try { client.close(); } catch {}
+      })
+      // See the turn queue above: an unhandled rejection here would take the whole
+      // process down, not just this call.
+      .catch((err) => {
+        this.logger.error(`Inactivity hangup error callId=${state.callId}: ${String(err)}`);
       });
     } else {
       // First strike on a silent line — ask if they're still there.
@@ -1240,6 +1256,9 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
         if (state.inactivityStrikes < strikes || state.closing) return;
         if (client.readyState !== WebSocket.OPEN) return;
         await this.playDirectTts(state, checkIn);
+      })
+      .catch((err) => {
+        this.logger.error(`Inactivity check-in error callId=${state.callId}: ${String(err)}`);
       });
       // Re-arm: another INACTIVITY_TIMEOUT_MS with no response → second strike.
       this.resetInactivityTimer(client, state);

@@ -192,6 +192,40 @@ function frameRms(pcm: Buffer): number {
 class InboundAgc {
   // Smoothed gain carried across frames so it adapts gradually (no pumping).
   private gain = 1;
+  // Gain actually applied to the LAST sample of the previous frame. The new gain is
+  // ramped from here across this frame instead of switching to it instantly.
+  //
+  // WHY: gain was previously constant within a frame and jumped between frames. With
+  // the near-instant attack below, a quiet frame followed by a loud one changed the
+  // multiplier by up to 12x AT the frame boundary — a step discontinuity in the
+  // waveform, i.e. a click, injected up to 50 times a second. Measured on a synthetic
+  // quiet talker, the worst sample-to-sample step in the whole signal WAS that
+  // artifact: 587 in, 4357 out, sitting exactly on a frame boundary. Those clicks are
+  // broadband energy that ASR reads as consonants and noise, which is how a clean
+  // Hindi sentence comes back as "La cucinattima bat corona?".
+  //
+  // Ramping spreads the same gain change over the frame's samples, so the envelope
+  // still tracks the talker but the waveform stays continuous.
+  private lastApplied = 1;
+  // Per-call level telemetry. Diagnosing garbled STT from transcripts alone is
+  // guesswork — these few counters say whether the caller arrived quiet or loud, how
+  // hard we boosted, and whether the boost was riding the clip limiter, which is what
+  // distinguishes "bad line" from "we mangled it".
+  private frames = 0;
+  private rmsSum = 0;
+  private maxGain = 1;
+  private limiterFrames = 0;
+
+  stats() {
+    return {
+      frames: this.frames,
+      avgRms: this.frames ? Math.round(this.rmsSum / this.frames) : 0,
+      maxGain: Number(this.maxGain.toFixed(1)),
+      // Frames where the peak limiter, not the loudness target, chose the gain. A
+      // high share means we are constantly fighting clipping.
+      limiterPct: this.frames ? Math.round((this.limiterFrames / this.frames) * 100) : 0,
+    };
+  }
 
   process(pcm: Buffer): Buffer {
     const sampleCount = pcm.length >> 1; // whole 16-bit LE samples
@@ -227,11 +261,26 @@ class InboundAgc {
     // Even after smoothing, never let THIS frame clip: cap the applied gain to the
     // frame's own no-clip limit.
     const applied = Math.min(this.gain, gainNoClip);
-    if (applied <= 1.02) return pcm;
+    const from = this.lastApplied;
+    this.lastApplied = applied;
+
+    this.frames += 1;
+    this.rmsSum += rms;
+    if (applied > this.maxGain) this.maxGain = applied;
+    if (rms >= INBOUND_AGC_NOISE_GATE_RMS && gainNoClip < this.gain) this.limiterFrames += 1;
+
+    // Untouched only when BOTH ends are unity — a frame that ramps down from a
+    // previous boost still has to be written, or the ramp itself becomes a step.
+    if (applied <= 1.02 && from <= 1.02) return pcm;
 
     const out = Buffer.allocUnsafe(sampleCount << 1);
+    const step = (applied - from) / sampleCount;
     for (let i = 0; i < sampleCount; i++) {
-      let v = Math.round(pcm.readInt16LE(i << 1) * applied);
+      // Ramp across the frame, ending exactly at `applied` so the next frame starts
+      // continuous with this one. Capped at this frame's no-clip limit because the
+      // ramp can pass ABOVE `applied` when gain is falling.
+      const g = Math.min(from + step * (i + 1), gainNoClip);
+      let v = Math.round(pcm.readInt16LE(i << 1) * g);
       // Final safety clamp — should never trigger given the peak limit above.
       if (v > 32767) v = 32767;
       else if (v < -32768) v = -32768;
@@ -717,8 +766,29 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
         state.stt = null;
         state.pacer.clear();
         this.clearInactivityTimer(state);
+        this.logAudioSummary(state);
         break;
     }
+  }
+
+  // Audio-level summary for the call. Read it when transcripts come back garbled:
+  // diagnosing that from transcripts alone is guesswork, and these numbers separate
+  // "the line was bad" from "we mangled it".
+  //   avgRms      — how hot the caller arrived. A few hundred is very quiet; a few
+  //                 thousand is healthy.
+  //   maxGain     — how hard the AGC had to boost.
+  //   limiterPct  — share of frames where the CLIP limiter, not the loudness target,
+  //                 chose the gain. High means we were constantly fighting clipping.
+  //   noiseFloor  — what the line was doing between words.
+  // A high maxGain against a high noiseFloor is the dangerous combination: it means
+  // line noise was amplified to speech level, which is when an ASR invents words.
+  private logAudioSummary(state: SessionState) {
+    const s = state.agc.stats();
+    if (!s.frames) return;
+    this.logger.log(
+      `Audio summary callId=${state.callId} frames=${s.frames} avgRms=${s.avgRms} ` +
+        `maxGain=${s.maxGain}x limiterPct=${s.limiterPct}% noiseFloor=${Math.round(state.noiseFloorRms)}`,
+    );
   }
 
   private async sendGreeting(client: WebSocket, state: SessionState): Promise<void> {

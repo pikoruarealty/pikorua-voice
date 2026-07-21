@@ -123,10 +123,25 @@ export class DeepgramLiveService {
     // and standalone-language Nova-3 sessions; `keywords` is a Nova-2-only param
     // and is silently ignored by Nova-3. See keyterms.ts for the Latin-vs-Devanagari
     // rationale.
-    for (const term of keytermsFor(dgLang)) {
-      params.append("keyterm", term);
-    }
-    const url = `wss://api.deepgram.com/v1/listen?${params.toString()}`;
+    const keyterms = keytermsFor(dgLang);
+    // Keyterms are a TRANSCRIPTION-QUALITY nicety; the session is not. Deepgram
+    // rejects the upgrade outright (HTTP 400) if the keyterm set is too large, and
+    // the limit is neither documented nor a simple function of count or bytes —
+    // probing this account found 83 of our terms fine and 84 rejected, yet 119
+    // single-word terms fine, and 40 long Devanagari terms (a 5 KB URL) fine. So
+    // the size that is "safe" cannot be computed, only discovered.
+    //
+    // Rather than bet the call on getting that number right, `keytermsDisabled`
+    // lets a 400 downgrade the session to no-keyterm instead of killing it. A
+    // slightly less-biased transcript is a small loss; a dead STT session means
+    // Maya greets the caller and then cannot hear a single word — which is exactly
+    // what shipping an over-large list did in production.
+    let keytermsDisabled = false;
+    const buildUrl = () => {
+      const p = new URLSearchParams(params);
+      if (!keytermsDisabled) for (const term of keyterms) p.append("keyterm", term);
+      return `wss://api.deepgram.com/v1/listen?${p.toString()}`;
+    };
 
     let ws: WebSocket | null = null;
     let open = false;
@@ -176,7 +191,7 @@ export class DeepgramLiveService {
     }, 6000);
 
     const connect = () => {
-      const socket = new WebSocket(url, {
+      const socket = new WebSocket(buildUrl(), {
         headers: { Authorization: `Token ${apiKey}` },
       });
       ws = socket;
@@ -227,6 +242,35 @@ export class DeepgramLiveService {
         } catch {
           // ignore non-JSON frames
         }
+      });
+
+      // The upgrade was refused with an HTTP response. `ws` turns this into a bare
+      // "Unexpected server response: 400" on the error handler and throws the body
+      // away — but the body is the ONLY thing that says WHY (e.g.
+      // {"err_code":"Bad Request","err_msg":"Invalid query string."}). Read it, log
+      // it, and on a 4xx drop the keyterms so the retry has a chance of succeeding
+      // instead of replaying the identical bad URL until the retries run out.
+      socket.on("unexpected-response", (_req, res) => {
+        let body = "";
+        res.on("data", (chunk: Buffer) => {
+          if (body.length < 500) body += chunk.toString();
+        });
+        res.on("end", () => {
+          const status = res.statusCode ?? 0;
+          this.logger.warn(
+            `Deepgram rejected the upgrade: HTTP ${status} ${body.trim().slice(0, 200)}`,
+          );
+          if (status >= 400 && status < 500 && !keytermsDisabled && keyterms.length > 0) {
+            keytermsDisabled = true;
+            this.logger.warn(
+              `Retrying without the ${keyterms.length} keyterms — transcription keeps working, just less biased toward local names`,
+            );
+          }
+          try {
+            socket.close();
+          } catch {}
+        });
+        res.resume();
       });
 
       socket.on("error", (err: Error) => {

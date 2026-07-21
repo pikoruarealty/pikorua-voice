@@ -102,39 +102,40 @@ const GU_LATIN_KEYTERMS = [
 // hi/en route to `multi`, which emits Hindi in Devanagari and English in Latin,
 // so that path keeps the combined Latin+Devanagari list it has always used. This
 // function returns the EXACT same array for multi, so hi/en behaviour is unchanged.
-// Byte budget for the keyterm portion of the Deepgram URL, enforced rather than
-// documented — a comment did not stop this list from growing past the limit once
-// already, and the failure mode is a total STT outage for every call, not a
-// degraded transcript. ~2.6 KB of keyterms is a known-good, in-production size;
-// the remaining ~1.4 KB before the ~4 KB wall covers the base params and leaves
-// room for a future one.
-const KEYTERM_BUDGET_BYTES = 2600;
+// Maximum keyterms we will send. This number is EMPIRICAL, not derived — Deepgram
+// does not document the limit, and probing this account showed it is not a simple
+// function of anything we control:
+//
+//   84 of these terms  -> 400        83 -> OK
+//   119 single-word terms -> OK      120 -> 400
+//   90 two-word terms  -> OK         91  -> 400
+//   40 long Devanagari terms (a 5,044-byte URL) -> OK
+//
+// So byte size is NOT the limit (an earlier fix here assumed it was, and was wrong),
+// and neither term count nor word count alone explains the boundary either. Since
+// the safe size cannot be computed, this cap is simply set well below the smallest
+// observed failure for a list of THIS shape (84), leaving room to grow without
+// re-probing. It is a seatbelt, not a proof.
+//
+// The real protection is downstream: DeepgramLiveService drops keyterms entirely and
+// reconnects if the upgrade is refused, so even a wrong number here degrades
+// transcription quality instead of taking STT down. See its `keytermsDisabled` path.
+const MAX_KEYTERMS = 72;
 
-// Keep terms in order until the budget is spent, then stop. The lists are ordered
-// most-valuable-first precisely so that truncation sheds the cheapest terms.
-// Silent truncation beats a 400: a slightly less-biased transcript still lets the
-// call happen, whereas an over-long URL means Maya hears nothing at all.
-function withinBudget(terms: readonly string[]): string[] {
-  const kept: string[] = [];
-  let used = 0;
-  for (const term of terms) {
-    // "&keyterm=" plus the percent-encoded term, matching what URLSearchParams emits.
-    const cost = 9 + encodeURIComponent(term).length;
-    if (used + cost > KEYTERM_BUDGET_BYTES) break;
-    kept.push(term);
-    used += cost;
-  }
-  return kept;
+// Keep terms in order until the cap, then stop. Both lists are ordered
+// most-valuable-first precisely so truncation sheds the cheapest terms — the
+// residence-area names at the tail, which the prompt never repeats back anyway.
+function capped(terms: readonly string[]): string[] {
+  return terms.slice(0, MAX_KEYTERMS);
 }
 
-// Deduped before budgeting: a repeated term is pure waste against the budget, and
-// the two gu lists can legitimately overlap as they grow.
+// Deduped before capping: a duplicate would consume one of the limited slots.
 export function keytermsFor(dgLanguage: string): readonly string[] {
   if (dgLanguage === "gu") {
-    return withinBudget([...new Set([...GU_LATIN_KEYTERMS, ...GUJARATI_KEYTERMS])]);
+    return capped([...new Set([...GU_LATIN_KEYTERMS, ...GUJARATI_KEYTERMS])]);
   }
-  return withinBudget([...new Set(PROPER_NOUN_KEYTERMS)]);
+  return capped([...new Set(PROPER_NOUN_KEYTERMS)]);
 }
 
-// Exported for the test that pins the budget. Not used at runtime.
-export const KEYTERM_BUDGET_FOR_TEST = KEYTERM_BUDGET_BYTES;
+// Exported for the test that pins the cap. Not used at runtime.
+export const MAX_KEYTERMS_FOR_TEST = MAX_KEYTERMS;

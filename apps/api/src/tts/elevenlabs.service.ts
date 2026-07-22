@@ -502,6 +502,19 @@ function localClockTime(hour: number, hindi: boolean): string {
 const CLOCK_COLON_RE = /\b(\d{1,2}):(\d{2})(?:\s*(am|pm))?\b/gi;
 const CLOCK_AMPM_RE = /\b(\d{1,2})\s*(am|pm)\b/gi;
 
+// True when the number at `offset` belongs to the time in a "see you at N" sign-off.
+// That one time deliberately keeps an English DIGIT in all three languages, so it has
+// to be skipped by both rewriting passes: the clock localization (which would turn a
+// bare hour into the local "N o'clock" form) and the number-to-words pass (which would
+// turn "4" into "four").
+//
+// The trailing [\d:]* matters: in "see you at 4:30" the MINUTES sit at their own
+// offset, preceded by "see you at 4:", so anchoring tightly to "see you at " guarded
+// the hour and let the minutes through — "4:30 PM" came out as "4:तीस बजे".
+function isSignOffTime(str: string, offset: number): boolean {
+  return /\bsee you at\s*[\d:]*$/i.test(str.slice(Math.max(0, offset - 20), offset));
+}
+
 // Normalize reply text for the voice engine. Locale-aware: Hindi/Gujarati
 // modes respell Indian words and large numbers in Devanagari and transliterate
 // leaked romanized Hindi; English modes only expand large numbers to words.
@@ -581,16 +594,19 @@ export function normalizeForTts(text: string, languageCode = "hi"): string {
     return half ? `${wordWhole} and a half BHK` : `${wordWhole} BHK`;
   });
 
-  // The sign-off time is ALWAYS an English clock reading in every language —
-  // "see you at four", "see you at four PM", "see you at four thirty" — never the
-  // localized "see you at चार बजे". This runs BEFORE the clock rules below so they
-  // don't localize the figure first, and it swallows a trailing बजे/વાગ્યે/baje so
-  // nothing mixes. ("see you at" is English, so an English time reads naturally
-  // after it in Hinglish/Gujarati too.)
+  // The sign-off time stays an ENGLISH DIGIT in every language - "see you at 4",
+  // "see you at 4 PM" - never the localized Hindi/Gujarati form, and never spelled
+  // out as a word.
+  //
+  // All this pass does is strip a trailing local time unit, which would otherwise
+  // mix a Hindi/Gujarati word into an English phrase. The digit itself is left
+  // exactly as it arrived; the two passes that would rewrite it - the clock
+  // localization immediately below, and the number-to-words pass at the end - both
+  // skip it via isSignOffTime().
   out = out.replace(
-    /\b(see you at)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*(?:baje|बजे|વાગ્યે)?/gi,
-    (_m, phrase, h, m, ap) =>
-      `${phrase} ${clockToEnglishWords(parseInt(h, 10), m != null ? parseInt(m, 10) : null, ap)}`,
+    /\b(see you at)\s+(\d{1,2}(?::\d{2})?)\s*(am|pm)?\s*(?:baje|बजे|વાગ્યે)?/gi,
+    (_m, phrase: string, time: string, ap?: string) =>
+      `${phrase} ${time}${ap ? ` ${ap.toUpperCase()}` : ""}`,
   );
 
   // Clock times must NEVER MIX languages. A spoken time is either fully local or
@@ -601,7 +617,8 @@ export function normalizeForTts(text: string, languageCode = "hi"): string {
   // minutes is a precise clock reading (e.g. answering "what time is it now?") and
   // reads in English words — still unmixed, and keeps the "11:30 AM" answer format.
   if (indic) {
-    out = out.replace(CLOCK_COLON_RE, (_m, h, m, ap) => {
+    out = out.replace(CLOCK_COLON_RE, (_m, h, m, ap, offset, str) => {
+      if (isSignOffTime(str, offset)) return _m;
       const hour = parseInt(h, 10);
       const minute = parseInt(m, 10);
       return minute === 0
@@ -609,17 +626,19 @@ export function normalizeForTts(text: string, languageCode = "hi"): string {
         : clockToEnglishWords(hour, minute, ap);
     });
     // A bare hour with AM/PM is a scheduling time → local form ("4 PM" → "चार बजे").
-    out = out.replace(CLOCK_AMPM_RE, (_m, h) => localClockTime(parseInt(h, 10), hindi));
+    out = out.replace(CLOCK_AMPM_RE, (_m, h, _ap, offset, str) =>
+      isSignOffTime(str, offset) ? _m : localClockTime(parseInt(h, 10), hindi),
+    );
     // "N बजे" / "N વાગ્યે" is left alone here on purpose: the general number pass
     // below renders the figure in the LOCAL words, giving "ग्यारह बजे".
   } else {
     // English mode: spell the clock out in English words so it always reads
     // "Eleven AM", instead of leaving bare digits to the engine.
-    out = out.replace(CLOCK_COLON_RE, (_m, h, m, ap) =>
-      clockToEnglishWords(parseInt(h, 10), parseInt(m, 10), ap),
+    out = out.replace(CLOCK_COLON_RE, (_m, h, m, ap, offset, str) =>
+      isSignOffTime(str, offset) ? _m : clockToEnglishWords(parseInt(h, 10), parseInt(m, 10), ap),
     );
-    out = out.replace(CLOCK_AMPM_RE, (_m, h, ap) =>
-      clockToEnglishWords(parseInt(h, 10), null, ap),
+    out = out.replace(CLOCK_AMPM_RE, (_m, h, ap, offset, str) =>
+      isSignOffTime(str, offset) ? _m : clockToEnglishWords(parseInt(h, 10), null, ap),
     );
     // A stray local time-unit in an English reply must not produce the mixed
     // "eleven baje" — turn it into "o'clock".
@@ -647,10 +666,13 @@ export function normalizeForTts(text: string, languageCode = "hi"): string {
     const before = str.slice(0, offset);
     if (/[:.]\s*$/.test(before)) return match;
     if (/^\s*:/.test(after)) return match;
+    // The "see you at N" sign-off keeps its English digit in every language.
+    if (isSignOffTime(str, offset)) return match;
     if (hindi) return hindiNumberWords(n);
     if (gujarati) return gujaratiNumberWords(n);
     return englishNumberWords(n);
   });
+
   return out;
 }
 

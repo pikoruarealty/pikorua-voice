@@ -22,10 +22,11 @@
  *  - Distances always speak the number AND unit in English, in both modes
  *    ("3 km" -> "three kilometers") — the Hindi engine mangles "km" and reads the
  *    number in Hindi.
- *  - The "see you at N" sign-off ALWAYS reads the time in English in every
- *    language ("see you at 4" -> "see you at four", "see you at 11 AM" ->
- *    "see you at eleven AM"), never the localized "see you at चार बजे". It runs
- *    before the clock rules and swallows a trailing बजे/વાગ્યે/baje so nothing mixes.
+ *  - The "see you at N" sign-off keeps an English DIGIT in every language
+ *    ("see you at 4", "see you at 11 AM", "see you at 4:30 PM") — never the
+ *    localized form and never spelled out as a word. It strips a trailing local
+ *    time unit, and isSignOffTime() makes BOTH later passes (clock localization
+ *    and number-to-words) skip it. Every other time localizes as described above.
  */
 const assert = require("node:assert/strict");
 const test = require("node:test");
@@ -208,7 +209,7 @@ test("Gujarati appointment times are FULLY Gujarati — number and unit word", (
   // English phrase, so it is unmixed English).
   assert.equal(
     normalizeForTts("4 વાગ્યાની appointment — see you at 4.", "gu"),
-    "ચાર વાગ્યાની appointment — see you at four.",
+    "ચાર વાગ્યાની appointment — see you at 4.",
   );
 });
 
@@ -218,11 +219,11 @@ test("'see you at N' sign-off uses an English number in both modes", () => {
   // Even inside a Hindi-context sign-off, "see you at 4" reads in English.
   assert.equal(
     normalizeForTts("Rahul Sir, see you at 4. Thank you.", "hi"),
-    "Rahul Sir, see you at four. Thank you.",
+    "Rahul Sir, see you at 4. Thank you.",
   );
   assert.equal(
     normalizeForTts("ठीक है, see you at 11. Thank you.", "hi"),
-    "ठीक है, see you at eleven. Thank you.",
+    "ठीक है, see you at 11. Thank you.",
   );
   // The AM/PM whole-hour form must ALSO stay English after "see you at" — it must
   // NOT localize to the "see you at चार बजे"/"see you at ग्यारह बजे" the scheduling
@@ -230,19 +231,19 @@ test("'see you at N' sign-off uses an English number in both modes", () => {
   for (const locale of ["hi", "en-IN", "gu"]) {
     assert.equal(
       normalizeForTts("see you at 11 AM. Thank you.", locale),
-      "see you at eleven AM. Thank you.",
+      "see you at 11 AM. Thank you.",
       `see-you sign-off must be English in ${locale}`,
     );
   }
   // A colon form reads as English clock words too.
   assert.equal(
     normalizeForTts("see you at 4:30 PM. Thank you.", "hi"),
-    "see you at four thirty PM. Thank you.",
+    "see you at 4:30 PM. Thank you.",
   );
   // A leaked local unit after the number is swallowed so nothing mixes.
   assert.equal(
     normalizeForTts("see you at 11 बजे. Thank you.", "hi"),
-    "see you at eleven. Thank you.",
+    "see you at 11. Thank you.",
   );
 });
 

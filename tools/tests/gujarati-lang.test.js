@@ -98,7 +98,8 @@ test("gu-mode keeps BHK/areas/distances/durations/dates in English words", () =>
   assert.match(normalizeForTts("20 July", "gu-IN"), /twenty July/);
   // Clock times go to English words in gu mode, exactly as in Hindi mode.
   assert.match(normalizeForTts("3:02 PM", "gu-IN"), /three oh two PM/);
-  assert.match(normalizeForTts("see you at 4", "gu-IN"), /see you at four/);
+  // The sign-off keeps an English DIGIT in every language, gu included.
+  assert.equal(normalizeForTts("see you at 4", "gu-IN"), "see you at 4");
 });
 
 test("gu-mode appointment hour is FULLY Gujarati — number and unit word", () => {

@@ -144,3 +144,53 @@ test("the budget ladder offers 3, 5, 8, 10, 15, 25 Cr in every language", async 
     );
   }
 });
+
+// Maya gained a COMMERCIAL branch — a single G+11 pre-launch near Sindhu Bhavan Road.
+// It is prompt-only and duplicated across three files, so it drifts easily.
+test("every persona carries the commercial flow, inventory, and opening offer", async () => {
+  for (const [mode, locale] of LOCALES) {
+    const prompt = await renderPrompt(locale, { isOutbound: false, fullName: null });
+    for (const marker of ["COMMERCIAL FLOW", "C1.", "C2.", "C4.", "COMMERCIAL (Pre-Launch"]) {
+      assert.ok(prompt.includes(marker), `${mode}: commercial marker "${marker}" is missing`);
+    }
+    const opening = prompt.split("\n").find((l) => l.startsWith("1. OPENING"));
+    assert.match(opening, /commercial/i, `${mode}: the opening question must offer commercial`);
+  }
+});
+
+// The residential SUB-2 CR soft-decline ("don't invite, our expert will connect") was
+// written when the cheapest inventory was a ₹2.6 Cr plot. Commercial corporate offices
+// start around ₹1.5 Cr — BELOW that floor — so without an explicit carve-out a genuine
+// commercial office lead gets silently brushed off instead of driven to the expert call.
+test("the sub-2 Cr soft-decline never swallows a commercial lead", async () => {
+  for (const [mode, locale] of LOCALES) {
+    const prompt = await renderPrompt(locale, { isOutbound: false, fullName: null });
+    const rule = prompt.split("\n").find((l) => /^2\. SUB-2 CR/.test(l));
+    assert.ok(rule, `${mode}: the SUB-2 CR rule is missing`);
+    assert.match(
+      rule,
+      /RESIDENTIAL ONLY|NEVER applies to a COMMERCIAL/i,
+      `${mode}: SUB-2 CR must be scoped away from commercial — a ₹1.5 Cr office lead is deflected otherwise`,
+    );
+  }
+});
+
+// ₹1.5+ Cr (office floor) and ₹70+ Cr (showroom ceiling) are commercial-only figures.
+// They live in the inventory for budget-matching and must never surface on a line the
+// model is allowed to speak — every occurrence must sit on an [internal] line.
+test("commercial internal prices never appear outside an [internal] line", async () => {
+  for (const [mode, locale] of LOCALES) {
+    const prompt = await renderPrompt(locale, { isOutbound: false, fullName: null });
+    for (const price of ["₹1.5+ Cr", "₹70+ Cr"]) {
+      for (const line of prompt.split("\n")) {
+        if (line.includes(price)) {
+          assert.match(
+            line,
+            /\[internal\]/,
+            `${mode}: "${price}" is on a line not marked [internal] — it may leak to the client`,
+          );
+        }
+      }
+    }
+  }
+});

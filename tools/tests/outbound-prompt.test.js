@@ -104,6 +104,29 @@ test("inbound calls keep asking for the name and the know-them questions", async
   }
 });
 
+// A real inbound call re-opened a settled booking: after the 2 PM / 16 Aug slot was
+// confirmed, the step-8 "where do you live?" answer ("I live in London") re-fired the
+// OUT OF TOWN branch — Maya re-asked the return date and tried to re-schedule, throwing
+// the confirmed slot away. The fix is a governing discipline at the top of CALL FLOW.
+// It is an English-header block quoted verbatim into all THREE personas, so a drift in
+// any one language is what this test exists to catch.
+test("every persona carries the frozen-booking / conversation-memory discipline", async () => {
+  const MARKERS = [
+    "MEMORY & A FIXED BOOKING",
+    "ONCE A VISIT DAY + TIME IS CONFIRMED, IT IS FROZEN",
+    "STEP 8 IS SMALL TALK, NOT SCHEDULING",
+  ];
+  for (const [mode, locale] of LOCALES) {
+    const prompt = await renderPrompt(locale, { isOutbound: false, fullName: null });
+    for (const marker of MARKERS) {
+      assert.ok(
+        prompt.includes(marker),
+        `${mode}: the "${marker}" rule is missing — a confirmed slot can be re-opened`,
+      );
+    }
+  }
+});
+
 test("the budget ladder offers 3, 5, 8, 10, 15, 25 Cr in every language", async () => {
   const ladders = {
     "hi-IN": /3 करोड़, 5 करोड़, 8 करोड़, 10 करोड़, 15 करोड़, 25 करोड़/,

@@ -146,15 +146,40 @@ test("the budget ladder offers 3, 5, 8, 10, 15, 25 Cr in every language", async 
 });
 
 // Maya gained a COMMERCIAL branch — a single G+11 pre-launch near Sindhu Bhavan Road.
-// It is prompt-only and duplicated across three files, so it drifts easily.
-test("every persona carries the commercial flow, inventory, and opening offer", async () => {
+// It is prompt-only and duplicated across three files, so it drifts easily. It is NOT
+// advertised up front: the flow is entered ONLY when the caller raises commercial
+// themselves, so the opening step must keep the trigger that routes that ask into it.
+test("every persona carries the commercial flow, reachable via an explicit mention", async () => {
   for (const [mode, locale] of LOCALES) {
     const prompt = await renderPrompt(locale, { isOutbound: false, fullName: null });
     for (const marker of ["COMMERCIAL FLOW", "C1.", "C2.", "C4.", "COMMERCIAL (Pre-Launch"]) {
       assert.ok(prompt.includes(marker), `${mode}: commercial marker "${marker}" is missing`);
     }
     const opening = prompt.split("\n").find((l) => l.startsWith("1. OPENING"));
-    assert.match(opening, /commercial/i, `${mode}: the opening question must offer commercial`);
+    assert.ok(
+      opening.includes("COMMERCIAL FLOW"),
+      `${mode}: the opening must still route an explicit commercial ask into the flow`,
+    );
+  }
+});
+
+// The SPOKEN greeting must NOT offer commercial as a third option — it was pulled back
+// to just "4 BHK or 5 BHK" so Maya enters the commercial flow only when the caller
+// brings it up. greetingText is a fixed per-locale template, separate from the prompt.
+function renderGreeting(locale) {
+  const {
+    CallRuntimeService,
+  } = require("../../apps/api/dist/call-runtime/call-runtime.service");
+  const svc = Object.create(CallRuntimeService.prototype);
+  svc.tts = { isGujaratiEnabled: () => true };
+  return svc.greetingText({ locale, scriptRef: "default", apptWhen: null });
+}
+
+test("the spoken greeting never offers commercial", () => {
+  for (const [mode, locale] of LOCALES) {
+    const line = renderGreeting(locale);
+    assert.doesNotMatch(line, /commercial/i, `${mode}: the greeting must not offer commercial`);
+    assert.match(line, /4 BHK/, `${mode}: the greeting should still open with the BHK question`);
   }
 });
 

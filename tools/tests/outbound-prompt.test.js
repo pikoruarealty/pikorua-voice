@@ -145,6 +145,41 @@ test("the budget ladder offers 3, 5, 8, 10, 15, 25 Cr in every language", async 
   }
 });
 
+// Budget is asked at most TWICE — the open question, then the project-framing + tiers —
+// and if the caller still won't name a figure Maya moves on rather than asking forever.
+// The hi/en step instructions are English; the gu step is written in Gujarati, so the
+// cap marker and the removed "must get budget" rule are matched per-language.
+test("the budget step caps at two asks, then moves on", async () => {
+  const CAP = {
+    hi: /ASK AT MOST TWICE/,
+    en: /ASK AT MOST TWICE/,
+    gu: /વધુમાં વધુ બે વાર પૂછો/,
+  };
+  const OLD_FORCING = {
+    hi: /You MUST get a concrete budget|NEVER skip to location without a concrete budget/,
+    en: /You MUST get a concrete budget|NEVER skip to location without a concrete budget/,
+    gu: /concrete budget મેળવવું જ પડશે|concrete budget વગર location પર ન જાઓ/,
+  };
+  for (const [mode, locale] of LOCALES) {
+    const prompt = await renderPrompt(locale, { isOutbound: false, fullName: null });
+    const budget = prompt.split("\n").find((l) => l.startsWith("2. BUDGET"));
+    assert.ok(budget, `${mode}: the BUDGET step is missing`);
+    assert.match(budget, CAP[mode], `${mode}: the budget step must cap the asks at two`);
+    // The second-ask line names the real project count (the 8 apartment micro-markets),
+    // not a vague "several" — and the count must stay identical across the three personas.
+    assert.match(
+      budget,
+      /8 signature projects/,
+      `${mode}: the second ask must state "8 signature projects"`,
+    );
+    assert.doesNotMatch(
+      budget,
+      OLD_FORCING[mode],
+      `${mode}: the old never-move-on requirement must be gone`,
+    );
+  }
+});
+
 // Maya gained a COMMERCIAL branch — a single G+11 pre-launch near Sindhu Bhavan Road.
 // It is prompt-only and duplicated across three files, so it drifts easily. It is NOT
 // advertised up front: the flow is entered ONLY when the caller raises commercial

@@ -169,8 +169,8 @@ test("the budget step caps at two asks, then moves on", async () => {
     // not a vague "several" — and the count must stay identical across the three personas.
     assert.match(
       budget,
-      /8 signature projects/,
-      `${mode}: the second ask must state "8 signature projects"`,
+      /8 luxury projects/,
+      `${mode}: the second ask must state "8 luxury projects"`,
     );
     assert.doesNotMatch(
       budget,

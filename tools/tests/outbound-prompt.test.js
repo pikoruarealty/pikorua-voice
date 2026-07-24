@@ -180,6 +180,20 @@ test("the budget step caps at two asks, then moves on", async () => {
   }
 });
 
+// The site-visit invite frames the visit as where the client receives everything —
+// the full layout, brochure, elevation, and walkthrough video — shared personally.
+test("the invite frames the site visit as where all details are shared", async () => {
+  for (const [mode, locale] of LOCALES) {
+    const prompt = await renderPrompt(locale, { isOutbound: false, fullName: null });
+    assert.match(
+      prompt,
+      /layout, brochure, elevation/,
+      `${mode}: the invite must name the details shared at the visit`,
+    );
+    assert.match(prompt, /walkthrough video/, `${mode}: the invite must mention the walkthrough video`);
+  }
+});
+
 // Location, like budget, must not block forever: if the caller won't name an area (or
 // asks Maya to pick), she recommends a best-matching project rather than re-asking. The
 // old rule forced a location "before recommending" — RECOMMENDATION RULE 2, all three.

@@ -180,6 +180,25 @@ test("the budget step caps at two asks, then moves on", async () => {
   }
 });
 
+// Location, like budget, must not block forever: if the caller won't name an area (or
+// asks Maya to pick), she recommends a best-matching project rather than re-asking. The
+// old rule forced a location "before recommending" — RECOMMENDATION RULE 2, all three.
+test("the location step falls back to a best-pick when no area is chosen", async () => {
+  const RULE2 = {
+    hi: "2. If no location given",
+    en: "2. If no location given",
+    gu: "2. જો કોઈ location ન આપી હોય",
+  };
+  const OLD_FORCE = { hi: /before recommending/, en: /before recommending/, gu: /recommend કરતાં પહેલાં/ };
+  for (const [mode, locale] of LOCALES) {
+    const prompt = await renderPrompt(locale, { isOutbound: false, fullName: null });
+    const rule = prompt.split("\n").find((l) => l.startsWith(RULE2[mode]));
+    assert.ok(rule, `${mode}: RECOMMENDATION RULE 2 (no location) is missing`);
+    assert.match(rule, /best-matching project/, `${mode}: rule 2 must fall back to a best-pick`);
+    assert.doesNotMatch(rule, OLD_FORCE[mode], `${mode}: rule 2 must not force a location first`);
+  }
+});
+
 // Maya gained a COMMERCIAL branch — a single G+11 pre-launch near Sindhu Bhavan Road.
 // It is prompt-only and duplicated across three files, so it drifts easily. It is NOT
 // advertised up front: the flow is entered ONLY when the caller raises commercial

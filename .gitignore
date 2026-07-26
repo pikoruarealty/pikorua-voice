@@ -22,9 +22,14 @@ npm-debug.log*
 coverage/
 test-baseline.txt
 *.tmp
+docs/
 
 # Staging spike output — generated audio (PCM/WAV/MP3) + compare pages
 tools/staging/out/
+
+# Captured production secrets during the ownership migration — NEVER commit
+render-env*.json
+secrets*.json
 
 # Caches
 .cache/

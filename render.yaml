@@ -176,6 +176,15 @@ services:
         sync: false
       - key: EXOTEL_APP_ID
         sync: false
+      # MUST be set, and MUST match the API's value. The worker appends this to the
+      # StatusCallback URL it registers with Exotel (dial.service.ts) because Exotel does
+      # not sign its callbacks. Without it the API answers every callback with a 401, so
+      # no outbound call ever gets lifecycle updates, lead scoring or CRM sync — while the
+      # dial itself succeeds, which makes the failure invisible in call logs.
+      # Previously missing here: the old worker had it set by hand in the dashboard, so a
+      # Blueprint-created worker would silently lose all post-call processing.
+      - key: EXOTEL_WEBHOOK_SECRET
+        sync: false
       - key: EXOTEL_SUBDOMAIN
         value: api.exotel.com
       - key: PUBLIC_BASE_URL

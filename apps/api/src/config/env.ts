@@ -78,8 +78,8 @@ export const envSchema = z
     OPENROUTER_TIMEOUT_MS: z.coerce.number().int().positive().default(4000),
     TTS_TIMEOUT_MS: z.coerce.number().int().positive().default(8000),
     TURN_TIMEOUT_MS: z.coerce.number().int().positive().default(12000),
-    // Hard cap on call length (0 disables). Default 15 minutes.
-    CALL_MAX_DURATION_MS: z.coerce.number().int().nonnegative().default(900000),
+    // Hard cap on call length (0 disables). Default 3 minutes.
+    CALL_MAX_DURATION_MS: z.coerce.number().int().nonnegative().default(180000),
     // Consecutive silent/noise turns (within a 45s window) before we assume the
     // line is dead and hang up. Default 3 — lower values risk dropping a prospect
     // who merely paused twice on a noisy line.

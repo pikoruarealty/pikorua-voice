@@ -1608,7 +1608,7 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
   }
 
   private maxCallDurationMs(): number {
-    return Number(this.config.get("CALL_MAX_DURATION_MS") ?? 15 * 60 * 1000);
+    return Number(this.config.get("CALL_MAX_DURATION_MS") ?? 3 * 60 * 1000);
   }
 
   private turnTimeoutMs(): number {

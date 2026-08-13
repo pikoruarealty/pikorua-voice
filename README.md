@@ -468,7 +468,7 @@ Turn row convention: caller turns use `turnIndex * 2`, assistant turns use `turn
 | `OPENROUTER_TIMEOUT_MS`       | `4000`                       | Per-OpenRouter-request timeout (the active LLM cap)         |
 | `TTS_TIMEOUT_MS`              | `8000`                       | ElevenLabs request timeout                                  |
 | `TURN_TIMEOUT_MS`             | `12000`                      | Per-turn watchdog; aborts LLM+TTS on overrun                |
-| `CALL_MAX_DURATION_MS`        | `900000`                     | Hard call length cap (15 min); `0` = disabled               |
+| `CALL_MAX_DURATION_MS`        | `180000`                     | Hard call length cap (3 min); `0` = disabled                |
 | `SILENCE_END_THRESHOLD`       | `3`                          | Consecutive silent/noise turns (45 s window) before hangup  |
 | `LLM_HISTORY_MAX_MESSAGES`    | `20`                         | Sliding-window history cap                                  |
 | `DEEPGRAM_API_KEY`            | required (prod)              |                                                             |

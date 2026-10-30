@@ -1,8 +1,8 @@
 # Pikorua Voice on the shared 2 vCPU / 8 GB VM (see deploy/README.md).
 #
 # Run from the repo checkout on the VM (deploy/vm.sh does this):
-#   docker compose --env-file ../.compose.env -f deploy/docker-compose.prod.yml build
-#   docker compose --env-file ../.compose.env -f deploy/docker-compose.prod.yml up -d
+#   docker compose --env-file ../.env -f deploy/docker-compose.prod.yml build
+#   docker compose --env-file ../.env -f deploy/docker-compose.prod.yml up -d
 #
 # The API and worker images are built here, on the VM, from the checked-out code
 # (build context = the repo root). A build uses both CPU cores for a few minutes,
@@ -86,7 +86,7 @@ services:
     image: cloudflare/cloudflared:2024.12.2
     command: ["tunnel", "--no-autoupdate", "run"]
     environment:
-      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:?set CLOUDFLARE_TUNNEL_TOKEN in .compose.env}
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:?set CLOUDFLARE_TUNNEL_TOKEN in .env}
     cpus: 0.25
     cpu_shares: 1024
     mem_limit: 128m

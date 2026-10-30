@@ -9,7 +9,7 @@
 #   deploy/vm.sh logs [service]
 # The VM defaults to root@187.126.115.164. Another login: VM=ubuntu@187.126.115.164 deploy/vm.sh …
 #
-# Reads the repo-root .env (app config) and .compose.env (tunnel token).
+# Reads the repo-root .env (app config + CLOUDFLARE_TUNNEL_TOKEN).
 # The code goes straight from this PC to the VM over SSH — GitHub is not involved.
 # By default it sends the files COMMITTED at HEAD (so unfinished edits can't go live
 # by accident); --working-tree sends your folder as it is now (minus git-ignored files).
@@ -24,7 +24,7 @@ SSH_OPTS="${SSH_OPTS:-}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO_DIR="$REMOTE_DIR/repo"
 # Run from $REPO_DIR (the checkout), where the compose file and build context live.
-COMPOSE="docker compose --env-file ../.compose.env -f deploy/docker-compose.prod.yml"
+COMPOSE="docker compose --env-file ../.env -f deploy/docker-compose.prod.yml"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 say() { echo "==> $*"; }
@@ -59,10 +59,10 @@ parse_db_url() {
 
 check_local_files() {
   [[ -f "$ROOT/.env" ]] || die ".env not found in $ROOT"
-  [[ -f "$ROOT/.compose.env" ]] || die ".compose.env not found in $ROOT"
-  grep -qE '^CLOUDFLARE_TUNNEL_TOKEN=.+' "$ROOT/.compose.env" &&
-    ! grep -q 'PASTE_TUNNEL_TOKEN_HERE' "$ROOT/.compose.env" ||
-    die "paste your Cloudflare tunnel token into .compose.env (CLOUDFLARE_TUNNEL_TOKEN=)"
+  local token
+  token="$(env_value CLOUDFLARE_TUNNEL_TOKEN)"
+  [[ -n "$token" && "$token" != *PASTE_TUNNEL_TOKEN_HERE* ]] ||
+    die "add your Cloudflare tunnel token to .env:  CLOUDFLARE_TUNNEL_TOKEN=\"...\""
   [[ "$(env_value PUBLIC_BASE_URL)" == https://* ]] || die "PUBLIC_BASE_URL in .env must be https://…"
 }
 
@@ -161,42 +161,51 @@ cmd_deploy() {
     fi
   fi
 
-  say "Uploading .env and .compose.env to $VM:$REMOTE_DIR"
-  upload "$ROOT/.env" "$VM:$REMOTE_DIR/.env"
-  upload "$ROOT/.compose.env" "$VM:$REMOTE_DIR/.compose.env"
-  remote "chmod 600 '$REMOTE_DIR/.env' '$REMOTE_DIR/.compose.env'"
-
-  say "Sending the code ($label) to $REPO_DIR"
-  # Unpacked into a fresh folder and swapped in, so a dropped connection can't leave
-  # a half-updated checkout. Docker's build cache lives in Docker, not in this folder.
+  # Everything travels in ONE tar stream over ONE ssh connection, so a password
+  # login asks for the password a single time: the code, the .env, and the script
+  # that builds and restarts on the VM.
+  local stage
+  stage="$(mktemp -d)"
+  trap 'rm -rf "$stage"' RETURN
+  mkdir -p "$stage/repo"
   if [[ "$mode" == "--working-tree" ]]; then
-    (cd "$ROOT" && git ls-files -z --cached --others --exclude-standard | tar --null --ignore-failed-read -T - -cf -)
+    (cd "$ROOT" && git ls-files -z --cached --others --exclude-standard | tar --null --ignore-failed-read -T - -cf -) | tar -xf - -C "$stage/repo"
   else
-    git -C "$ROOT" archive --format=tar HEAD
-  fi | remote "rm -rf '$REPO_DIR.new' && mkdir -p '$REPO_DIR.new' && tar -xf - -C '$REPO_DIR.new' &&
-      echo '$label' > '$REPO_DIR.new/.deployed-from' &&
-      rm -rf '$REPO_DIR' && mv '$REPO_DIR.new' '$REPO_DIR'" ||
-    die "sending the code failed"
+    git -C "$ROOT" archive --format=tar HEAD | tar -xf - -C "$stage/repo"
+  fi
+  cp "$ROOT/.env" "$stage/env"
+  cat >"$stage/run.sh" <<RUN
+set -euo pipefail
+D='$REMOTE_DIR'
+I="\$D/.incoming"
+install -m 600 "\$I/env" "\$D/.env"
+rm -rf "\$D/repo" && mv "\$I/repo" "\$D/repo"
+echo '$label' > "\$D/repo/.deployed-from"
+rm -rf "\$I"
+cd "\$D/repo"
+echo "==> Building images on the VM (uses both CPU cores for a few minutes)"
+$COMPOSE build
+echo "==> Restarting (live calls drain first — up to 4 min)"
+$COMPOSE up -d --remove-orphans
+echo "==> Waiting for the API health check"
+for i in \$(seq 1 40); do
+  if curl -fsS -m 5 http://127.0.0.1:4100/api/health >/dev/null 2>&1 || wget -qO- -T 5 http://127.0.0.1:4100/api/health >/dev/null 2>&1; then
+    echo "==> API healthy on the VM"
+    docker image prune -f >/dev/null 2>&1 || true
+    exit 0
+  fi
+  sleep 3
+done
+$COMPOSE ps
+$COMPOSE logs --tail 60 voice-api || true
+echo "ERROR: API not healthy after 2 min (logs above). Database unreachable? See the setup notes." >&2
+exit 1
+RUN
 
-  say "Building images on the VM (uses both CPU cores for a few minutes)"
-  remote "cd '$REPO_DIR' && $COMPOSE build" || die "image build failed (output above)"
-
-  say "Restarting (live calls drain first — up to 4 min)"
-  remote "cd '$REPO_DIR' && $COMPOSE up -d --remove-orphans" || die "docker compose up failed"
-
-  say "Waiting for the API health check"
-  local i
-  for i in $(seq 1 40); do
-    if remote "curl -fsS -m 5 http://127.0.0.1:4100/api/health >/dev/null 2>&1 || wget -qO- -T 5 http://127.0.0.1:4100/api/health >/dev/null 2>&1"; then
-      say "API healthy on the VM"
-      break
-    fi
-    [[ "$i" == 40 ]] && {
-      remote "cd '$REPO_DIR' && $COMPOSE ps && $COMPOSE logs --tail 60 voice-api" || true
-      die "API not healthy after 2 min (logs above). Database unreachable? See the setup notes."
-    }
-    sleep 3
-  done
+  say "Sending the code ($label) and .env to $VM — one connection, one password prompt"
+  tar -cf - -C "$stage" . |
+    remote "rm -rf '$REMOTE_DIR/.incoming' && mkdir -p '$REMOTE_DIR/.incoming' && tar -xf - -C '$REMOTE_DIR/.incoming' && bash '$REMOTE_DIR/.incoming/run.sh'" ||
+    die "deploy failed on the VM (output above)"
 
   local public
   public="$(env_value PUBLIC_BASE_URL)"
@@ -205,7 +214,6 @@ cmd_deploy() {
   else
     echo "WARN: $public/api/health not reachable yet — check the tunnel: deploy/vm.sh logs voice-tunnel"
   fi
-  remote "docker image prune -f >/dev/null 2>&1" || true
   say "Deployed."
 }
 

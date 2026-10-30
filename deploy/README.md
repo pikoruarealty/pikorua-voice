@@ -37,7 +37,7 @@ Upstash `REDIS_URL` left in `.env` is ignored.
 ## Quick path: `deploy/vm.sh`
 
 Everything below is scripted. Run it from your machine (Git Bash on Windows works),
-from the repo root, with the repo-root `.env` and `.compose.env` filled in:
+from the repo root, with the repo-root `.env` filled in (including `CLOUDFLARE_TUNNEL_TOKEN`):
 
 ```bash
 deploy/vm.sh setup       # once: Docker check, folder, DB + user, daily backups
@@ -50,7 +50,7 @@ deploy/vm.sh logs voice-api
 The VM is `root@187.126.115.164` by default; for another login run
 `VM=ubuntu@187.126.115.164 deploy/vm.sh deploy`.
 
-`deploy` uploads `.env` and `.compose.env` (chmod 600 on the VM), sends the code
+`deploy` sends `.env` (chmod 600 on the VM) and the code
 straight from your PC to `/opt/pikorua-voice/repo` over SSH (**GitHub isn't involved**),
 **builds the images on the VM**, restarts, and waits for `/api/health`.
 
@@ -176,7 +176,8 @@ isn't a backup.
 
 1. Go to Cloudflare dashboard → **Zero Trust → Networks → Tunnels → Create a
    tunnel** → **Cloudflared**, and name it `pikorua-voice`.
-2. Copy the **tunnel token**, the long string after `--token`. You don't need to
+2. Copy the **tunnel token**, the long string after `--token`, into `.env` as
+   `CLOUDFLARE_TUNNEL_TOKEN="..."`. You don't need to
    run the install command it shows; the compose stack runs cloudflared for you.
 3. **Public hostname** → add:
 
@@ -209,9 +210,8 @@ cd /opt/pikorua-voice
 # The code and both env files are sent by `deploy/vm.sh deploy` (nothing to
 # download here). If you do it by hand, put them at:
 #   /opt/pikorua-voice/.env           (app settings)
-#   /opt/pikorua-voice/.compose.env   (CLOUDFLARE_TUNNEL_TOKEN=<tunnel token>)
 #   /opt/pikorua-voice/repo/          (the project's files)
-chmod 600 .env .compose.env
+chmod 600 .env
 ```
 
 In `/opt/pikorua-voice/.env`, set:
@@ -241,8 +241,8 @@ is in that folder:
 
 ```bash
 cd /opt/pikorua-voice/repo
-docker compose --env-file ../.compose.env -f deploy/docker-compose.prod.yml build
-docker compose --env-file ../.compose.env -f deploy/docker-compose.prod.yml up -d
+docker compose --env-file ../.env -f deploy/docker-compose.prod.yml build
+docker compose --env-file ../.env -f deploy/docker-compose.prod.yml up -d
 curl -fsS http://127.0.0.1:4100/api/health && curl -fsS https://voice.pikoruarealty.com/api/health
 ```
 

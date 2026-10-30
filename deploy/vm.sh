@@ -3,14 +3,15 @@
 #
 #   deploy/vm.sh setup        # once: Docker check, folder, DB + user, backups
 #   deploy/vm.sh migrate-db   # once, before the first deploy: copy Neon → VM
-#   deploy/vm.sh deploy       # every release: upload config, pull images, restart
+#   deploy/vm.sh deploy       # every release: git pull on the VM, build, restart
 #   deploy/vm.sh status
 #   deploy/vm.sh logs [service]
 # The VM defaults to root@187.126.115.164. Another login: VM=ubuntu@187.126.115.164 deploy/vm.sh …
 #
-# Reads the repo-root .env (app config) and .compose.env (image tag + tunnel token).
+# Reads the repo-root .env (app config) and .compose.env (BRANCH + tunnel token).
+# The VM clones the repo into $REMOTE_DIR/repo and builds the images itself.
 # Optional env: VM, SSH_OPTS="-p 2222 -i ~/.ssh/key", REMOTE_DIR (default /opt/pikorua-voice),
-# GHCR_USER + GHCR_TOKEN (read:packages) to log the VM in to the private image registry.
+# GITHUB_TOKEN (read access to the repo) if the VM can't already git-pull it.
 set -euo pipefail
 
 CMD="${1:-}"
@@ -18,7 +19,9 @@ VM="${VM:-root@187.126.115.164}"
 REMOTE_DIR="${REMOTE_DIR:-/opt/pikorua-voice}"
 SSH_OPTS="${SSH_OPTS:-}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-COMPOSE="docker compose --env-file .compose.env -f docker-compose.prod.yml"
+REPO_DIR="$REMOTE_DIR/repo"
+# Run from $REPO_DIR (the checkout), where the compose file and build context live.
+COMPOSE="docker compose --env-file ../.compose.env -f deploy/docker-compose.prod.yml"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 say() { echo "==> $*"; }
@@ -54,26 +57,27 @@ parse_db_url() {
 check_local_files() {
   [[ -f "$ROOT/.env" ]] || die ".env not found in $ROOT"
   [[ -f "$ROOT/.compose.env" ]] || die ".compose.env not found in $ROOT"
-  [[ -f "$ROOT/deploy/docker-compose.prod.yml" ]] || die "deploy/docker-compose.prod.yml missing"
   grep -qE '^CLOUDFLARE_TUNNEL_TOKEN=.+' "$ROOT/.compose.env" &&
     ! grep -q 'PASTE_TUNNEL_TOKEN_HERE' "$ROOT/.compose.env" ||
     die "paste your Cloudflare tunnel token into .compose.env (CLOUDFLARE_TUNNEL_TOKEN=)"
   [[ "$(env_value PUBLIC_BASE_URL)" == https://* ]] || die "PUBLIC_BASE_URL in .env must be https://…"
 }
 
-# The VM pulls images CI built from the pushed branch, so unpushed commits would
-# silently not be deployed.
+# Branch the VM deploys (BRANCH= in .compose.env, default v2).
+deploy_branch() { grep -E '^BRANCH=' "$ROOT/.compose.env" | head -1 | cut -d= -f2- || true; }
+
+# The VM pulls the branch from GitHub, so unpushed commits would silently not be deployed.
 check_pushed() {
-  local tag branch
-  tag="$(grep -E '^TAG=' "$ROOT/.compose.env" | cut -d= -f2-)"
+  local want branch
+  want="$(deploy_branch)"; want="${want:-v2}"
   branch="$(git -C "$ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "?")"
-  if [[ "$branch" == "$tag" ]]; then
+  if [[ "$branch" == "$want" ]]; then
     git -C "$ROOT" fetch -q origin "$branch" 2>/dev/null || true
     if [[ -n "$(git -C "$ROOT" log "origin/$branch..HEAD" --oneline 2>/dev/null)" ]]; then
-      die "branch $branch has commits not pushed to GitHub — git push first (CI builds the images)"
+      die "branch $branch has commits not pushed to GitHub — git push first (the VM pulls from GitHub)"
     fi
   else
-    echo "    note: deploying images tagged '$tag' (you are on branch '$branch')"
+    echo "    note: the VM will deploy branch '$want' from GitHub (you are on '$branch')"
   fi
 }
 
@@ -84,6 +88,7 @@ cmd_setup() {
   Install Docker Engine (https://docs.docker.com/engine/install/), then:
   sudo usermod -aG docker \$USER   (and log in again)"
   remote 'docker compose version >/dev/null' || die "install the docker compose plugin on the VM"
+  remote 'command -v git >/dev/null' || die "install git on the VM (e.g. sudo apt install git)"
 
   say "Creating $REMOTE_DIR"
   remote_tty "sudo mkdir -p '$REMOTE_DIR' && sudo chown \"\$(id -un)\": '$REMOTE_DIR' && chmod 750 '$REMOTE_DIR'"
@@ -159,20 +164,46 @@ JOB
 cmd_deploy() {
   check_local_files
   check_pushed
-  say "Uploading config to $VM:$REMOTE_DIR"
-  upload "$ROOT/deploy/docker-compose.prod.yml" "$VM:$REMOTE_DIR/docker-compose.prod.yml"
+  local branch url
+  branch="$(deploy_branch)"; branch="${branch:-v2}"
+  url="$(git -C "$ROOT" remote get-url origin | sed -E 's#//[^@/]*@#//#')"
+
+  say "Uploading .env and .compose.env to $VM:$REMOTE_DIR"
   upload "$ROOT/.env" "$VM:$REMOTE_DIR/.env"
   upload "$ROOT/.compose.env" "$VM:$REMOTE_DIR/.compose.env"
   remote "chmod 600 '$REMOTE_DIR/.env' '$REMOTE_DIR/.compose.env'"
 
-  if [[ -n "${GHCR_TOKEN:-}" && -n "${GHCR_USER:-}" ]]; then
-    say "Logging the VM in to ghcr.io"
-    printf '%s' "$GHCR_TOKEN" | remote "docker login ghcr.io -u '$GHCR_USER' --password-stdin >/dev/null"
-  fi
+  say "Pulling $branch from GitHub on the VM"
+  local sync
+  sync="$(mktemp)"
+  # The token (if any) arrives on stdin, never on a command line.
+  cat >"$sync" <<SYNC
+set -euo pipefail
+read -r T || true
+if [ -n "\${T:-}" ]; then
+  export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraHeader
+  export GIT_CONFIG_VALUE_0="Authorization: Basic \$(printf 'x-access-token:%s' "\$T" | base64 -w0)"
+fi
+if [ -d '$REPO_DIR/.git' ]; then
+  git -C '$REPO_DIR' fetch --prune origin '+refs/heads/$branch:refs/remotes/origin/$branch'
+else
+  git clone --single-branch --branch '$branch' '$url' '$REPO_DIR'
+fi
+git -C '$REPO_DIR' checkout -q -B '$branch' 'origin/$branch'
+git -C '$REPO_DIR' reset -q --hard 'origin/$branch'
+echo "    VM is on: \$(git -C '$REPO_DIR' log --oneline -1)"
+SYNC
+  upload "$sync" "$VM:$REMOTE_DIR/.sync.sh"
+  rm -f "$sync"
+  printf '%s\n' "${GITHUB_TOKEN:-}" |
+    remote "bash '$REMOTE_DIR/.sync.sh'; rc=\$?; rm -f '$REMOTE_DIR/.sync.sh'; exit \$rc" ||
+    die "git pull failed on the VM — a private repo needs read access: export GITHUB_TOKEN=<token> and re-run"
 
-  say "Pulling images and restarting (live calls drain first — up to 4 min)"
-  remote "cd '$REMOTE_DIR' && $COMPOSE pull && $COMPOSE up -d --remove-orphans" ||
-    die "pull/up failed — if 'denied' or 'unauthorized': set GHCR_USER + GHCR_TOKEN and re-run"
+  say "Building images on the VM (uses both CPU cores for a few minutes)"
+  remote "cd '$REPO_DIR' && $COMPOSE build" || die "image build failed (output above)"
+
+  say "Restarting (live calls drain first — up to 4 min)"
+  remote "cd '$REPO_DIR' && $COMPOSE up -d --remove-orphans" || die "docker compose up failed"
 
   say "Waiting for the API health check"
   local i
@@ -182,7 +213,7 @@ cmd_deploy() {
       break
     fi
     [[ "$i" == 40 ]] && {
-      remote "cd '$REMOTE_DIR' && $COMPOSE ps && $COMPOSE logs --tail 60 voice-api" || true
+      remote "cd '$REPO_DIR' && $COMPOSE ps && $COMPOSE logs --tail 60 voice-api" || true
       die "API not healthy after 2 min (logs above). Database unreachable? See the setup notes."
     }
     sleep 3
@@ -200,11 +231,11 @@ cmd_deploy() {
 }
 
 cmd_status() {
-  remote "cd '$REMOTE_DIR' && $COMPOSE ps && echo && curl -fsS -m 5 http://127.0.0.1:4100/api/health; echo"
+  remote "cd '$REPO_DIR' && $COMPOSE ps && echo && curl -fsS -m 5 http://127.0.0.1:4100/api/health; echo"
 }
 
 cmd_logs() {
-  remote "cd '$REMOTE_DIR' && $COMPOSE logs --tail 200 ${2:-}"
+  remote "cd '$REPO_DIR' && $COMPOSE logs --tail 200 ${2:-}"
 }
 
 case "$CMD" in

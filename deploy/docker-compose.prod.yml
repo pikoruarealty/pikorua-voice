@@ -1,11 +1,12 @@
 # Pikorua Voice on the shared 2 vCPU / 8 GB VM (see deploy/README.md).
 #
-#   docker compose --env-file .compose.env -f docker-compose.prod.yml pull
-#   docker compose --env-file .compose.env -f docker-compose.prod.yml up -d
+# Run from the repo checkout on the VM (deploy/vm.sh does this):
+#   docker compose --env-file ../.compose.env -f deploy/docker-compose.prod.yml build
+#   docker compose --env-file ../.compose.env -f deploy/docker-compose.prod.yml up -d
 #
-# Images are built by CI (.github/workflows/images.yml) — never on the VM, where a
-# pnpm install + TypeScript build would pin both cores and stall live calls.
-# Public traffic (https://voice.pikoruarealty.com) arrives through the Cloudflare
+# The API and worker images are built here, on the VM, from the checked-out code
+# (build context = the repo root). A build uses both CPU cores for a few minutes,
+# so deploy when no campaign is running. Public traffic (https://voice.pikoruarealty.com) arrives through the Cloudflare
 # Tunnel container, which connects OUT to Cloudflare — no inbound port is opened.
 # Postgres is the VM's own (host) Postgres, reached from the containers as
 # host.docker.internal — DATABASE_URL in the env file (deploy/README.md §2).
@@ -17,7 +18,8 @@ x-logging: &logging
 
 services:
   voice-api:
-    image: ${IMAGE_PREFIX:?set IMAGE_PREFIX, e.g. ghcr.io/pikoruarealty}/pikorua-voice-api:${TAG:?set TAG to a branch (v2) or commit SHA}
+    build: { context: .., dockerfile: apps/api/Dockerfile }
+    image: pikorua-voice-api:local
     env_file: /opt/pikorua-voice/.env
     environment:
       PORT: "4100"
@@ -52,7 +54,8 @@ services:
     depends_on: [voice-redis]
 
   voice-worker:
-    image: ${IMAGE_PREFIX:?set IMAGE_PREFIX, e.g. ghcr.io/pikoruarealty}/pikorua-voice-worker:${TAG:?set TAG to a branch (v2) or commit SHA}
+    build: { context: .., dockerfile: apps/worker/Dockerfile }
+    image: pikorua-voice-worker:local
     env_file: /opt/pikorua-voice/.env
     environment:
       PORT: "10000"

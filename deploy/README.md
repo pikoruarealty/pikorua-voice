@@ -42,7 +42,7 @@ from the repo root, with the repo-root `.env` and `.compose.env` filled in:
 ```bash
 deploy/vm.sh setup       # once: Docker check, folder, DB + user, daily backups
 deploy/vm.sh migrate-db  # once, BEFORE the first deploy: copy Neon data
-deploy/vm.sh deploy      # every release: upload .env + compose, pull, restart, health check
+deploy/vm.sh deploy      # every release: upload .env, git pull on the VM, build, restart, health check
 deploy/vm.sh status
 deploy/vm.sh logs voice-api
 ```
@@ -50,12 +50,16 @@ deploy/vm.sh logs voice-api
 The VM is `root@187.126.115.164` by default; for another login run
 `VM=ubuntu@187.126.115.164 deploy/vm.sh deploy`.
 
-`deploy` uploads `.env`, `.compose.env` and the compose file (chmod 600 on the VM),
-pulls the images CI built for `TAG`, restarts, and waits for `/api/health`. It refuses
-to run if your branch has unpushed commits, because the VM would pull the old images.
-First deploy only: export `GHCR_USER` and `GHCR_TOKEN` (a GitHub token with
-`read:packages`) so the VM can pull the private images. Use `SSH_OPTS="-p 2222 -i key"`
-for a non-default SSH port or key.
+`deploy` uploads `.env` and `.compose.env` (chmod 600 on the VM), pulls the branch
+named in `.compose.env` (`BRANCH=v2`) from GitHub into `/opt/pikorua-voice/repo`,
+**builds the images on the VM**, restarts, and waits for `/api/health`. It refuses to
+run if your branch has unpushed commits, because the VM pulls from GitHub. If the VM
+can't already `git pull` this repo (it's private), export `GITHUB_TOKEN` (a token with
+read access to the repo) before the first deploy. Use `SSH_OPTS="-p 2222 -i key"` for
+a non-default SSH port or key.
+
+**A build uses both of the VM's CPU cores for a few minutes.** Deploy when no
+campaign is running, or live calls will stutter.
 
 What's still manual: the Cloudflare tunnel (§2), and, if the health check says
 the DB is unreachable, the two Postgres config lines `setup` prints.
@@ -199,16 +203,13 @@ sudo mkdir -p /opt/pikorua-voice && sudo chown pikorua: /opt/pikorua-voice
 
 sudo -iu pikorua
 cd /opt/pikorua-voice
-curl -fsSLO https://raw.githubusercontent.com/pikoruarealty/pikorua-voice/v2/deploy/docker-compose.prod.yml
+# The code: clone the branch (needs git; a private repo needs a token or deploy key).
+git clone --single-branch --branch v2 https://github.com/pikoruarealty/pikorua-voice.git repo
 cp /path/to/your/.env .env && chmod 600 .env
-
-# Images are private: log in with a GitHub token that has read:packages.
-echo "$GHCR_TOKEN" | docker login ghcr.io -u <github-user> --password-stdin
 
 # Compose settings + the tunnel token (kept out of the app's .env).
 cat > .compose.env <<'EOF'
-IMAGE_PREFIX=ghcr.io/pikoruarealty
-TAG=v2
+BRANCH=v2
 CLOUDFLARE_TUNNEL_TOKEN=<paste the tunnel token>
 EOF
 chmod 600 .compose.env
@@ -235,14 +236,14 @@ needs no new inbound port for voice.
 
 ## 3. Deploy
 
-CI builds both images on every push to `v2` (and `main`) in
-`.github/workflows/images.yml`. They're tagged with the branch name and the
-commit SHA. On the VM:
+The images are built on the VM from the code in `/opt/pikorua-voice/repo`
+(`deploy/vm.sh deploy` does all of this). By hand:
 
 ```bash
-cd /opt/pikorua-voice
-docker compose --env-file .compose.env -f docker-compose.prod.yml pull
-docker compose --env-file .compose.env -f docker-compose.prod.yml up -d
+cd /opt/pikorua-voice/repo
+git pull
+docker compose --env-file ../.compose.env -f deploy/docker-compose.prod.yml build
+docker compose --env-file ../.compose.env -f deploy/docker-compose.prod.yml up -d
 curl -fsS http://127.0.0.1:4100/api/health && curl -fsS https://voice.pikoruarealty.com/api/health
 ```
 
@@ -251,9 +252,11 @@ curl -fsS http://127.0.0.1:4100/api/health && curl -fsS https://voice.pikoruarea
   finish. Deploy outside the dial window anyway when you can.
 - **Migrations run automatically** when the API starts, under a Postgres lock,
   so two instances can't race.
-- **Pin a version** with `TAG=<commit-sha>` in `.compose.env` instead of `v2`.
+- **Build load:** the build runs while the old containers still serve calls, so
+  it can slow them. Pick a quiet time.
 
-**Rollback:** set `TAG=<previous-sha>` in `.compose.env` and run `up -d` again.
+**Rollback:** in `/opt/pikorua-voice/repo` run `git checkout <previous-commit>`, then
+the `build` and `up -d` commands above.
 Voice vendors roll back without a deploy: set `TTS_PROVIDER_HI=elevenlabs` or
 `STT_PROVIDER=deepgram` in `.env` and run `up -d`.
 

@@ -7,7 +7,8 @@
 # pnpm install + TypeScript build would pin both cores and stall live calls.
 # Public traffic (https://voice.pikoruarealty.com) arrives through the Cloudflare
 # Tunnel container, which connects OUT to Cloudflare — no inbound port is opened.
-# Postgres stays on Neon (DATABASE_URL in the env file).
+# Postgres is the VM's own (host) Postgres, reached from the containers as
+# host.docker.internal — DATABASE_URL in the env file (deploy/README.md §2).
 name: pikorua-voice
 
 x-logging: &logging
@@ -32,6 +33,8 @@ services:
     # Localhost only — for health checks from the VM, or a cloudflared installed
     # on the host instead of the container below. Never reachable from outside.
     ports: ["127.0.0.1:4100:4100"]
+    # The VM's own Postgres, as host.docker.internal in DATABASE_URL.
+    extra_hosts: ["host.docker.internal:host-gateway"]
     cpus: 1.0
     cpu_shares: 2048 # audio pacing + barge-in win any CPU contention
     mem_limit: 512m
@@ -58,6 +61,7 @@ services:
       MAX_CONCURRENT_CALLS: "2"
       OUTBOUND_MAX_CONCURRENT: "1"
       WORKER_KEEPALIVE_ENABLED: "false"
+    extra_hosts: ["host.docker.internal:host-gateway"]
     cpus: 0.5
     cpu_shares: 256 # network-bound, nothing real-time
     mem_limit: 384m

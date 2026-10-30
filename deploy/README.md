@@ -1,7 +1,8 @@
 # Deploying Pikorua Voice on the VM
 
 The API, worker, Redis and a Cloudflare Tunnel run as one Docker Compose stack on
-the shared 2 vCPU / 8 GB VM. Postgres stays on Neon. Each service has a CPU and
+the shared 2 vCPU / 8 GB VM. The database is the VM's own Postgres, in a
+dedicated database and user. Each service has a CPU and
 RAM cap so voice can never starve the VM's other projects, and those projects
 can't make calls stutter. At most 2 calls run at once (Redis call-slot gate).
 
@@ -15,6 +16,23 @@ voice, and there is no nginx.
 | voice-worker | 0.5 | 384 MB | compose network only |
 | voice-tunnel (cloudflared) | 0.25 | 128 MB | outbound to Cloudflare only |
 | voice-redis | 0.25 | 128 MB | compose network only |
+| Postgres (VM host, not in compose) | — | — | containers via `host.docker.internal` |
+
+**Redis is the stack's own `voice-redis` container. Don't point voice at another
+project's Redis, or at Upstash.**
+
+- **Eviction:** BullMQ (dial, post-call and CRM-retry jobs) needs
+  `maxmemory-policy noeviction`. A shared Redis tuned for caching evicts keys
+  under memory pressure, and that silently deletes queued dials and CRM syncs.
+- **Collisions:** another project's `FLUSHALL`/`FLUSHDB`, or a clash on db 0,
+  would wipe call state and the call-slot gate.
+- **Isolation:** it has no host port (no clash on 6379), append-only persistence
+  (survives restarts), and a 128 MB cap.
+- **Upstash:** BullMQ's constant polling burns its command quota, and every
+  command pays a network round trip.
+
+The compose file sets `REDIS_URL=redis://voice-redis:6379` itself, so any old
+Upstash `REDIS_URL` left in `.env` is ignored.
 
 ## 1. Preflight (once, before installing anything)
 
@@ -36,9 +54,65 @@ for h in api.exotel.com api.sarvam.ai openrouter.ai; do
 | CPU steal `st` | < 5% sustained | Noisy host: audio will jitter. Change instance |
 | Instance type | **Not burstable** (AWS t2/t3/t4g, Azure B-series, GCP shared-core) | Burst credits run out mid-campaign and calls fail |
 | Connect time to Exotel / Sarvam | < 50 ms | Wrong region |
-| Free disk | ≥ 5 GB | Clean up first |
+| Free disk | ≥ 5 GB | Clean up first (plus room for DB backups) |
 
 ## 2. One-time setup
+
+### Postgres on the VM
+
+Give voice its **own database and user**. Never reuse another project's database.
+
+```bash
+sudo -u postgres psql <<'SQL'
+CREATE USER pikorua_voice WITH PASSWORD '<strong password>';
+CREATE DATABASE pikorua_voice OWNER pikorua_voice;
+SQL
+```
+
+The containers reach the host's Postgres over Docker's bridge network, not
+localhost, so Postgres must accept that network:
+
+- `postgresql.conf`: `listen_addresses = 'localhost,172.17.0.1'`, or `'*'` if
+  the firewall blocks 5432 from outside. Compose networks can use other
+  172.x addresses, so `'*'` plus the firewall is simplest.
+- `pg_hba.conf`: add
+  `host  pikorua_voice  pikorua_voice  172.16.0.0/12  scram-sha-256`
+- Then run `sudo systemctl restart postgresql`.
+- **Never expose 5432 publicly:** `sudo ufw deny 5432` (or don't allow it). The
+  tunnel doesn't need it.
+
+In `/opt/pikorua-voice/.env`:
+
+```
+DATABASE_URL=postgresql://pikorua_voice:<password>@host.docker.internal:5432/pikorua_voice
+```
+
+Use no `sslmode`; it's local traffic. Tables are created automatically by the
+migrations when the API first starts.
+
+**Move the existing data from Neon** (calls, leads, appointments), once, before
+the first start on the VM. Pause campaigns first so nothing writes to Neon
+during the copy:
+
+```bash
+pg_dump "<NEON_DATABASE_URL>" --no-owner --no-privileges -Fc -f neon.dump
+pg_restore --no-owner --role=pikorua_voice -d "postgresql://pikorua_voice:<password>@localhost:5432/pikorua_voice" neon.dump
+```
+
+The VM's `pg_dump` must be the same major version as Neon's Postgres or newer.
+
+**Backups.** Neon did these for you; now nothing does unless you set it up. Make
+a daily dump, keep 14 days, and copy them off the VM (a dump on the same disk
+doesn't survive losing the VM):
+
+```bash
+sudo mkdir -p /var/backups/pikorua-voice && sudo chown postgres: /var/backups/pikorua-voice
+# /etc/cron.d/pikorua-voice-backup
+15 3 * * * postgres pg_dump -Fc pikorua_voice -f /var/backups/pikorua-voice/$(date +\%F).dump && find /var/backups/pikorua-voice -name '*.dump' -mtime +14 -delete
+```
+
+Test a restore once into a scratch database. A backup you've never restored
+isn't a backup.
 
 ### Cloudflare Tunnel
 
@@ -93,8 +167,8 @@ In `/opt/pikorua-voice/.env`, set:
 
 - `NODE_ENV=production`
 - `PUBLIC_BASE_URL=https://voice.pikoruarealty.com` (Exotel status callbacks)
-- `DATABASE_URL` (Neon), plus the Exotel, Sarvam, OpenRouter, ElevenLabs,
-  Deepgram and CRM keys you use today.
+- `DATABASE_URL` (the VM's Postgres, see above), plus the Exotel, Sarvam,
+  OpenRouter, ElevenLabs, Deepgram and CRM keys you use today.
 
 `REDIS_URL`, `PORT`, the call limits and `TRUST_PROXY` come from the compose
 file; don't set them here.
@@ -142,6 +216,7 @@ Voice vendors roll back without a deploy: set `TTS_PROVIDER_HI=elevenlabs` or
 | Restarts / OOM kills | `docker compose ps`, `docker events` | any |
 | CPU steal | `vmstat 1` → `st` | > 5% |
 | Disk | `df -h` | < 15% free (`docker image prune -f`) |
+| DB backup | `ls -lt /var/backups/pikorua-voice \| head -2` | newest dump older than 1 day |
 | Other projects' latency | their own monitoring | > +20% vs before voice moved in |
 
 ## 5. Scaling

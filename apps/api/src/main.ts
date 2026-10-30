@@ -11,6 +11,7 @@ import { resolve } from "node:path";
 import { AppModule } from "./app.module";
 import { DEMO_HTML } from "./demo-ui";
 import { STATUS_HTML } from "./status/status-ui";
+import { COSTS_HTML } from "./costs/costs-ui";
 import { operatorPagesGuard } from "./auth/operator-pages.guard";
 import { MetricsService } from "./metrics/metrics.service";
 import { ExotelVoicebotGateway } from "./call-runtime/exotel-voicebot.gateway";
@@ -74,6 +75,10 @@ async function bootstrap() {
   app.getHttpAdapter().get("/status", (_req: Request, res: Response) => {
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     res.send(STATUS_HTML);
+  });
+  app.getHttpAdapter().get("/costs", (_req: Request, res: Response) => {
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.send(COSTS_HTML);
   });
 
   app.setGlobalPrefix("api");

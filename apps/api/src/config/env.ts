@@ -153,6 +153,12 @@ export const envSchema = z
     // (service dashboard). HTTP Basic login — any username. Unset in production =
     // those pages are disabled.
     DASHBOARD_PASSWORD: optionalNonEmpty,
+    // Rates for the /costs page (list prices — check your plans). Exotel's is 0 until
+    // you set your per-minute rate, and the page then says phone cost is left out.
+    USD_INR: z.coerce.number().positive().default(85),
+    SARVAM_TTS_INR_PER_10K_CHARS: z.coerce.number().nonnegative().default(30),
+    STT_INR_PER_HOUR: z.coerce.number().nonnegative().default(30),
+    EXOTEL_INR_PER_MIN: z.coerce.number().nonnegative().default(0),
 
     // LLM · OpenRouter
     OPENROUTER_API_KEY: optionalNonEmpty,

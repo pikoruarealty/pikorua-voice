@@ -10,6 +10,7 @@ import { DatabaseModule } from "./database/database.module";
 import { RedisModule } from "./redis/redis.module";
 import { WorkerWakerModule } from "./worker-waker/worker-waker.module";
 import { HealthModule } from "./health/health.module";
+import { CostsModule } from "./costs/costs.module";
 import { CampaignModule } from "./campaign/campaign.module";
 import { AppointmentModule } from "./appointments/appointment.module";
 import { WebhookModule } from "./webhooks/webhook.module";
@@ -32,6 +33,7 @@ import { DemoModule } from "./demo/demo.module";
     RedisModule,
     WorkerWakerModule,
     HealthModule,
+    CostsModule,
     CampaignModule,
     AppointmentModule,
     WebhookModule,

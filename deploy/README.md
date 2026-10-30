@@ -69,6 +69,14 @@ Both pages ask for a login: **any username, password = `DASHBOARD_PASSWORD`** fr
   ElevenLabs (characters left), Deepgram, Exotel (account active). Green = OK,
   amber = running low, red = down. Also shows calls in progress (of 2) and
   whether the AI fallback switch is open. Refreshes every minute; "Check now" forces it.
+- **`/costs`: spend.** Total spend, average cost per answered call, and a
+  per-service table (AI replies, voice, speech-to-text, phone lines) with a
+  recent-calls list, for 24 h / 7 / 30 / 90 days. AI cost is exactly what
+  OpenRouter billed; the rest is estimated from call time and characters at the
+  rates in `.env` (`USD_INR`, `SARVAM_TTS_INR_PER_10K_CHARS`, `STT_INR_PER_HOUR`,
+  `EXOTEL_INR_PER_MIN`). Set `EXOTEL_INR_PER_MIN` to your real rate, or phone cost
+  shows as ₹0 and the page says so. Only calls made after this version was
+  deployed have AI cost recorded.
 - **`/`: browser test call.** Talk to Maya from your browser, no phone needed.
 - Exotel's call stream, webhooks, the CRM and `/api/health` are not behind the
   password.

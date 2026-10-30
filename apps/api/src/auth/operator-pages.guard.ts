@@ -2,13 +2,18 @@ import { timingSafeEqual } from "crypto";
 import type { NextFunction, Request, Response } from "express";
 
 // Operator pages: the browser demo (/), its session endpoint (which hands out the
-// API token the demo's WebSocket needs), and the status dashboard. They sit behind
+// API token the demo's WebSocket needs), the status dashboard and the cost page. They sit behind
 // one password — HTTP Basic, any username, DASHBOARD_PASSWORD — so the browser
 // shows its own login box. Without this, anyone who opened the public URL got the
 // API token. Everything else (Exotel stream + webhooks, CRM, /api/health) is untouched.
 export function isOperatorPage(path: string): boolean {
   return (
-    path === "/" || path === "/status" || path.startsWith("/api/status") || path.startsWith("/api/demo")
+    path === "/" ||
+    path === "/status" ||
+    path === "/costs" ||
+    path.startsWith("/api/status") ||
+    path.startsWith("/api/costs") ||
+    path.startsWith("/api/demo")
   );
 }
 

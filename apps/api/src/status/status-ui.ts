@@ -42,6 +42,7 @@ export const STATUS_HTML = `<!doctype html>
     <div><h1>Pikorua Voice · Status</h1><div class="muted" id="when">Loading…</div></div>
     <div style="display:flex; gap:8px">
       <button id="refresh">Check now</button>
+      <a class="btn" href="/costs">Costs</a>
       <a class="btn" href="/">Test call demo</a>
     </div>
   </header>

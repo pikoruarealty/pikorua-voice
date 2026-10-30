@@ -34,6 +34,29 @@ project's Redis, or at Upstash.**
 The compose file sets `REDIS_URL=redis://voice-redis:6379` itself, so any old
 Upstash `REDIS_URL` left in `.env` is ignored.
 
+## Quick path: `deploy/vm.sh`
+
+Everything below is scripted. Run it from your machine (Git Bash on Windows works),
+from the repo root, with the repo-root `.env` and `.compose.env` filled in:
+
+```bash
+deploy/vm.sh setup       user@VM_IP   # once: Docker check, folder, DB + user, daily backups
+deploy/vm.sh migrate-db  user@VM_IP   # once, BEFORE the first deploy: copy Neon data
+deploy/vm.sh deploy      user@VM_IP   # every release: upload .env + compose, pull, restart, health check
+deploy/vm.sh status      user@VM_IP
+deploy/vm.sh logs        user@VM_IP voice-api
+```
+
+`deploy` uploads `.env`, `.compose.env` and the compose file (chmod 600 on the VM),
+pulls the images CI built for `TAG`, restarts, and waits for `/api/health`. It refuses
+to run if your branch has unpushed commits, because the VM would pull the old images.
+First deploy only: export `GHCR_USER` and `GHCR_TOKEN` (a GitHub token with
+`read:packages`) so the VM can pull the private images. Use `SSH_OPTS="-p 2222 -i key"`
+for a non-default SSH port or key.
+
+What's still manual: the Cloudflare tunnel (§2), and, if the health check says
+the DB is unreachable, the two Postgres config lines `setup` prints.
+
 ## 1. Preflight (once, before installing anything)
 
 Run during a normal busy hour for the other projects:

@@ -1,0 +1,2 @@
+# Shell scripts run on Linux/Git Bash: always LF, or bash fails on .
+*.sh text eol=lf

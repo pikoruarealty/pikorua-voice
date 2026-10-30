@@ -69,6 +69,11 @@ export class TtsRouter {
     return sOpts ? (this.clips?.get(String(sOpts.languageCode), text) ?? null) : null;
   }
 
+  // For the status dashboard: ms until Sarvam is tried again (0 = healthy).
+  sarvamBreakerOpenForMs(): number {
+    return Math.max(0, this.sarvamUnhealthyUntil - Date.now());
+  }
+
   // Record that Sarvam failed for real, at request time. Idempotent within a window
   // so a burst of failures on one turn logs once, not once per sentence.
   noteSarvamFailure(reason: string) {

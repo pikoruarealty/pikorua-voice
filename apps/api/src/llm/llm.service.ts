@@ -60,6 +60,18 @@ export class LlmService {
     return Number(this.config.get("OPENROUTER_TIMEOUT_MS") ?? 4000);
   }
 
+  // For the status dashboard: consecutive failures and how long each breaker
+  // stays open (0 = closed, requests flowing).
+  breakerState(): Record<string, { failures: number; openForMs: number }> {
+    const now = Date.now();
+    return Object.fromEntries(
+      [...this.health].map(([k, h]) => [
+        k,
+        { failures: h.consecutiveFailures, openForMs: Math.max(0, h.openUntil - now) },
+      ]),
+    );
+  }
+
   private breakerOpen(provider: string): boolean {
     return (this.health.get(provider)?.openUntil ?? 0) > Date.now();
   }

@@ -1,4 +1,7 @@
 import { Module } from "@nestjs/common";
+import { HealthModule } from "../health/health.module";
+import { StatusService } from "../status/status.service";
+import { StatusController } from "../status/status.controller";
 import { DeepgramService } from "../stt/deepgram.service";
 import { DeepgramLiveService } from "../stt/deepgram-live.service";
 import { SarvamSttService } from "../stt/sarvam-stt.service";
@@ -24,6 +27,7 @@ import { IvrService } from "../ivr/ivr.service";
 import { PostCallQueueService } from "../postcall/postcall.queue";
 
 @Module({
+  imports: [HealthModule],
   providers: [
     DeepgramService,
     DeepgramLiveService,
@@ -66,8 +70,9 @@ import { PostCallQueueService } from "../postcall/postcall.queue";
     // without importing WebhookModule (which would create a dependency cycle).
     PostCallQueueService,
     CallRuntimeService,
+    StatusService,
   ],
-  controllers: [CallRuntimeController],
+  controllers: [CallRuntimeController, StatusController],
   exports: [CallRuntimeService],
 })
 export class CallRuntimeModule {}

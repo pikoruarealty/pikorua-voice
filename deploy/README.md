@@ -40,12 +40,15 @@ Everything below is scripted. Run it from your machine (Git Bash on Windows work
 from the repo root, with the repo-root `.env` and `.compose.env` filled in:
 
 ```bash
-deploy/vm.sh setup       user@VM_IP   # once: Docker check, folder, DB + user, daily backups
-deploy/vm.sh migrate-db  user@VM_IP   # once, BEFORE the first deploy: copy Neon data
-deploy/vm.sh deploy      user@VM_IP   # every release: upload .env + compose, pull, restart, health check
-deploy/vm.sh status      user@VM_IP
-deploy/vm.sh logs        user@VM_IP voice-api
+deploy/vm.sh setup       # once: Docker check, folder, DB + user, daily backups
+deploy/vm.sh migrate-db  # once, BEFORE the first deploy: copy Neon data
+deploy/vm.sh deploy      # every release: upload .env + compose, pull, restart, health check
+deploy/vm.sh status
+deploy/vm.sh logs voice-api
 ```
+
+The VM is `root@187.126.115.164` by default; for another login run
+`VM=ubuntu@187.126.115.164 deploy/vm.sh deploy`.
 
 `deploy` uploads `.env`, `.compose.env` and the compose file (chmod 600 on the VM),
 pulls the images CI built for `TAG`, restarts, and waits for `/api/health`. It refuses
@@ -56,6 +59,23 @@ for a non-default SSH port or key.
 
 What's still manual: the Cloudflare tunnel (§2), and, if the health check says
 the DB is unreachable, the two Postgres config lines `setup` prints.
+
+## What you see at https://voice.pikoruarealty.com
+
+Both pages ask for a login: **any username, password = `DASHBOARD_PASSWORD`** from `.env`.
+
+- **`/status`: service dashboard.** One row per dependency with the vendor's own
+  message: Database, Redis, OpenRouter (credit left), Sarvam (key + credits),
+  ElevenLabs (characters left), Deepgram, Exotel (account active). Green = OK,
+  amber = running low, red = down. Also shows calls in progress (of 2) and
+  whether the AI fallback switch is open. Refreshes every minute; "Check now" forces it.
+- **`/`: browser test call.** Talk to Maya from your browser, no phone needed.
+- Exotel's call stream, webhooks, the CRM and `/api/health` are not behind the
+  password.
+
+Sarvam has no balance API, so its row works by making a 2-character test
+synthesis (about ₹0.0006): "No credits available" shows up in red.
+Exotel's wallet balance isn't exposed either; check it in Exotel's dashboard.
 
 ## 1. Preflight (once, before installing anything)
 

@@ -149,6 +149,10 @@ export const envSchema = z
     // Folder of pre-recorded clips (clips.json + 8 kHz WAVs). Defaults to the
     // repo's assets/clips; a missing folder just means every line is live TTS.
     CLIPS_DIR: optionalNonEmpty,
+    // Password for the operator pages: / (browser test-call demo) and /status
+    // (service dashboard). HTTP Basic login — any username. Unset in production =
+    // those pages are disabled.
+    DASHBOARD_PASSWORD: optionalNonEmpty,
 
     // LLM · OpenRouter
     OPENROUTER_API_KEY: optionalNonEmpty,

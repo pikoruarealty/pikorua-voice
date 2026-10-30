@@ -58,6 +58,11 @@ export class ClipLibrary {
     this.logger.log(`Loaded ${count} clips (${this.takes.size} distinct lines) from ${dir}`);
   }
 
+  // Number of distinct recorded lines (for the status dashboard).
+  get lineCount(): number {
+    return this.takes.size;
+  }
+
   // Raw 8 kHz PCM for this line, or null to synthesize live. With several takes,
   // never returns the same take twice in a row.
   get(lang: string, text: string): Buffer | null {

@@ -1,19 +1,20 @@
 #!/usr/bin/env bash
 # Pikorua Voice → VM, from your own machine (Git Bash on Windows works).
 #
-#   deploy/vm.sh setup       user@vm-ip   # once: Docker check, folder, DB + user, backups
-#   deploy/vm.sh migrate-db  user@vm-ip   # once, before the first deploy: copy Neon → VM
-#   deploy/vm.sh deploy      user@vm-ip   # every release: upload config, pull images, restart
-#   deploy/vm.sh status      user@vm-ip
-#   deploy/vm.sh logs        user@vm-ip [service]
+#   deploy/vm.sh setup        # once: Docker check, folder, DB + user, backups
+#   deploy/vm.sh migrate-db   # once, before the first deploy: copy Neon → VM
+#   deploy/vm.sh deploy       # every release: upload config, pull images, restart
+#   deploy/vm.sh status
+#   deploy/vm.sh logs [service]
+# The VM defaults to root@187.126.115.164. Another login: VM=ubuntu@187.126.115.164 deploy/vm.sh …
 #
 # Reads the repo-root .env (app config) and .compose.env (image tag + tunnel token).
-# Optional env: SSH_OPTS="-p 2222 -i ~/.ssh/key", REMOTE_DIR (default /opt/pikorua-voice),
+# Optional env: VM, SSH_OPTS="-p 2222 -i ~/.ssh/key", REMOTE_DIR (default /opt/pikorua-voice),
 # GHCR_USER + GHCR_TOKEN (read:packages) to log the VM in to the private image registry.
 set -euo pipefail
 
 CMD="${1:-}"
-VM="${2:-${VM:-}}"
+VM="${VM:-root@187.126.115.164}"
 REMOTE_DIR="${REMOTE_DIR:-/opt/pikorua-voice}"
 SSH_OPTS="${SSH_OPTS:-}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -23,7 +24,7 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 say() { echo "==> $*"; }
 usage() { sed -n '2,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 1; }
 
-[[ -n "$CMD" && -n "$VM" ]] || usage
+[[ -n "$CMD" ]] || usage
 
 # shellcheck disable=SC2086
 remote() { ssh $SSH_OPTS "$VM" "$@"; }
@@ -118,7 +119,7 @@ Setup done. One manual step if the deploy health check later fails on the DB:
   postgresql.conf : listen_addresses = '*'   (5432 stays closed in the firewall)
   pg_hba.conf     : host  $DB_NAME  $DB_USER  172.16.0.0/12  scram-sha-256
   then            : sudo systemctl restart postgresql
-Next: deploy/vm.sh migrate-db $VM   (copies Neon data — before the first deploy)
+Next: deploy/vm.sh migrate-db   (copies Neon data — before the first deploy)
 EOF
 }
 
@@ -192,7 +193,7 @@ cmd_deploy() {
   if curl -fsS -m 10 "$public/api/health" >/dev/null 2>&1; then
     say "Public URL OK: $public"
   else
-    echo "WARN: $public/api/health not reachable yet — check the tunnel: deploy/vm.sh logs $VM voice-tunnel"
+    echo "WARN: $public/api/health not reachable yet — check the tunnel: deploy/vm.sh logs voice-tunnel"
   fi
   remote "docker image prune -f >/dev/null 2>&1" || true
   say "Deployed."
@@ -203,7 +204,7 @@ cmd_status() {
 }
 
 cmd_logs() {
-  remote "cd '$REMOTE_DIR' && $COMPOSE logs --tail 200 ${3:-}"
+  remote "cd '$REMOTE_DIR' && $COMPOSE logs --tail 200 ${2:-}"
 }
 
 case "$CMD" in

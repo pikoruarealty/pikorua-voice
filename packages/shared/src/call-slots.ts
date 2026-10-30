@@ -53,6 +53,14 @@ if redis.call('ZREM', KEYS[2], ARGV[1]) == 1 then redis.call('ZADD', KEYS[2], AR
 return 1
 `;
 
+// ARGV: now, staleMs. Reaps stale slots, returns {all, outbound} in use.
+const COUNT = `
+local cutoff = tonumber(ARGV[1]) - tonumber(ARGV[2])
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', cutoff)
+redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', cutoff)
+return { redis.call('ZCARD', KEYS[1]), redis.call('ZCARD', KEYS[2]) }
+`;
+
 export class CallSlots {
   constructor(
     private readonly redis: SlotRedis,
@@ -79,6 +87,18 @@ export class CallSlots {
       opts.force ? "1" : "0",
     );
     return Number(res) === 1;
+  }
+
+  async inUse(now = Date.now()): Promise<{ all: number; outbound: number }> {
+    const [all, outbound] = (await this.redis.eval(
+      COUNT,
+      2,
+      CALL_SLOTS_KEY,
+      CALL_SLOTS_OUTBOUND_KEY,
+      now,
+      CALL_SLOT_STALE_MS,
+    )) as [number, number];
+    return { all: Number(all), outbound: Number(outbound) };
   }
 
   async release(member: string): Promise<void> {

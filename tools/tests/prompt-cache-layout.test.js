@@ -48,6 +48,11 @@ const PRE_CHANGE_WORD_HASH = {
   "gu-IN-out": "2bad27bb2051bfb6120073fe7144bfc0425550946303177ef233bcc2a626fae7",
 };
 
+// The one rule added after the layout change (off-topic remarks get answered
+// instead of being treated as the reply to her pending question). The word check
+// below removes it, so it still proves nothing ELSE in the prompt changed.
+const OFF_TOPIC_RULE = /^- OFF-TOPIC REMARKS — CRITICAL:[^\n]*\n/m;
+
 const VARIANTS = ["hi-IN", "en-IN", "gu-IN"].flatMap((locale) => [
   [locale, false],
   [locale, true],
@@ -58,7 +63,12 @@ test("the cache layout changed no words of any prompt", async () => {
     const key = `${locale}-${isOutbound ? "out" : "in"}`;
     const prompt = await renderPrompt(locale, isOutbound);
     assert.equal(
-      wordHash(prompt.split(PROMPT_CACHE_SPLIT).join("\n")),
+      (prompt.match(new RegExp(OFF_TOPIC_RULE.source, "gm")) ?? []).length,
+      1,
+      `${key}: off-topic rule must appear exactly once`,
+    );
+    assert.equal(
+      wordHash(prompt.replace(OFF_TOPIC_RULE, "").split(PROMPT_CACHE_SPLIT).join("\n")),
       PRE_CHANGE_WORD_HASH[key],
       `${key}: the prompt's words differ from the pre-change prompt`,
     );

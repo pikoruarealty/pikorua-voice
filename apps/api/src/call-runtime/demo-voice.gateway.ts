@@ -179,11 +179,15 @@ export class DemoVoiceGateway implements OnGatewayConnection, OnGatewayDisconnec
     // Speculative generation: when the caller is speaking (no active turn) and
     // the partial looks complete enough, start the LLM now so it's 200-400ms
     // ahead when VAD fires. Cancel any prior speculative that no longer matches.
+    // Not with Sarvam STT: it sends the partial and the final together (once the
+    // caller stops), so the early start can never be ready in time and every
+    // sentence would pay for an AI request that is thrown away.
     if (
       state.streaming &&
       state.callId &&
       !state.active &&
       !state.speaking &&
+      this.sttRouter.provider() !== "sarvam" &&
       text.trim().split(/\s+/).length >= SPECULATIVE_MIN_WORDS
     ) {
       const normalised = text.trim().toLowerCase();

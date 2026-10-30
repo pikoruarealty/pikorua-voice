@@ -186,7 +186,7 @@ test("the per-call turn queue can never take the process down", () => {
   const marker = "state.queue = state.queue";
   const starts = [];
   for (let i = src.indexOf(marker); i !== -1; i = src.indexOf(marker, i + 1)) starts.push(i);
-  assert.equal(starts.length, 3, `expected 3 queue chains, found ${starts.length}`);
+  assert.equal(starts.length, 5, `expected 5 queue chains, found ${starts.length}`);
 
   starts.forEach((start, n) => {
     const end = n + 1 < starts.length ? starts[n + 1] : start + 2000;

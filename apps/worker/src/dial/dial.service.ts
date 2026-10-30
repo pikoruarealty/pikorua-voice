@@ -1,11 +1,15 @@
 import { Injectable, Logger, OnModuleDestroy } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
-import { Queue, Worker, Job } from "bullmq";
+import { Queue, Worker, Job, DelayedError } from "bullmq";
 import { Redis } from "ioredis";
 import axios from "axios";
 import { CampaignRepository, CampaignTargetRepository, CallRepository } from "@pikorua/db";
 import type { NewCall } from "@pikorua/db";
+import { CallSlots } from "@pikorua/shared";
 import { nextDialWindowAt } from "./dial-window";
+
+// While every call slot is busy, a dial job is pushed back this long and retried.
+const SLOT_RETRY_DELAY_MS = 20_000;
 
 @Injectable()
 export class DialService implements OnModuleDestroy {
@@ -14,6 +18,7 @@ export class DialService implements OnModuleDestroy {
   private worker: Worker<Record<string, unknown>> | null = null;
   private queueRedis: Redis | null = null;
   private workerRedis: Redis | null = null;
+  private slots: CallSlots | null = null;
 
   constructor(
     private readonly config: ConfigService,
@@ -35,6 +40,12 @@ export class DialService implements OnModuleDestroy {
     this.queueRedis = new Redis(redisUrl, { maxRetriesPerRequest: null });
     this.workerRedis = new Redis(redisUrl, { maxRetriesPerRequest: null });
 
+    this.slots = new CallSlots(
+      this.queueRedis,
+      Number(this.config.get("MAX_CONCURRENT_CALLS") ?? 2),
+      Number(this.config.get("OUTBOUND_MAX_CONCURRENT") ?? 1),
+    );
+
     this.queue = new Queue("dial", { connection: this.queueRedis });
     // A Queue emits 'error' too; without a listener it would crash the process.
     this.queue.on("error", (err: Error) => {
@@ -43,8 +54,8 @@ export class DialService implements OnModuleDestroy {
 
     this.worker = new Worker<Record<string, unknown>>(
       "dial",
-      async (job: Job<Record<string, unknown>>) => {
-        await this.processJob(job.data);
+      async (job: Job<Record<string, unknown>>, token?: string) => {
+        await this.processJob(job, token);
       },
       { connection: this.workerRedis },
     );
@@ -67,7 +78,8 @@ export class DialService implements OnModuleDestroy {
     await this.queue.add("dial-target", { targetId }, { jobId: `dial:${targetId}` });
   }
 
-  private async processJob(data: Record<string, unknown>) {
+  private async processJob(job: Job<Record<string, unknown>>, jobToken?: string) {
+    const data = job.data;
     const targetId = String(data["targetId"] ?? "");
     if (!targetId) {
       this.logger.warn("Dial job missing targetId");
@@ -100,6 +112,18 @@ export class DialService implements OnModuleDestroy {
       return;
     }
 
+    // Call-slot gate: reserve a slot BEFORE dialing, so a campaign can never run
+    // more calls at once than the box can carry. All busy → retry the same job
+    // later (nothing is lost, the target stays pending). The slot is renamed to
+    // the callId below; the gateway heartbeats it once answered, and a terminal
+    // status webhook (or the stale reap) frees it.
+    const slotMember = `dial:${target.id}`;
+    if (this.slots && !(await this.slots.acquire(slotMember, "outbound"))) {
+      this.logger.log(`All call slots busy — retrying target ${target.id} in ${SLOT_RETRY_DELAY_MS}ms`);
+      await job.moveToDelayed(Date.now() + SLOT_RETRY_DELAY_MS, jobToken);
+      throw new DelayedError();
+    }
+
     const attempts = (target.attempts ?? 0) + 1;
     await this.targetRepo.updateDialStatus(target.id, "dialing", {
       attempts,
@@ -118,6 +142,7 @@ export class DialService implements OnModuleDestroy {
 
     const call = await this.callRepo.create(newCall);
     this.logger.log(`Created call ${call.id} for target ${target.id}`);
+    await this.slots?.rename(slotMember, call.id);
 
     const sid = this.config.get("EXOTEL_SID");
     const key = this.config.get("EXOTEL_API_KEY");
@@ -198,6 +223,7 @@ export class DialService implements OnModuleDestroy {
           status: "failed",
           error: exotelMsg ? String(exotelMsg) : String(err),
         });
+        await this.slots?.release(call.id);
         await this.targetRepo.updateDialStatus(
           target.id,
           attempts >= (target.maxAttempts ?? 3) ? "exhausted" : "failed",
@@ -205,6 +231,7 @@ export class DialService implements OnModuleDestroy {
       }
     } else {
       this.logger.warn("Exotel not configured; leaving call queued without provider dispatch");
+      await this.slots?.release(call.id);
       await this.targetRepo.updateDialStatus(target.id, "queued");
     }
   }

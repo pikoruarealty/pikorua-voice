@@ -34,6 +34,11 @@ export const workerEnvSchema = z
     EXOTEL_WEBHOOK_SECRET: optionalNonEmpty,
     PUBLIC_BASE_URL: z.string().url().default("http://localhost:4100"),
 
+    // Call-slot gate (shared with the API via Redis). A dial waits while all
+    // slots are busy. Must match the API's values.
+    MAX_CONCURRENT_CALLS: z.coerce.number().int().positive().default(2),
+    OUTBOUND_MAX_CONCURRENT: z.coerce.number().int().positive().default(1),
+
     // Keep-alive self-ping (see KeepAliveScheduler). Manual on/off switch,
     // defaults OFF. Set WORKER_KEEPALIVE_ENABLED=true + WORKER_PUBLIC_URL to this
     // worker's own Render URL to stop the free-tier instance idling out. Kept as

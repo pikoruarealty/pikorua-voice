@@ -79,16 +79,24 @@ test("outbound calls never ask for the name or the know-them questions", async (
 
 test("outbound prompts carry the known lead name into the confirmation", async () => {
   for (const [mode, locale] of LOCALES) {
+    // The name note lives in the per-call tail (after PROMPT_CACHE_SPLIT, see
+    // prompt-cache-layout.test.js) so step 6 itself stays identical for every call.
+    const { PROMPT_CACHE_SPLIT } = require("../../apps/api/dist/llm/prompt-cache");
     const withName = await renderPrompt(locale, { isOutbound: true, fullName: "Rahul Shah" });
+    const tail = withName.split(PROMPT_CACHE_SPLIT)[1];
+    assert.match(
+      tail,
+      /— Rahul Shah — /,
+      `${mode}: the call tail should hand Maya the name she already has`,
+    );
     assert.ok(
-      /Rahul Shah/.test(withName.match(/^6\. NAME[^\n]*/m)[0]),
-      `${mode}: step 6 should hand Maya the name she already has`,
+      !/Rahul Shah/.test(withName.match(/^6\. NAME[^\n]*/m)[0]),
+      `${mode}: step 6 must stay per-call-free so it caches across calls`,
     );
 
     // No name on file: confirm without one, and still never ask.
     const noName = await renderPrompt(locale, { isOutbound: true, fullName: null });
-    const step6 = noName.match(/^6\. NAME[^\n]*/m)[0];
-    assert.ok(!/Rahul Shah/.test(step6), `${mode}: no name should be invented`);
+    assert.ok(!/Rahul Shah/.test(noName), `${mode}: no name should be invented`);
     assert.match(noName, SKIP_NAME, `${mode}: still the SKIP variant without a name`);
   }
 });

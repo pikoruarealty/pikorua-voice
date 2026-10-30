@@ -1,4 +1,4 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable, Logger, Optional } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import {
   ElevenlabsService,
@@ -6,8 +6,11 @@ import {
   type StreamSynthesisResult,
 } from "./elevenlabs.service";
 import { SarvamService } from "./sarvam.service";
+import { ClipLibrary } from "./clip-library";
 
-// Routes TTS by language: Gujarati → Sarvam, everything else → ElevenLabs.
+// Routes TTS: every language → Sarvam (one voice for all three; Hindi/English
+// can be moved back with TTS_PROVIDER_HI=elevenlabs). ElevenLabs is the
+// automatic fallback whenever Sarvam fails or isn't configured.
 //
 // WHY THIS EXISTS: ElevenLabs cannot speak Gujarati in a realtime call (see the
 // header of sarvam.service.ts). One vendor cannot serve all three languages, so
@@ -53,7 +56,18 @@ export class TtsRouter {
     private readonly elevenlabs: ElevenlabsService,
     private readonly sarvam: SarvamService,
     private readonly config: ConfigService,
+    @Optional() private readonly clips?: ClipLibrary,
   ) {}
+
+  // A pre-recorded take of this exact line (assets/clips), or null to synthesize.
+  // Only for telephony audio (the clips are 8 kHz PCM) and only while Sarvam is
+  // this request's voice — the clips are in the Sarvam voice, so while ElevenLabs
+  // is speaking (rollback or Sarvam breaker) they'd splice two voices into a call.
+  storedClip(text: string, opts?: SynthesizeOptions): Buffer | null {
+    if (opts?.outputFormat !== "pcm_8000") return null;
+    const sOpts = this.sarvamOpts(opts);
+    return sOpts ? (this.clips?.get(String(sOpts.languageCode), text) ?? null) : null;
+  }
 
   // Record that Sarvam failed for real, at request time. Idempotent within a window
   // so a burst of failures on one turn logs once, not once per sentence.
@@ -62,8 +76,9 @@ export class TtsRouter {
     this.sarvamUnhealthyUntil = Date.now() + SARVAM_BREAKER_MS;
     if (alreadyOpen) return;
     this.logger.warn(
-      `Sarvam TTS failed (${reason}) — Gujarati falls back to the Hindi persona for ` +
-        `${Math.round(SARVAM_BREAKER_MS / 60000)} min. Callers hear Hindi instead of silence.`,
+      `Sarvam TTS failed (${reason}) — for ${Math.round(SARVAM_BREAKER_MS / 60000)} min ` +
+        `Gujarati falls back to the Hindi persona and Hindi/English to ElevenLabs. ` +
+        `Callers hear a working voice instead of silence.`,
     );
   }
 
@@ -85,13 +100,32 @@ export class TtsRouter {
     return true;
   }
 
-  // A request is Gujarati only if the resolved language code says so. The code is
-  // set by ttsLanguageCode()/replyLanguageCode() in the call runtime, which pick
-  // it from the REPLY's script — so if Maya answers a gu-IN call in English
-  // (because the caller switched), this correctly stays on ElevenLabs.
-  private isGujarati(opts?: SynthesizeOptions): boolean {
-    const code = String(opts?.languageCode ?? "");
-    return code.toLowerCase().startsWith("gu") && this.isGujaratiEnabled();
+  // Hindi/English on Sarvam: TTS_PROVIDER_HI=sarvam (the default), and only while
+  // Sarvam is configured and healthy (same breaker as Gujarati).
+  private hiEnOnSarvam(): boolean {
+    return (
+      (this.config.get("TTS_PROVIDER_HI") ?? "sarvam") === "sarvam" &&
+      this.config.get("SARVAM_TTS_ENABLED") !== false &&
+      Date.now() >= this.sarvamUnhealthyUntil &&
+      this.sarvam.isConfigured()
+    );
+  }
+
+  // The request's options for Sarvam (with an explicit gu/hi/en languageCode), or
+  // null when it goes to ElevenLabs. The code is set by ttsLanguageCode() /
+  // replyLanguageCode() in the call runtime from the REPLY's script — undefined
+  // means Hindi, as it does for ElevenLabs (ELEVENLABS_LANGUAGE_CODE).
+  private sarvamOpts<T extends SynthesizeOptions>(opts?: T): T | null {
+    const code = String(opts?.languageCode ?? "").toLowerCase();
+    let languageCode: string;
+    if (code.startsWith("gu")) {
+      if (!this.isGujaratiEnabled()) return null;
+      languageCode = "gu";
+    } else {
+      if (!this.hiEnOnSarvam()) return null;
+      languageCode = code.startsWith("en") ? "en" : "hi";
+    }
+    return { ...opts, languageCode } as T;
   }
 
   // Every Sarvam path funnels failures through the breaker and then RETRIES ON
@@ -99,9 +133,12 @@ export class TtsRouter {
   // than losing it. Subsequent turns skip Sarvam entirely (isGujaratiEnabled is
   // false while the breaker is open), so the persona and voice agree again.
   async synthesize(text: string, opts?: SynthesizeOptions): Promise<{ audio: Buffer; ttsMs: number }> {
-    if (!this.isGujarati(opts)) return this.elevenlabs.synthesize(text, opts);
+    const stored = this.storedClip(text, opts);
+    if (stored) return { audio: stored, ttsMs: 0 };
+    const sOpts = this.sarvamOpts(opts);
+    if (!sOpts) return this.elevenlabs.synthesize(text, opts);
     try {
-      return await this.sarvam.synthesize(text, opts);
+      return await this.sarvam.synthesize(text, sOpts);
     } catch (err) {
       this.noteSarvamFailure(String(err));
       return this.elevenlabs.synthesize(text, opts);
@@ -112,9 +149,15 @@ export class TtsRouter {
     text: string,
     opts: SynthesizeOptions & { signal?: AbortSignal; onChunk: (chunk: Buffer) => void },
   ): Promise<StreamSynthesisResult> {
-    if (!this.isGujarati(opts)) return this.elevenlabs.synthesizeStream(text, opts);
+    const stored = this.storedClip(text, opts);
+    if (stored) {
+      if (!opts.signal?.aborted) opts.onChunk(stored);
+      return { ttsMs: 0, ttfbMs: 0, bytes: stored.length };
+    }
+    const sOpts = this.sarvamOpts(opts);
+    if (!sOpts) return this.elevenlabs.synthesizeStream(text, opts);
     try {
-      return await this.sarvam.synthesizeStream(text, opts);
+      return await this.sarvam.synthesizeStream(text, sOpts);
     } catch (err) {
       this.noteSarvamFailure(String(err));
       return this.elevenlabs.synthesizeStream(text, opts);
@@ -128,9 +171,12 @@ export class TtsRouter {
   // rejects precisely when it matters, because the vendor being down is the whole
   // reason we are in that catch. Returning null lets the loop try the next line.
   async getClip(text: string, opts?: SynthesizeOptions): Promise<Buffer | null> {
-    if (this.isGujarati(opts)) {
+    const stored = this.storedClip(text, opts);
+    if (stored) return stored;
+    const sOpts = this.sarvamOpts(opts);
+    if (sOpts) {
       try {
-        return await this.sarvam.getClip(text, opts);
+        return await this.sarvam.getClip(text, sOpts);
       } catch (err) {
         this.noteSarvamFailure(String(err));
         // fall through to ElevenLabs
@@ -147,8 +193,9 @@ export class TtsRouter {
   // and the caller does not await it.
   prewarmClips(texts: string[], opts?: SynthesizeOptions) {
     try {
-      if (this.isGujarati(opts)) {
-        this.sarvam.prewarmClips(texts, opts);
+      const sOpts = this.sarvamOpts(opts);
+      if (sOpts) {
+        this.sarvam.prewarmClips(texts, sOpts);
         return;
       }
       this.elevenlabs.prewarmClips(texts, opts);
@@ -170,7 +217,8 @@ export class TtsRouter {
       signal?: AbortSignal;
     },
   ): { sendText: (text: string) => void; flush: () => void; close: () => void } {
-    if (!this.isGujarati(opts)) return this.elevenlabs.openWsSession(opts);
+    const sOpts = this.sarvamOpts(opts);
+    if (!sOpts) return this.elevenlabs.openWsSession(opts);
 
     // Gujarati WS turn. This is the path that went silent in production: Sarvam
     // reported "No credits available.", onError only logged, and the turn emitted no
@@ -199,7 +247,7 @@ export class TtsRouter {
     let sarvamLive = true;
 
     const sarvamSession = this.sarvam.openWsSession({
-      ...opts,
+      ...sOpts,
       onChunk: (chunk) => {
         if (!sarvamLive) return;
         gotChunk = true;

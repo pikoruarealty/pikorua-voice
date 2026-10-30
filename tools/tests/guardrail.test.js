@@ -75,6 +75,38 @@ test("hard guardrail does NOT flag Maya's legitimate spoken budget tiers", () =>
   assert.equal(tiers.rule, null);
 });
 
+test("hard guardrail catches a price spoken without a ₹ sign", () => {
+  const { GuardrailService } = require("../../apps/api/dist/llm/guardrail.service");
+  const svc = new GuardrailService({ get: () => undefined });
+
+  const leaks = [
+    "इस project की कीमत लगभग 4.5 करोड़ है।",
+    "Sindhu Bhavan Road पर 4 BHK 3 करोड़ से start होता है।",
+    "The 5 BHK is starting at 6.5 Cr.",
+    "Price is around 3+ crore for the 4 BHK.",
+    "આ project ની કિંમત 4 કરોડ છે.",
+    "It's about Rs 3 Cr.",
+    "That one is INR 4.5 crore.",
+    "5 Cr onwards for the larger units.",
+  ];
+  for (const text of leaks) {
+    const hit = svc.checkHard(text);
+    assert.equal(hit.triggered, true, `must block: ${text}`);
+    assert.ok(hit.replacement, `a safe deflection must replace: ${text}`);
+  }
+
+  // Legitimate budget questions must stay clean.
+  const clean = [
+    "आपका budget लगभग कितना है — 3 करोड़, 5 करोड़, या उससे ऊपर?",
+    "Would 3 Cr, 5 Cr or above be comfortable for you?",
+    "તમારું budget આશરે કેટલું છે — 3 કરોડ, 5 કરોડ કે તેથી વધુ?",
+    "I'm not able to share pricing — our expert team will share all the details.",
+  ];
+  for (const text of clean) {
+    assert.equal(svc.checkHard(text).triggered, false, `must NOT block: ${text}`);
+  }
+});
+
 test("hard guardrail passes clean concierge response", () => {
   const { GuardrailService } = require("../../apps/api/dist/llm/guardrail.service");
   const svc = new GuardrailService({ get: () => undefined });

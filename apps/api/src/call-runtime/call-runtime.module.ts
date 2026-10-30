@@ -1,12 +1,15 @@
 import { Module } from "@nestjs/common";
 import { DeepgramService } from "../stt/deepgram.service";
 import { DeepgramLiveService } from "../stt/deepgram-live.service";
+import { SarvamSttService } from "../stt/sarvam-stt.service";
+import { SttRouter } from "../stt/stt-router";
 import { DemoVoiceGateway } from "./demo-voice.gateway";
 import { ExotelVoicebotGateway } from "./exotel-voicebot.gateway";
 import { LlmService } from "../llm/llm.service";
 import { ElevenlabsService } from "../tts/elevenlabs.service";
 import { SarvamService } from "../tts/sarvam.service";
 import { TtsRouter } from "../tts/tts-router";
+import { ClipLibrary } from "../tts/clip-library";
 import { CallRuntimeService } from "./call-runtime.service";
 import {
   CallTurnRepository,
@@ -24,6 +27,8 @@ import { PostCallQueueService } from "../postcall/postcall.queue";
   providers: [
     DeepgramService,
     DeepgramLiveService,
+    SarvamSttService,
+    SttRouter,
     DemoVoiceGateway,
     ExotelVoicebotGateway,
     LlmService,
@@ -33,6 +38,7 @@ import { PostCallQueueService } from "../postcall/postcall.queue";
     ElevenlabsService,
     SarvamService,
     TtsRouter,
+    ClipLibrary,
     GuardrailService,
     {
       provide: CallTurnRepository,

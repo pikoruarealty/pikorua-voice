@@ -80,6 +80,14 @@ export const envSchema = z
     TURN_TIMEOUT_MS: z.coerce.number().int().positive().default(12000),
     // Hard cap on call length (0 disables). Default 3 minutes.
     CALL_MAX_DURATION_MS: z.coerce.number().int().nonnegative().default(180000),
+    // Call-slot gate (shared with the worker via Redis): at most this many calls
+    // at once, of which at most OUTBOUND_MAX_CONCURRENT outbound — the rest stays
+    // free for inbound callers. Must match the worker's values.
+    MAX_CONCURRENT_CALLS: z.coerce.number().int().positive().default(2),
+    OUTBOUND_MAX_CONCURRENT: z.coerce.number().int().positive().default(1),
+    // On SIGTERM, how long to wait for live calls to finish before exiting. Keep it
+    // under the platform's stop grace (docker stop_grace_period 240s).
+    DRAIN_TIMEOUT_MS: z.coerce.number().int().nonnegative().default(230000),
     // Consecutive silent/noise turns (within a 45s window) before we assume the
     // line is dead and hang up. Default 3 — lower values risk dropping a prospect
     // who merely paused twice on a noisy line.
@@ -105,18 +113,20 @@ export const envSchema = z
     // pre-existing behaviour. Gujarati is opt-in, and a missing key must not
     // block a boot that only serves hi/en.
     SARVAM_API_KEY: optionalNonEmpty,
-    SARVAM_MODEL: z.string().default("bulbul:v3"),
-    // Maya's Gujarati voice: "simran" (chosen by ear against Gargi's Hindi
-    // register). bulbul:v3 females: ritu, priya, neha, pooja, simran, kavya,
-    // ishita, shreya, roopa, tanya. Re-audition with
-    // `node tools/staging/sarvam-tts-smoke.js --audition`. ("anushka" is a v2
-    // voice and is rejected by v3.)
-    SARVAM_SPEAKER: z.string().default("simran"),
-    // 1.15 was chosen by ear (slightly brisker than the 1.0 baseline, which
-    // dragged on longer sentences). Lower = slower (0.8 drags). Range 0.5–2.0.
-    // Keep this in step with SARVAM_PACE in .env — the tuned value must survive a
-    // deploy that never sets the variable.
-    SARVAM_PACE: z.coerce.number().min(0.5).max(2).default(1.15),
+    // Maya's voice in every language: Sarvam's "Aparna" on bulbul:v4-flash, chosen
+    // by ear. v4 speaker IDs are per language + style, so each language names its
+    // own; the Hindi Aparna also speaks Gujarati well (there is no Gujarati
+    // Aparna). These replace the old SARVAM_MODEL / SARVAM_SPEAKER (bulbul:v3 +
+    // "simran"), which are no longer read — new names so a stale value left in an
+    // environment can't silently pin the old voice.
+    SARVAM_TTS_MODEL: z.string().default("bulbul:v4-flash"),
+    SARVAM_SPEAKER_HI: z.string().default("aparna_hi_customer"),
+    SARVAM_SPEAKER_EN: z.string().default("aparna_en_companion"),
+    SARVAM_SPEAKER_GU: z.string().default("aparna_hi_customer"),
+    // 1.0 (natural speed) chosen by ear for the Aparna voice. Lower = slower.
+    // Range 0.5–2.0. Keep this in step with SARVAM_PACE in .env — the tuned value
+    // must survive a deploy that never sets the variable.
+    SARVAM_PACE: z.coerce.number().min(0.5).max(2).default(1),
     // temperature = bulbul:v3's expressiveness knob (replaced v2 pitch/loudness).
     // 0 sounded robotic in call testing; 0.7 was chosen by ear as the most human.
     // Raise toward ~0.9 for livelier intonation, lower for flatter/steadier.
@@ -127,6 +137,18 @@ export const envSchema = z
     // Kill switch for the whole Gujarati persona, independent of the key being
     // present. Set false to force gu-IN back to Hindi without unsetting the key.
     SARVAM_TTS_ENABLED: booleanFlag.default(true),
+    // Hindi/English voice. "sarvam" (default) = Bulbul with the same speaker as
+    // Gujarati (≈ half the TTS cost of ElevenLabs); ElevenLabs stays the automatic
+    // fallback whenever Sarvam errors. Set "elevenlabs" to roll back instantly.
+    TTS_PROVIDER_HI: z.enum(["elevenlabs", "sarvam"]).default("sarvam"),
+    // Live speech-to-text. "sarvam" (default) is cheaper; Deepgram stays the
+    // automatic mid-call fallback, so DEEPGRAM_API_KEY should remain set either way.
+    // Set "deepgram" to roll back instantly.
+    STT_PROVIDER: z.enum(["deepgram", "sarvam"]).default("sarvam"),
+    SARVAM_STT_MODEL: z.string().default("saaras:v4"),
+    // Folder of pre-recorded clips (clips.json + 8 kHz WAVs). Defaults to the
+    // repo's assets/clips; a missing folder just means every line is live TTS.
+    CLIPS_DIR: optionalNonEmpty,
 
     // LLM · OpenRouter
     OPENROUTER_API_KEY: optionalNonEmpty,

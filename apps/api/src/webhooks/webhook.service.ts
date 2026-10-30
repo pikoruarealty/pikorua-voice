@@ -12,6 +12,8 @@ import { PostCallQueueService } from "../postcall/postcall.queue";
 import { IvrService } from "../ivr/ivr.service";
 import { CallRuntimeService } from "../call-runtime/call-runtime.service";
 import type { ExotelWebhookDto } from "./exotel.dto";
+import type { CallSlots } from "@pikorua/shared";
+import { CALL_SLOTS } from "../redis/redis.module";
 
 @Injectable()
 export class WebhookService {
@@ -26,6 +28,7 @@ export class WebhookService {
     private readonly postcallQueue: PostCallQueueService,
     private readonly ivr: IvrService,
     @Optional() private readonly callRuntime: CallRuntimeService | null,
+    @Optional() @Inject(CALL_SLOTS) private readonly slots: CallSlots | null,
   ) {}
 
   verifySignature(secret: string | undefined, rawBody: string, headerSig?: string | null) {
@@ -184,6 +187,10 @@ export class WebhookService {
             if (terminal) {
               // Release in-memory conversation history for this call.
               this.callRuntime?.clearHistory(call.id);
+              // Free the call slot the dial worker reserved. This is the only
+              // release for a dial that never connects (no-answer / busy), since
+              // the voicebot stream never starts. Idempotent with the gateway's.
+              await this.slots?.release(call.id).catch(() => undefined);
             }
             if (status === "completed") {
               try {

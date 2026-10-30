@@ -197,12 +197,11 @@ test("the Sarvam pace default matches between the env schema and the service", (
   );
 });
 
-// The Gujarati greeting streams through the SAME turn-level WS session the live
-// turns use, and is synthesized FRESH every call. This is deliberate: Sarvam's
-// temperature gives each synthesis natural variation, so the opening sounds spoken.
-// Caching the audio and replaying one frozen take made every call identical, which
-// read as "robotic" — so the greeting must NOT be served from a stored buffer.
-test("the Gujarati greeting streams fresh through the turn-level WS session", () => {
+// With no pre-recorded take, the Gujarati greeting streams through the SAME
+// turn-level WS session the live turns use. (Pre-recorded greetings ROTATE between
+// several distinct takes — clip-library.test.js — because replaying ONE frozen
+// take on every call read as "robotic".)
+test("the live Gujarati greeting streams through the turn-level WS session", () => {
   const region = greetingStreamRegion(read(RUNTIME));
 
   // gu takes the openWsSession path (one coherent synthesis, ~200ms first audio).
@@ -214,22 +213,29 @@ test("the Gujarati greeting streams fresh through the turn-level WS session", ()
   assert.match(region, /session\.sendText\(reply\)/, "the whole greeting is sent as one text frame");
   assert.match(region, /session\.flush\(\)/, "flush finalises the synthesis so it doesn't stall");
 
-  // No frozen-take cache: the greeting is never served from a stored audio buffer.
-  assert.ok(
-    !/greetingAudioCache/.test(region),
-    "the greeting must be synthesized fresh, not replayed from a cached buffer " +
-      "(a frozen take reads as robotic)",
-  );
+  // Stored greetings come only from the rotating ClipLibrary, never a single cached buffer.
+  assert.ok(!/greetingAudioCache/.test(region), "no single frozen-take greeting cache");
+  assert.match(region, /this\.tts\.storedClip\(reply,/, "pre-recorded takes come from the clip library");
 });
 
 // Outbound Exotel calls bridge the callee's media leg a beat after the voicebot
-// `start`, so Maya's greeting is held until the callee is fully connected. 5s was
-// measured as enough on real calls (10s left too much dead air before the intro).
-test("outbound greeting hold defaults to 5s", () => {
+// `start`, so Maya's greeting is held until the callee is connected. The hold ends
+// as soon as the callee is heard ("hello?"), and is capped at 3s — every held
+// second is billed dead air (5s used to be a fixed wait on every call).
+test("outbound greeting hold is capped at 3s and ends early when the callee speaks", () => {
   const src = read(GATEWAY);
   const m = src.match(/OUTBOUND_GREETING_DELAY_MS[\s\S]*?:\s*(\d+);/);
   assert.ok(m, "OUTBOUND_GREETING_DELAY_MS must have a numeric fallback");
-  assert.equal(Number(m[1]), 5000, "outbound greeting hold should default to 5000ms");
+  assert.equal(Number(m[1]), 3000, "outbound greeting hold should default to 3000ms");
+
+  const media = src.slice(src.indexOf('case "media"'), src.indexOf('case "dtmf"'));
+  assert.match(media, /state\.greetingStart/, "media during the hold must be able to end it");
+  assert.match(media, /this\.updateNearEnd\(/, "only near-end speech (not silence) ends the hold");
+  assert.match(
+    src,
+    /state\.greetingStart\s*=\s*null/,
+    "clearing the hold must also disarm the early start",
+  );
 });
 
 // Exotel's voicebot stream call_sid frequently differs from the Sid returned by

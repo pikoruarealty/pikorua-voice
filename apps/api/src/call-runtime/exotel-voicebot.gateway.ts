@@ -3,13 +3,15 @@ import { WebSocket, RawData } from "ws";
 import { Injectable, Inject, Logger } from "@nestjs/common";
 import type { IncomingMessage } from "http";
 import { type LiveSession } from "../stt/deepgram-live.service";
-import { DeepgramLiveService } from "../stt/deepgram-live.service";
+import { SttRouter } from "../stt/stt-router";
 import { TtsRouter } from "../tts/tts-router";
 import { CallRuntimeService, isNoisyTranscript } from "./call-runtime.service";
 import { CallRepository, type NewCall } from "@pikorua/db";
 import { PostCallQueueService } from "../postcall/postcall.queue";
 import { WorkerWaker } from "../worker-waker/worker-waker.service";
 import { pickByLangMode } from "../i18n/lang-mode";
+import { CALL_SLOT_HEARTBEAT_MS, type CallSlots, type SlotKind } from "@pikorua/shared";
+import { CALL_SLOTS } from "../redis/redis.module";
 
 // Exotel's Voicebot WebSocket carries raw 16-bit linear PCM, 8 kHz, mono,
 // little-endian (slin/s16le) in BOTH directions — confirmed against Exotel's
@@ -26,6 +28,9 @@ const EXOTEL_SAMPLE_RATE = 8000;
 // padding the final flush with silence (zeros) up to a 320-byte boundary.
 const EXOTEL_FRAME_BYTES = 3200; // 100 ms
 const EXOTEL_FRAME_ALIGN = 320; // 20 ms — Exotel's required multiple
+// The FIRST frame of each reply is only 40 ms, so Maya's first audio leaves ~60 ms
+// sooner instead of waiting for a full 100 ms frame to fill. Still 320-aligned.
+const EXOTEL_FIRST_FRAME_BYTES = 1280;
 
 // One 3200-byte frame is 100 ms of audio. Exotel plays media in real time with
 // a small jitter buffer, so frames must be delivered at ~real-time pace — a
@@ -46,14 +51,41 @@ const EXOTEL_HANGUP_GRACE_MS = 9000;
 // Outbound calls: Exotel bridges the callee's media leg a beat AFTER the Voicebot
 // WebSocket `start` fires, so greeting audio sent in that gap is dropped before
 // the callee's path is up — the caller then hears only the tail of Maya's intro.
-// Hold the opening greeting (and STT) this long on outbound calls so the callee
-// is fully connected before Maya speaks and the whole intro is heard. Inbound
-// calls (the caller is already on the line) are never held. Override with
+// Hold the opening greeting (and STT) on outbound calls so the callee is fully
+// connected before Maya speaks and the whole intro is heard. The hold ends EARLY
+// the moment the callee is heard (their "hello?" — near-end speech on the inbound
+// leg proves the media path is up), and at the latest after this many ms. Every
+// held second is billed dead air, so the cap is short. Inbound calls (the caller
+// is already on the line) are never held. Override with
 // OUTBOUND_GREETING_DELAY_MS; set 0 to disable the hold.
 const OUTBOUND_GREETING_DELAY_MS = (() => {
   const n = Number(process.env.OUTBOUND_GREETING_DELAY_MS);
-  return Number.isFinite(n) && n >= 0 ? n : 5000;
+  return Number.isFinite(n) && n >= 0 ? n : 3000;
 })();
+
+// A mid-thought fragment ("मुझे 4 BHK चाहिए और…") is held for the caller to
+// finish. If they say nothing more for this long, Maya answers what she has —
+// before this there was no limit, and a caller who had actually finished sat in
+// dead air until the 45 s inactivity check-in. 0 disables (wait indefinitely).
+const FRAGMENT_WAIT_MS = msFromEnv(process.env.STT_FRAGMENT_WAIT_MS, 800);
+
+// If the reply's first audio hasn't started this long after a turn begins (slow
+// LLM), play a short pre-recorded filler ("जी।") so the line is never silent for
+// longer than this. Only from recorded clips — a live-TTS filler would itself be
+// slow. 0 disables.
+const TURN_FILLER_DELAY_MS = msFromEnv(process.env.TURN_FILLER_DELAY_MS, 600);
+// Exact texts of the recorded fillers in assets/clips (clip-library matches text).
+export const TURN_FILLERS = {
+  hi: ["जी।", "हम्म, समझ गई।", "ठीक है।"],
+  gu: ["જી.", "હમ્મ, સમજી ગઈ.", "બરાબર."],
+  en: ["Sure.", "Hmm, I see.", "Alright."],
+} as const;
+
+// Non-negative ms from env (0 is a valid "off"); anything else → the fallback.
+function msFromEnv(raw: string | undefined, fallback: number): number {
+  const n = Number(raw);
+  return raw !== undefined && raw !== "" && Number.isFinite(n) && n >= 0 ? n : fallback;
+}
 
 // If the client says nothing for this long, Maya asks if they're still there.
 const INACTIVITY_TIMEOUT_MS = 45_000;
@@ -290,17 +322,19 @@ class InboundAgc {
   }
 }
 
-class PcmReframer {
+export class PcmReframer {
   private buf: Buffer = Buffer.alloc(0);
+  private frameBytes = EXOTEL_FIRST_FRAME_BYTES;
 
   constructor(private readonly emit: (frame: Buffer) => void) {}
 
   push(chunk: Buffer) {
     if (chunk.length === 0) return;
     this.buf = this.buf.length ? Buffer.concat([this.buf, chunk]) : chunk;
-    while (this.buf.length >= EXOTEL_FRAME_BYTES) {
-      this.emit(this.buf.subarray(0, EXOTEL_FRAME_BYTES));
-      this.buf = this.buf.subarray(EXOTEL_FRAME_BYTES);
+    while (this.buf.length >= this.frameBytes) {
+      this.emit(this.buf.subarray(0, this.frameBytes));
+      this.buf = this.buf.subarray(this.frameBytes);
+      this.frameBytes = EXOTEL_FRAME_BYTES;
     }
   }
 
@@ -341,7 +375,12 @@ class PacedSender {
         return;
       }
       this.send(frame);
-      this.timer = setTimeout(next, EXOTEL_FRAME_PACING_MS);
+      // Pace by the frame's own duration (the first frame is 40 ms, the final
+      // flush is short), keeping the same ~10% lead as a full 100 ms frame.
+      this.timer = setTimeout(
+        next,
+        Math.max(1, Math.round((EXOTEL_FRAME_PACING_MS * frame.length) / EXOTEL_FRAME_BYTES)),
+      );
     };
     next(); // first frame immediately, then paced
   }
@@ -419,6 +458,17 @@ type SessionState = {
   // Pending outbound greeting-hold timer, so a callee who rejects/hangs up during
   // the hold cancels it instead of being greeted into a dead stream.
   greetingTimer: ReturnType<typeof setTimeout> | null;
+  // Starts the held greeting immediately (set only while the hold is pending), so
+  // the callee's first "hello?" can end the hold early.
+  greetingStart: (() => void) | null;
+  // Call-slot heartbeat (keeps this call's slot from being reaped as stale).
+  slotHeartbeat: ReturnType<typeof setInterval> | null;
+  // True once this session holds a call slot, so disconnect releases it.
+  holdsSlot: boolean;
+  // Pending release of a held mid-thought fragment (see FRAGMENT_WAIT_MS).
+  fragmentTimer: ReturnType<typeof setTimeout> | null;
+  // Index of the last filler played, so two turns in a row never use the same one.
+  lastFiller: number;
   // Guards finalizeCall so post-call is enqueued at most once per session.
   finalized: boolean;
   // Wall-clock start, for a best-effort durationSeconds on gateway-owned calls.
@@ -443,15 +493,36 @@ type SessionState = {
 export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisconnect {
   private readonly logger = new Logger("ExotelVoicebotGateway");
   private readonly sessions = new Map<WebSocket, SessionState>();
+  // Set on shutdown: new inbound calls get the busy line so the process can exit
+  // once the live calls finish (see drain()).
+  private draining = false;
 
   constructor(
-    private readonly deepgramLive: DeepgramLiveService,
+    private readonly sttRouter: SttRouter,
     private readonly tts: TtsRouter,
     private readonly runtime: CallRuntimeService,
     @Inject(CallRepository) private readonly callRepo: CallRepository,
     private readonly postcallQueue: PostCallQueueService,
     private readonly waker: WorkerWaker,
+    @Inject(CALL_SLOTS) private readonly slots: CallSlots | null,
   ) {}
+
+  // Graceful shutdown: stop taking new calls, then wait for live ones to end so a
+  // deploy never hangs up on a caller. Called from main.ts BEFORE app.close(),
+  // because app.close() first tears down the queues post-call depends on.
+  async drain(timeoutMs: number): Promise<void> {
+    this.draining = true;
+    const deadline = Date.now() + timeoutMs;
+    if (this.sessions.size > 0) {
+      this.logger.log(`Draining: waiting for ${this.sessions.size} live call(s)`);
+    }
+    while (this.sessions.size > 0 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    if (this.sessions.size > 0) {
+      this.logger.warn(`Drain timed out with ${this.sessions.size} call(s) still live`);
+    }
+  }
 
   handleConnection(client: WebSocket, request?: IncomingMessage) {
     // Optional shared-secret guard: set EXOTEL_STREAM_SECRET and include
@@ -489,6 +560,11 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
       gatewayCreatedRow: false,
       isOutbound: false,
       greetingTimer: null,
+      greetingStart: null,
+      slotHeartbeat: null,
+      holdsSlot: false,
+      fragmentTimer: null,
+      lastFiller: -1,
       finalized: false,
       startedAtMs: Date.now(),
     };
@@ -509,6 +585,8 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
     const state = this.sessions.get(client);
     if (state) {
       this.clearGreetingTimer(state);
+      this.clearFragmentTimer(state);
+      this.releaseSlot(state);
       state.active?.controller.abort();
       state.stt?.close();
       state.pacer.clear();
@@ -703,6 +781,35 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
           `Exotel stream start: callSid=${callSid} callId=${state.callId} locale=${state.locale}`,
         );
 
+        // Call-slot gate (max concurrent calls). An outbound call is already
+        // dialed and answered, so it always gets its slot (the dial worker
+        // reserved one before dialing). An inbound caller over the cap — or any
+        // inbound call while draining for a deploy — hears the busy line instead
+        // of a broken call; their number still reaches the CRM via post-call.
+        const kind: SlotKind = state.isOutbound ? "outbound" : "inbound";
+        if (!this.draining || state.isOutbound) {
+          state.holdsSlot = await this.acquireSlot(state.callId, kind, state.isOutbound);
+          // Hung up while we were acquiring: disconnect already ran, so free it here.
+          if (!this.sessions.has(client)) {
+            this.releaseSlot(state);
+            break;
+          }
+        }
+        if (!state.holdsSlot) {
+          this.playBusyLine(client, state);
+          break;
+        }
+        if (this.slots) {
+          const member = state.callId;
+          state.slotHeartbeat = setInterval(() => {
+            void this.slots
+              ?.acquire(member, kind, { force: true })
+              .catch((err) =>
+                this.logger.warn(`Slot heartbeat failed callId=${member}: ${String(err)}`),
+              );
+          }, CALL_SLOT_HEARTBEAT_MS);
+        }
+
         // Warm the clip cache immediately (during any outbound hold, so the
         // greeting is still instant when it fires).
         void this.runtime.warmCall(state.callId, state.locale);
@@ -712,7 +819,7 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
         // OUTBOUND_GREETING_DELAY_MS). During the hold STT is null, so incoming
         // media is ignored and the callee's early "hello?" can't trigger a turn.
         const startConversation = () => {
-          state.greetingTimer = null;
+          this.clearGreetingTimer(state);
           if (client.readyState !== WebSocket.OPEN) return;
           void this.sendGreeting(client, state);
           state.stt = this.openSttSession(client, state);
@@ -727,6 +834,7 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
           // fire — greeting a dead call and re-opening an STT session that nothing
           // owns (billed, and only closed whenever the socket eventually closes).
           state.greetingTimer = setTimeout(startConversation, OUTBOUND_GREETING_DELAY_MS);
+          state.greetingStart = startConversation;
         } else {
           startConversation();
         }
@@ -735,6 +843,18 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
 
       case "media": {
         const payload = (msg.media as Record<string, unknown> | undefined)?.payload;
+        // Outbound greeting hold: the callee speaking ("hello?") proves their media
+        // leg is up, so greet now instead of waiting out the full hold.
+        if (typeof payload === "string" && state.greetingStart) {
+          this.updateNearEnd(state, frameRms(Buffer.from(payload, "base64")));
+          if (state.lastNearEndSpeechAt > 0) {
+            this.logger.log(`Callee heard — ending greeting hold early callId=${state.callId}`);
+            // The "hello?" must not count as speech over the greeting (barge-in).
+            state.lastNearEndSpeechAt = 0;
+            state.greetingStart();
+          }
+          break;
+        }
         if (typeof payload === "string" && state.stt) {
           const pcm = Buffer.from(payload, "base64");
           // Update the near-end detector on the RAW frame (before any boost), then
@@ -761,6 +881,7 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
       case "stop":
         this.logger.log(`Exotel stream stop: callId=${state.callId}`);
         this.clearGreetingTimer(state);
+        this.clearFragmentTimer(state);
         state.active?.controller.abort();
         state.stt?.close();
         state.stt = null;
@@ -845,15 +966,16 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
   }
 
   private openSttSession(client: WebSocket, state: SessionState): LiveSession {
-    // NOTE: Deepgram's onSpeechStart (raw VAD) is intentionally NOT wired here.
-    // It fires before any transcript and would barge-in on a single voiced frame
-    // of echo/noise — exactly the self-interruption BARGE_IN_MIN_CHARS guards
-    // against. Barge-in is driven by transcript partials (handlePartial) instead.
-    return this.deepgramLive.openSession(
+    // NOTE: Deepgram's onSpeechStart (raw VAD) is intentionally NOT used: it fires
+    // before any transcript and would barge-in on a single voiced frame of
+    // echo/noise — exactly the self-interruption BARGE_IN_MIN_CHARS guards against.
+    // SttRouter only hands onSpeechStart to Sarvam, which has no partials at all.
+    return this.sttRouter.openSession(
       state.locale,
       EXOTEL_SAMPLE_RATE,
       {
         onPartial: (text) => this.handlePartial(client, state, text),
+        onSpeechStart: () => this.handleSpeechStart(client, state),
         onUtterance: (text) => this.enqueueTurn(client, state, text),
         onError: (message) => {
           this.logger.warn(`STT error callId=${state.callId}: ${message}`);
@@ -919,6 +1041,17 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
       text.trim().length >= BARGE_IN_MIN_CHARS
     ) {
       this.logger.log(`Barge-in (partial) callId=${state.callId} — stopping playback`);
+      this.stopSpeaking(client, state);
+    }
+  }
+
+  // Barge-in on Sarvam STT, which sends no partials: its VAD START_SPEECH, but
+  // only with genuine near-end energy on the line (the same gate partials use), so
+  // Maya's own echo — voice-like to a VAD, but no near-end energy — can't stop her.
+  private handleSpeechStart(client: WebSocket, state: SessionState) {
+    if (state.closing) return;
+    if (this.isMayaAudible(state) && this.nearEndSpeaking(state)) {
+      this.logger.log(`Barge-in (speech start) callId=${state.callId} — stopping playback`);
       this.stopSpeaking(client, state);
     }
   }
@@ -1033,7 +1166,15 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
       });
   }
 
-  private async runTurn(client: WebSocket, state: SessionState, utterance: string) {
+  private async runTurn(
+    client: WebSocket,
+    state: SessionState,
+    utterance: string,
+    opts: { noHold?: boolean } = {},
+  ) {
+    // Any turn supersedes a pending fragment release; it is re-armed below if the
+    // runtime is still holding a fragment after this turn.
+    this.clearFragmentTimer(state);
     const controller = new AbortController();
     const active: ActiveTurn = { controller };
     state.active = active;
@@ -1044,16 +1185,35 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
       state.pacer.enqueue(frame);
     });
 
+    // Slow-reply filler (see TURN_FILLER_DELAY_MS). Reply audio queues up behind it.
+    let replyAudioStarted = false;
+    const fillerTimer =
+      TURN_FILLER_DELAY_MS > 0 && !state.closing
+        ? setTimeout(() => {
+            if (replyAudioStarted || controller.signal.aborted || state.closing) return;
+            const filler = this.pickFiller(state);
+            if (!filler) return;
+            this.logger.log(`Slow reply — playing filler callId=${state.callId}`);
+            const fillerFrames = new PcmReframer((frame) => {
+              state.speaking = true;
+              state.pacer.enqueue(frame);
+            });
+            fillerFrames.push(filler);
+            fillerFrames.flush();
+          }, TURN_FILLER_DELAY_MS)
+        : null;
+
     try {
       const result = await this.runtime.processUtteranceStream(
         state.callId!,
         state.turnIndex,
         utterance,
-        { locale: state.locale, outputFormat: EXOTEL_OUTPUT_FORMAT },
+        { locale: state.locale, outputFormat: EXOTEL_OUTPUT_FORMAT, noHold: opts.noHold },
         {
           signal: controller.signal,
           onAudioChunk: (chunk, info) => {
             if (chunk.length > 0) {
+              replyAudioStarted = true;
               reframer.push(chunk);
             } else if (info.last) {
               // Sentence boundary — let Exotel track playback progress.
@@ -1083,6 +1243,11 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
       if (!result.waitForMore && !result.canceled) {
         state.stt?.clearBuffer();
         state.turnIndex += 1;
+      }
+
+      // Held a mid-thought fragment: answer it if the caller doesn't continue.
+      if (result.waitForMore && state.callId && this.runtime.hasPendingFragment(state.callId)) {
+        this.armFragmentTimer(client, state);
       }
 
       // Side-conversation escape: the caller is talking to a third party, not to
@@ -1138,11 +1303,61 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
         err instanceof Error ? err.stack : String(err),
       );
     } finally {
+      if (fillerTimer) clearTimeout(fillerTimer);
       if (state.active === active) state.active = null;
       // Always clear: on clean finish we never set it false otherwise; on barge-in
       // onCancel already did this, so setting false twice is harmless.
       state.speaking = false;
     }
+  }
+
+  // After FRAGMENT_WAIT_MS of silence following a held fragment, answer it. Goes
+  // through the turn queue so a continuation the caller DID say is processed (and
+  // merged with the fragment) first — then there is nothing left to release.
+  private armFragmentTimer(client: WebSocket, state: SessionState): void {
+    this.clearFragmentTimer(state);
+    if (FRAGMENT_WAIT_MS <= 0) return;
+    state.fragmentTimer = setTimeout(() => {
+      state.fragmentTimer = null;
+      state.queue = state.queue
+        .then(async () => {
+          if (!state.callId || client.readyState !== WebSocket.OPEN) return;
+          const fragment = this.runtime.takePendingFragment(state.callId);
+          if (!fragment) return;
+          this.logger.log(
+            `Caller paused after a fragment — answering it callId=${state.callId}: "${fragment.slice(0, 60)}"`,
+          );
+          await this.runTurn(client, state, fragment, { noHold: true });
+        })
+        .catch((err) => {
+          this.logger.error(`Fragment release error callId=${state.callId}: ${String(err)}`);
+        });
+    }, FRAGMENT_WAIT_MS);
+  }
+
+  private clearFragmentTimer(state: SessionState): void {
+    if (state.fragmentTimer !== null) {
+      clearTimeout(state.fragmentTimer);
+      state.fragmentTimer = null;
+    }
+  }
+
+  // A recorded filler in the call's language, never the same one twice in a row.
+  // Null when no clip is available (e.g. ElevenLabs is the voice) — then no filler.
+  private pickFiller(state: SessionState): Buffer | null {
+    const lang = String(state.locale).toLowerCase().startsWith("gu")
+      ? "gu"
+      : String(state.locale).toLowerCase().startsWith("en")
+        ? "en"
+        : "hi";
+    const texts = TURN_FILLERS[lang];
+    let i = Math.floor(Math.random() * texts.length);
+    if (i === state.lastFiller) i = (i + 1) % texts.length;
+    state.lastFiller = i;
+    return this.tts.storedClip(texts[i], {
+      languageCode: lang === "hi" ? undefined : lang,
+      outputFormat: EXOTEL_OUTPUT_FORMAT,
+    });
   }
 
   // Resolve once the paced sender has flushed all queued audio, or after
@@ -1184,10 +1399,68 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
   // Cancel a pending outbound greeting hold. Called on `stop` and on disconnect so
   // a call that ends inside the hold window never greets or opens an STT session.
   private clearGreetingTimer(state: SessionState): void {
+    state.greetingStart = null;
     if (state.greetingTimer !== null) {
       clearTimeout(state.greetingTimer);
       state.greetingTimer = null;
     }
+  }
+
+  // Take a call slot. Fails OPEN on a Redis error: a Redis blip must not turn
+  // away a real caller (the cap is a capacity guard, not a correctness one).
+  private async acquireSlot(callId: string, kind: SlotKind, force: boolean): Promise<boolean> {
+    if (!this.slots) return true;
+    try {
+      const ok = await this.slots.acquire(callId, kind, { force });
+      if (!ok) this.logger.warn(`All call slots busy — refusing ${kind} callId=${callId}`);
+      return ok;
+    } catch (err) {
+      this.logger.warn(`Call-slot acquire failed (allowing call) callId=${callId}: ${String(err)}`);
+      return true;
+    }
+  }
+
+  private releaseSlot(state: SessionState): void {
+    if (state.slotHeartbeat !== null) {
+      clearInterval(state.slotHeartbeat);
+      state.slotHeartbeat = null;
+    }
+    if (!state.holdsSlot || !state.callId || !this.slots) return;
+    state.holdsSlot = false;
+    const callId = state.callId;
+    void this.slots
+      .release(callId)
+      .catch((err) => this.logger.warn(`Call-slot release failed callId=${callId}: ${String(err)}`));
+  }
+
+  // All lines busy (or draining for a deploy): say so and hang up without opening
+  // STT or calling the LLM. The call row still goes through post-call, so the
+  // caller's number reaches the CRM and the sales team calls them back.
+  private playBusyLine(client: WebSocket, state: SessionState): void {
+    state.closing = true;
+    if (state.hasDbRow && state.callId) {
+      void this.callRepo
+        .update(state.callId, { hangupCause: "all_lines_busy" })
+        .catch(() => undefined);
+    }
+    const busy = pickByLangMode(state.locale, {
+      hi: "नमस्ते, अभी हमारी सभी lines busy हैं — हमारी team आपको जल्द ही call back करेगी। Thank you.",
+      gu: "નમસ્તે, અત્યારે અમારી બધી lines busy છે — અમારી team તમને જલ્દી જ call back કરશે. Thank you.",
+      en: "Hello, all our lines are busy right now — our team will call you back shortly. Thank you.",
+    });
+    state.queue = state.queue
+      .then(async () => {
+        if (client.readyState !== WebSocket.OPEN) return;
+        await this.playDirectTts(state, busy);
+        await this.waitForPacerDrain(state, 10_000);
+        await new Promise<void>((r) => setTimeout(r, EXOTEL_HANGUP_GRACE_MS));
+        try {
+          client.close();
+        } catch {}
+      })
+      .catch((err) => {
+        this.logger.error(`Busy line error callId=${state.callId}: ${String(err)}`);
+      });
   }
 
   private handleInactivity(client: WebSocket, state: SessionState): void {
@@ -1277,7 +1550,8 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
     });
     try {
       await this.tts.synthesizeStream(text, {
-        languageCode: /[ऀ-ॿ]/.test(text) ? undefined : "en",
+        // Gujarati script → gu (Sarvam), Devanagari → Hindi (default), else English.
+        languageCode: /[઀-૿]/.test(text) ? "gu" : /[ऀ-ॿ]/.test(text) ? undefined : "en",
         outputFormat: EXOTEL_OUTPUT_FORMAT,
         signal: controller.signal,
         onChunk: (chunk) => {

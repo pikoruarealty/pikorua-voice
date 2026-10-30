@@ -11,6 +11,7 @@ import { resolve } from "node:path";
 import { AppModule } from "./app.module";
 import { DEMO_HTML } from "./demo-ui";
 import { MetricsService } from "./metrics/metrics.service";
+import { ExotelVoicebotGateway } from "./call-runtime/exotel-voicebot.gateway";
 
 type RawBodyRequest = Request & { rawBody?: Buffer };
 
@@ -31,6 +32,14 @@ async function bootstrap() {
     rawBody: true,
     bodyParser: false,
   });
+  // Behind a proxy (the VM's Cloudflare Tunnel) every request would otherwise come from
+  // the proxy's address, so the per-IP rate limit would be ONE shared bucket for
+  // Exotel, the CRM and everyone else. TRUST_PROXY names the proxies whose
+  // X-Forwarded-For is believed (Express syntax, e.g. "loopback, 172.16.0.0/12").
+  // Unset = trust nothing, the previous behaviour.
+  if (process.env.TRUST_PROXY) {
+    app.getHttpAdapter().getInstance().set("trust proxy", process.env.TRUST_PROXY);
+  }
   const captureRawBody = (req: RawBodyRequest, _res: Response, buf: Buffer) => {
     req.rawBody = Buffer.from(buf);
   };
@@ -70,7 +79,25 @@ async function bootstrap() {
     });
     next();
   });
-  app.enableShutdownHooks();
+  // Graceful shutdown that never hangs up on a caller: drain live calls FIRST,
+  // then app.close(). Nest's own enableShutdownHooks() can't do this — app.close()
+  // runs onModuleDestroy (closing the post-call queue) before any later hook, so a
+  // call still running would lose its post-call → CRM handoff.
+  const gateway = app.get(ExotelVoicebotGateway);
+  const drainMs = Number(config.get("DRAIN_TIMEOUT_MS") ?? 230000);
+  let shuttingDown = false;
+  for (const signal of ["SIGTERM", "SIGINT"] as const) {
+    process.once(signal, () => {
+      if (shuttingDown) return;
+      shuttingDown = true;
+      logger.log(`${signal} received — draining live calls (max ${drainMs}ms)`);
+      void gateway
+        .drain(drainMs)
+        .then(() => app.close())
+        .catch((err) => logger.error(`Shutdown error: ${String(err)}`))
+        .finally(() => process.exit(0));
+    });
+  }
   // Request-body validation uses Zod (Rule 8); a Zod validation pipe is added
   // alongside the first DTOs (campaign module / webhooks).
 

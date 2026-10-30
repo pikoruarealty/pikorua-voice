@@ -101,6 +101,17 @@ function wantsRawPcm(outputFormat: string | undefined): boolean {
   return /^(pcm|ulaw|mulaw|alaw|g711)/i.test(String(outputFormat ?? ""));
 }
 
+// Sarvam voices all three of Maya's languages with ONE speaker, so a caller who
+// switches language mid-call hears the same woman. The router passes the reply's
+// language in languageCode: "gu" → gu-IN, "en" → en-IN, anything else → hi-IN.
+// Text normalization follows the same language (normalizeForTts mode).
+export function sarvamLanguage(languageCode?: string): { target: string; norm: string } {
+  const code = String(languageCode ?? "").toLowerCase();
+  if (code.startsWith("gu")) return { target: "gu-IN", norm: "gu" };
+  if (code.startsWith("en")) return { target: "en-IN", norm: "en" };
+  return { target: "hi-IN", norm: "hi" };
+}
+
 @Injectable()
 export class SarvamService {
   private readonly logger = new Logger("SarvamService");
@@ -116,33 +127,38 @@ export class SarvamService {
     return Boolean(this.config.get("SARVAM_API_KEY"));
   }
 
-  private requestConfig() {
+  // Voice per language: Sarvam's "Aparna" persona on bulbul:v4-flash for all
+  // three. v4 voices are per-language IDs, so each language names its own Aparna
+  // style (chosen by ear: aparna_hi_customer for Hindi AND Gujarati — there is no
+  // Gujarati Aparna — and aparna_en_companion for English).
+  private requestConfig(target = "gu-IN") {
     const key = String(this.config.get("SARVAM_API_KEY") ?? "");
     if (!key) {
       throw new ServiceUnavailableException("Sarvam API key is not configured");
     }
-    // Maya's Gujarati voice is "simran" (chosen by ear against Gargi's Hindi
-    // register — warm, calm, young, female). bulbul:v3's other female voices:
-    // ritu, priya, neha, pooja, kavya, ishita, shreya, roopa, tanya. Re-audition
-    // with `node tools/staging/sarvam-tts-smoke.js --audition`.
-    // NOTE: "anushka" is a bulbul:v2 voice and is REJECTED by v3.
-    const speaker = String(this.config.get("SARVAM_SPEAKER") ?? "simran");
-    const model = String(this.config.get("SARVAM_MODEL") ?? "bulbul:v3");
-    // pace 1.15 = the chosen setting (slightly brisker than the 1.0 baseline,
-    // which dragged on longer sentences). Sweep in
+    const speaker =
+      target === "hi-IN"
+        ? String(this.config.get("SARVAM_SPEAKER_HI") ?? "aparna_hi_customer")
+        : target === "en-IN"
+          ? String(this.config.get("SARVAM_SPEAKER_EN") ?? "aparna_en_companion")
+          : String(this.config.get("SARVAM_SPEAKER_GU") ?? "aparna_hi_customer");
+    const model = String(this.config.get("SARVAM_TTS_MODEL") ?? "bulbul:v4-flash");
+    // pace 1.0 = natural speed, the chosen setting for the Aparna voice. Sweep in
     // tools/staging/sarvam-tune-simran.js confirmed LOWER pace = slower speech
-    // (0.8→19s, 1.0→13s for the same line), so drop below 1.15 to slow her down.
+    // (0.8→19s, 1.0→13s for the same line).
     // Range 0.5–2.0, clamped so a bad env value can't break synthesis. The literal
     // below must match the env schema default (zod always fills it, so it is
     // unreachable — but a differing number would misrepresent the real default).
-    const pace = Math.min(2.0, Math.max(0.5, Number(this.config.get("SARVAM_PACE") ?? 1.15)));
+    const pace = Math.min(2.0, Math.max(0.5, Number(this.config.get("SARVAM_PACE") ?? 1)));
     // temperature = v3's expressiveness knob (it replaced v2's pitch+loudness).
     // 0 = neutral (chosen setting) — but Sarvam REJECTS a literal temperature:0
     // ("Input parameters has to be a valid dictionary"), so 0 means "omit the
     // field and use Sarvam's own baseline", which IS the neutral "—" delivery.
     // Raise toward ~0.7 for more varied, "human" intonation. NaN falls back to 0.
     const rawTemp = Number(this.config.get("SARVAM_TEMPERATURE") ?? 0.7);
-    const temperature = Number.isFinite(rawTemp) ? Math.min(1.5, Math.max(0, rawTemp)) : 0.7;
+    // v4 caps temperature at 1.0 (v3 allows 1.5).
+    const maxTemp = model.startsWith("bulbul:v4") ? 1.0 : 1.5;
+    const temperature = Number.isFinite(rawTemp) ? Math.min(maxTemp, Math.max(0, rawTemp)) : 0.7;
     // Sarvam's own text normaliser for mixed Gujarati/English/numbers. ON by
     // default: with it off, code-switched English and figures were mispronounced
     // in call testing. Runs AFTER our normalizeForTts (Gujarati respellings +
@@ -151,12 +167,17 @@ export class SarvamService {
     return { key, speaker, model, pace, temperature, preprocess };
   }
 
-  private buildBody(text: string, cfg: ReturnType<SarvamService["requestConfig"]>) {
+  private buildBody(
+    text: string,
+    cfg: ReturnType<SarvamService["requestConfig"]>,
+    languageCode?: string,
+  ) {
+    const lang = sarvamLanguage(languageCode);
     return {
-      // normalizeForTts in "gu" mode: Gujarati respellings, Gujarati number words,
-      // and the English-always rules (BHK, areas, distances, dates, clock times).
-      text: normalizeForTts(text, "gu"),
-      target_language_code: "gu-IN",
+      // normalizeForTts in the reply's mode (gu: Gujarati respellings + number
+      // words), plus the English-always rules (BHK, areas, distances, dates, times).
+      text: normalizeForTts(text, lang.norm),
+      target_language_code: lang.target,
       speaker: cfg.speaker,
       model: cfg.model,
       speech_sample_rate: EXOTEL_SAMPLE_RATE,
@@ -185,10 +206,10 @@ export class SarvamService {
     return Buffer.concat(pcmParts);
   }
 
-  async synthesize(text: string, _opts?: SynthesizeOptions): Promise<{ audio: Buffer; ttsMs: number }> {
+  async synthesize(text: string, opts?: SynthesizeOptions): Promise<{ audio: Buffer; ttsMs: number }> {
     const start = Date.now();
-    const cfg = this.requestConfig();
-    const body = this.buildBody(text, cfg);
+    const cfg = this.requestConfig(sarvamLanguage(opts?.languageCode).target);
+    const body = this.buildBody(text, cfg, opts?.languageCode);
 
     let lastErr: unknown;
     // One quick retry, matching the ElevenLabs path: a transient provider blip
@@ -221,7 +242,7 @@ export class SarvamService {
 
   // Cached short clip, synthesizing on first use. Mirrors ElevenlabsService.getClip.
   async getClip(text: string, opts?: SynthesizeOptions): Promise<Buffer | null> {
-    const key = `gu|${opts?.outputFormat ?? "pcm_8000"}|${text}`;
+    const key = `${sarvamLanguage(opts?.languageCode).target}|${opts?.outputFormat ?? "pcm_8000"}|${text}`;
     const cached = this.clips.get(key);
     if (cached) return cached;
     try {
@@ -266,9 +287,9 @@ export class SarvamService {
   // (Numbers from tools/staging/sarvam-ws-smoke.js — re-run it if this regresses.)
   private streamOverWs(
     text: string,
-    opts: { signal?: AbortSignal; onChunk: (chunk: Buffer) => void; raw: boolean },
+    opts: { signal?: AbortSignal; onChunk: (chunk: Buffer) => void; raw: boolean; target: string },
   ): Promise<{ ttfbMs: number | null; bytes: number }> {
-    const cfg = this.requestConfig();
+    const cfg = this.requestConfig(opts.target);
     return new Promise((resolve, reject) => {
       const url = `${SARVAM_TTS_WS_URL}?model=${encodeURIComponent(cfg.model)}&send_completion_event=true`;
       const ws = new WebSocket(url, { headers: { "api-subscription-key": cfg.key } });
@@ -335,7 +356,7 @@ export class SarvamService {
             JSON.stringify({
               type: "config",
               data: {
-                target_language_code: "gu-IN",
+                target_language_code: opts.target,
                 speaker: cfg.speaker,
                 model: cfg.model,
                 // linear16 @ 8000 = raw s16le 8kHz mono = Exotel's wire format
@@ -414,7 +435,8 @@ export class SarvamService {
     opts: SynthesizeOptions & { signal?: AbortSignal; onChunk: (chunk: Buffer) => void },
   ): Promise<StreamSynthesisResult> {
     const start = Date.now();
-    const normalized = normalizeForTts(text, "gu");
+    const lang = sarvamLanguage(opts.languageCode);
+    const normalized = normalizeForTts(text, lang.norm);
     // Telephony (Exotel pcm_8000) → raw PCM streamed chunk-by-chunk. Anything
     // else (the browser demo passes no outputFormat) → one WAV per sentence so
     // an <audio> element can decode it. This is why gu was silent in the demo.
@@ -425,7 +447,7 @@ export class SarvamService {
     // forwarded to the caller cannot be unsent. Mirrors the ElevenLabs path.
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
-        const { ttfbMs, bytes } = await this.streamOverWs(normalized, { ...opts, raw });
+        const { ttfbMs, bytes } = await this.streamOverWs(normalized, { ...opts, raw, target: lang.target });
         const ms = Date.now() - start;
         this.logger.log(`Sarvam WS TTS complete (${ms}ms ttfb=${ttfbMs}ms) bytes=${bytes}`);
         return { ttsMs: ms, ttfbMs, bytes };
@@ -470,7 +492,8 @@ export class SarvamService {
       signal?: AbortSignal;
     },
   ): { sendText: (text: string) => void; flush: () => void; close: () => void } {
-    const cfg = this.requestConfig();
+    const lang = sarvamLanguage(opts.languageCode);
+    const cfg = this.requestConfig(lang.target);
     const url = `${SARVAM_TTS_WS_URL}?model=${encodeURIComponent(cfg.model)}&send_completion_event=true`;
 
     let closed = false;
@@ -500,7 +523,7 @@ export class SarvamService {
           JSON.stringify({
             type: "config",
             data: {
-              target_language_code: "gu-IN",
+              target_language_code: lang.target,
               speaker: cfg.speaker,
               model: cfg.model,
               output_audio_codec: "linear16",
@@ -567,7 +590,7 @@ export class SarvamService {
     return {
       sendText: (text: string) => {
         if (closed) return;
-        const normalized = normalizeForTts(text, "gu");
+        const normalized = normalizeForTts(text, lang.norm);
         if (!normalized.trim()) return;
         if (wsOpen) {
           try {

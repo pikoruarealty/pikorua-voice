@@ -214,7 +214,7 @@ test("Gujarati turns always use the WS-turn path, routed to Sarvam (not ElevenLa
   assert.ok(wsBody, "could not locate TtsRouter.openWsSession");
   assert.match(
     wsBody[0],
-    /if\s*\(!this\.isGujarati\(opts\)\)\s*return this\.elevenlabs\.openWsSession/,
+    /if\s*\(!sOpts\)\s*return this\.elevenlabs\.openWsSession/,
     "non-Gujarati must go straight to ElevenLabs",
   );
   assert.match(
@@ -254,8 +254,8 @@ function makeRouter(env = {}) {
   return { router: new TtsRouter(fakeEleven, fakeSarvam, config), calls };
 }
 
-test("router sends Gujarati to Sarvam and everything else to ElevenLabs", async () => {
-  const { router, calls } = makeRouter({ SARVAM_API_KEY: "sk-test" });
+test("TTS_PROVIDER_HI=elevenlabs (rollback): Gujarati to Sarvam, everything else to ElevenLabs", async () => {
+  const { router, calls } = makeRouter({ SARVAM_API_KEY: "sk-test", TTS_PROVIDER_HI: "elevenlabs" });
 
   await router.synthesize("ગુજરાતી", { languageCode: "gu" });
   await router.synthesize("हिंदी", { languageCode: undefined });
@@ -269,10 +269,74 @@ test("router: an English reply on a gu call still goes to ElevenLabs", async () 
   // replyLanguageCode picks the code from the REPLY's script, so if the caller
   // switches to English mid-call Maya's English answer must not go to the
   // Gujarati engine.
-  const { router, calls } = makeRouter({ SARVAM_API_KEY: "sk-test" });
+  const { router, calls } = makeRouter({ SARVAM_API_KEY: "sk-test", TTS_PROVIDER_HI: "elevenlabs" });
   await router.synthesize("Certainly, which budget?", { languageCode: "en" });
   assert.deepEqual(calls.sarvam, []);
   assert.equal(calls.elevenlabs.length, 1);
+});
+
+test("TTS_PROVIDER_HI=sarvam routes Hindi and English to Sarvam with explicit language codes", async () => {
+  const { TtsRouter } = require("../../apps/api/dist/tts/tts-router");
+  const seen = { elevenlabs: [], sarvam: [] };
+  const fake = (name, configured) => ({
+    isConfigured: () => configured,
+    synthesize: async (t, o) => (seen[name].push([t, o?.languageCode]), { audio: Buffer.alloc(2), ttsMs: 1 }),
+  });
+  const env = { SARVAM_API_KEY: "sk", TTS_PROVIDER_HI: "sarvam" };
+  const router = new TtsRouter(fake("elevenlabs", true), fake("sarvam", true), { get: (k) => env[k] });
+
+  await router.synthesize("हिंदी", { languageCode: undefined });
+  await router.synthesize("English", { languageCode: "en" });
+  await router.synthesize("ગુજરાતી", { languageCode: "gu" });
+
+  assert.deepEqual(seen.sarvam, [
+    ["हिंदी", "hi"],
+    ["English", "en"],
+    ["ગુજરાતી", "gu"],
+  ]);
+  assert.deepEqual(seen.elevenlabs, [], "ElevenLabs is fallback-only on this setting");
+});
+
+test("TTS_PROVIDER_HI=sarvam: a Sarvam failure on a Hindi turn is voiced by ElevenLabs", async () => {
+  const { TtsRouter } = require("../../apps/api/dist/tts/tts-router");
+  let elevenCalls = 0;
+  let sarvamCalls = 0;
+  const eleven = { synthesize: async () => (elevenCalls++, { audio: Buffer.alloc(2), ttsMs: 1 }) };
+  const sarvam = {
+    isConfigured: () => true,
+    synthesize: async () => {
+      sarvamCalls++;
+      throw new Error("No credits available.");
+    },
+  };
+  const env = { SARVAM_API_KEY: "sk", TTS_PROVIDER_HI: "sarvam" };
+  const router = new TtsRouter(eleven, sarvam, { get: (k) => env[k] });
+
+  const out = await router.synthesize("हिंदी", {});
+  assert.ok(out.audio.length > 0, "the turn is not lost");
+  await router.synthesize("फिर से", {});
+  assert.equal(sarvamCalls, 1, "the breaker keeps later turns off a failing Sarvam");
+  assert.equal(elevenCalls, 2);
+});
+
+test("SarvamService maps the router's code to Sarvam's language and normalizer", () => {
+  const { sarvamLanguage } = require("../../apps/api/dist/tts/sarvam.service");
+  assert.deepEqual(sarvamLanguage("gu"), { target: "gu-IN", norm: "gu" });
+  assert.deepEqual(sarvamLanguage("en"), { target: "en-IN", norm: "en" });
+  assert.deepEqual(sarvamLanguage("hi"), { target: "hi-IN", norm: "hi" });
+  assert.deepEqual(sarvamLanguage(undefined), { target: "hi-IN", norm: "hi" });
+});
+
+test("Sarvam voice per language: Aparna on v4-flash for all three", () => {
+  const { SarvamService } = require("../../apps/api/dist/tts/sarvam.service");
+  const svc = new SarvamService({ get: (k) => (k === "SARVAM_API_KEY" ? "sk" : undefined) });
+  const pick = (target) => {
+    const { speaker, model } = svc.requestConfig(target);
+    return [speaker, model];
+  };
+  assert.deepEqual(pick("hi-IN"), ["aparna_hi_customer", "bulbul:v4-flash"]);
+  assert.deepEqual(pick("en-IN"), ["aparna_en_companion", "bulbul:v4-flash"]);
+  assert.deepEqual(pick("gu-IN"), ["aparna_hi_customer", "bulbul:v4-flash"]);
 });
 
 test("BREAKER: a Sarvam that FAILS falls back to Hindi instead of going silent", async () => {
@@ -354,7 +418,7 @@ test("router: Gujarati enabled only when key present and not disabled", () => {
 });
 
 test("router routes clips and prewarm by language too", async () => {
-  const { router, calls } = makeRouter({ SARVAM_API_KEY: "sk-test" });
+  const { router, calls } = makeRouter({ SARVAM_API_KEY: "sk-test", TTS_PROVIDER_HI: "elevenlabs" });
 
   await router.getClip("સમજી ગઈ.", { languageCode: "gu" });
   await router.getClip("Perfect.", { languageCode: "en" });

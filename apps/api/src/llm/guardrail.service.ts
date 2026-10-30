@@ -25,7 +25,19 @@ const HARD_RULES: Array<{ rule: string; pattern: RegExp; replacement: string }> 
     // the caller's budget and offers spoken tiers like "3 करोड़, 5 करोड़" — no ₹,
     // no marker). So "₹<digit>" or "[internal]" in a REPLY is a near-certain leak.
     rule: "internal_pricing_leak",
-    pattern: /₹\s*\d|\[\s*internal\s*\]/i,
+    pattern: /₹\s*\d|\b(?:rs\.?|inr)\s*\d|\[\s*internal\s*\]/i,
+    replacement:
+      "I'm not able to share pricing — our expert team shares all the details with you in person at the site visit.",
+  },
+  {
+    // A price spoken WITHOUT a currency sign: "कीमत 4.5 करोड़", "starting at 3 Cr",
+    // "3 करोड़ से start होता है". Maya's only legitimate amounts are the budget
+    // tiers she offers ("3 करोड़, 5 करोड़ … कौन-सा comfortable रहेगा?"), which
+    // never sit next to a price word or a "starts from" phrase — so this stays
+    // narrow enough to leave the budget step alone.
+    rule: "spoken_price_leak",
+    pattern:
+      /(?:price|pricing|cost|कीमत|क़ीमत|प्राइस|दाम|કિંમત|ભાવ|starting (?:at|from)|starts? (?:at|from))[^.?!।\n]{0,30}\d+(?:\.\d+)?\s*\+?\s*(?:cr\b|crores?|करोड़|કરોડ|lakhs?|लाख|લાખ)|\d+(?:\.\d+)?\s*\+?\s*(?:cr\b|crores?|करोड़|કરોડ)[^.?!।\n]{0,15}(?:onwards|से start|से शुरू|से शुरु|starting|થી શરૂ|થી start)/i,
     replacement:
       "I'm not able to share pricing — our expert team shares all the details with you in person at the site visit.",
   },

@@ -1,4 +1,5 @@
 import { Injectable } from "@nestjs/common";
+import { monitorEventLoopDelay } from "node:perf_hooks";
 
 // Latency buckets (ms) sized for voice turns: sub-second buckets matter most.
 const HISTOGRAM_BUCKETS = [100, 250, 500, 1000, 2000, 4000, 8000, 15000];
@@ -14,6 +15,14 @@ export class MetricsService {
   private readonly counters = new Map<string, number>();
   private readonly histograms = new Map<string, Histogram>();
   private readonly startedAt = Date.now();
+  // Event-loop lag: the API paces call audio on this loop, so sustained lag (p99
+  // above ~30 ms) means it is starved of CPU and callers hear stutter. Reset on
+  // every scrape, so each value covers the window since the previous scrape.
+  private readonly loopDelay = (() => {
+    const h = monitorEventLoopDelay({ resolution: 10 });
+    h.enable();
+    return h;
+  })();
 
   increment(name: string, labels: Record<string, string | number> = {}) {
     const key = this.key(name, labels);
@@ -41,7 +50,14 @@ export class MetricsService {
       "# HELP pikorua_process_uptime_seconds Process uptime in seconds.",
       "# TYPE pikorua_process_uptime_seconds gauge",
       `pikorua_process_uptime_seconds ${Math.round((Date.now() - this.startedAt) / 1000)}`,
+      "# HELP pikorua_event_loop_lag_ms Event-loop delay since the last scrape (ms).",
+      "# TYPE pikorua_event_loop_lag_ms gauge",
     ];
+    for (const [q, label] of [[50, "p50"], [99, "p99"], [100, "max"]] as const) {
+      const ns = q === 100 ? this.loopDelay.max : this.loopDelay.percentile(q);
+      lines.push(`pikorua_event_loop_lag_ms{quantile="${label}"} ${(ns / 1e6).toFixed(1)}`);
+    }
+    this.loopDelay.reset();
 
     for (const [key, value] of this.counters.entries()) {
       lines.push(`${key} ${value}`);

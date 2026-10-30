@@ -23,6 +23,8 @@
     "db:studio": "turbo db:studio --filter=@pikorua/db"
   },
   "devDependencies": {
+    "ioredis": "^5.4.1",
+    "ioredis-mock": "^8.13.1",
     "prettier": "^3.3.3",
     "turbo": "^2.9.18",
     "typescript": "^5.7.2"

@@ -4,7 +4,7 @@ import { Injectable, Logger } from "@nestjs/common";
 import type { IncomingMessage } from "http";
 import { ConfigService } from "@nestjs/config";
 import { type LiveSession } from "../stt/deepgram-live.service";
-import { DeepgramLiveService } from "../stt/deepgram-live.service";
+import { SttRouter } from "../stt/stt-router";
 import { TtsRouter } from "../tts/tts-router";
 import { CallRuntimeService, type PreStreamedData } from "./call-runtime.service";
 import { closeUnauthorized, isWebSocketAuthorized } from "../auth/ws-auth";
@@ -63,7 +63,7 @@ export class DemoVoiceGateway implements OnGatewayConnection, OnGatewayDisconnec
   private readonly clients = new Map<WebSocket, ClientState>();
 
   constructor(
-    private readonly deepgramLive: DeepgramLiveService,
+    private readonly sttRouter: SttRouter,
     private readonly tts: TtsRouter,
     private readonly runtime: CallRuntimeService,
     private readonly config: ConfigService,
@@ -138,7 +138,7 @@ export class DemoVoiceGateway implements OnGatewayConnection, OnGatewayDisconnec
     sampleRate: number,
     isRecovery: boolean,
   ) {
-    return this.deepgramLive.openSession(state.locale, sampleRate, {
+    return this.sttRouter.openSession(state.locale, sampleRate, {
       onPartial: (text) => this.handlePartial(client, state, text),
       onUtterance: (text) => this.enqueueTurn(client, state, text),
       onError: (message) => {

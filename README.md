@@ -746,9 +746,11 @@ When Exotel reports DTMF digits **via the status webhook**, the digit is mapped 
 
 ## Deployment (Render)
 
+> **VM deployment** (API + worker + Redis + Cloudflare Tunnel on one shared VM, at https://voice.pikoruarealty.com): see [deploy/README.md](deploy/README.md).
+
 The project ships a `render.yaml` for one-click deployment. Both services build from **Docker images** (`env: docker`), not Buildpacks:
 
-- **API service** (`type: web`, port 4100): root `Dockerfile` → `node apps/api/dist/main.js`, health check `/api/health`.
+- **API service** (`type: web`, port 4100): `apps/api/Dockerfile` → `node apps/api/dist/main.js`, health check `/api/health`.
 - **Worker service** (`type: web`): `apps/worker/Dockerfile` → `node apps/worker/dist/main.js`, health check `/health`. Deployed as a `web` service (not `worker`) because Render's free tier has no Background Worker plan — a bare `/health` endpoint satisfies the platform check. An optional 13-min self-ping keep-alive (`WORKER_KEEPALIVE_ENABLED`, off by default) prevents free-tier idle spin-down; switch to `type: worker` once on a paid plan.
 
 Both services read from the same Render environment group. Set `PUBLIC_BASE_URL` to the deployed API service URL so Exotel can reach the webhook endpoint at `PUBLIC_BASE_URL/api/webhooks/exotel`.

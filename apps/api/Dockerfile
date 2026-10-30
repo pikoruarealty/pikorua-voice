@@ -44,6 +44,8 @@ COPY --from=builder /repo/apps/api/dist apps/api/dist
 # Copy migration script + SQL files so preDeployCommand can run them
 COPY --from=builder /repo/packages/db/scripts packages/db/scripts
 COPY --from=builder /repo/packages/db/drizzle packages/db/drizzle
+# Pre-recorded Maya lines (greetings, goodbyes, fillers…) — see tts/clip-library.ts.
+COPY assets/clips assets/clips
 
 ENV NODE_ENV=production
 EXPOSE 4100

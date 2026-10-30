@@ -1,0 +1,108 @@
+# Pikorua Voice on the shared 2 vCPU / 8 GB VM (see deploy/README.md).
+#
+#   docker compose --env-file .compose.env -f docker-compose.prod.yml pull
+#   docker compose --env-file .compose.env -f docker-compose.prod.yml up -d
+#
+# Images are built by CI (.github/workflows/images.yml) — never on the VM, where a
+# pnpm install + TypeScript build would pin both cores and stall live calls.
+# Public traffic (https://voice.pikoruarealty.com) arrives through the Cloudflare
+# Tunnel container, which connects OUT to Cloudflare — no inbound port is opened.
+# Postgres stays on Neon (DATABASE_URL in the env file).
+name: pikorua-voice
+
+x-logging: &logging
+  driver: json-file
+  options: { max-size: "20m", max-file: "3" } # logs can never fill the disk
+
+services:
+  voice-api:
+    image: ${IMAGE_PREFIX:?set IMAGE_PREFIX, e.g. ghcr.io/pikoruarealty}/pikorua-voice-api:${TAG:?set TAG to a branch (v2) or commit SHA}
+    env_file: /opt/pikorua-voice/.env
+    environment:
+      PORT: "4100"
+      NODE_OPTIONS: --max-old-space-size=384
+      REDIS_URL: redis://voice-redis:6379
+      # The tunnel container reaches the API over Docker's bridge network; trusting
+      # it lets the per-IP rate limit see the real caller IP (X-Forwarded-For).
+      TRUST_PROXY: "loopback, 172.16.0.0/12, 192.168.0.0/16"
+      MAX_CONCURRENT_CALLS: "2"
+      OUTBOUND_MAX_CONCURRENT: "1"
+      # No Render free-tier spin-down here: the worker is always on.
+      WORKER_WAKE_URL: ""
+    # Localhost only — for health checks from the VM, or a cloudflared installed
+    # on the host instead of the container below. Never reachable from outside.
+    ports: ["127.0.0.1:4100:4100"]
+    cpus: 1.0
+    cpu_shares: 2048 # audio pacing + barge-in win any CPU contention
+    mem_limit: 512m
+    # On SIGTERM the API stops taking calls and waits up to DRAIN_TIMEOUT_MS
+    # (230 s) for live ones to end — a deploy never hangs up on a caller.
+    stop_grace_period: 240s
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:4100/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging: *logging
+    depends_on: [voice-redis]
+
+  voice-worker:
+    image: ${IMAGE_PREFIX:?set IMAGE_PREFIX, e.g. ghcr.io/pikoruarealty}/pikorua-voice-worker:${TAG:?set TAG to a branch (v2) or commit SHA}
+    env_file: /opt/pikorua-voice/.env
+    environment:
+      PORT: "10000"
+      NODE_OPTIONS: --max-old-space-size=256
+      REDIS_URL: redis://voice-redis:6379
+      MAX_CONCURRENT_CALLS: "2"
+      OUTBOUND_MAX_CONCURRENT: "1"
+      WORKER_KEEPALIVE_ENABLED: "false"
+    cpus: 0.5
+    cpu_shares: 256 # network-bound, nothing real-time
+    mem_limit: 384m
+    stop_grace_period: 60s
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:10000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging: *logging
+    depends_on: [voice-redis]
+
+  # Cloudflare Tunnel: voice.pikoruarealty.com → http://voice-api:4100. The route
+  # (public hostname → service) is set in the Cloudflare dashboard; this container
+  # only needs the tunnel token. See deploy/README.md §2.
+  voice-tunnel:
+    image: cloudflare/cloudflared:2024.12.2
+    command: ["tunnel", "--no-autoupdate", "run"]
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:?set CLOUDFLARE_TUNNEL_TOKEN in .compose.env}
+    cpus: 0.25
+    cpu_shares: 1024
+    mem_limit: 128m
+    restart: unless-stopped
+    logging: *logging
+    depends_on: [voice-api]
+
+  voice-redis:
+    image: redis:7-alpine
+    # noeviction: BullMQ must never silently lose a job. No host port, so it can't
+    # collide with another project's Redis on 6379.
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "96mb", "--maxmemory-policy", "noeviction"]
+    volumes: ["voice-redis-data:/data"]
+    cpus: 0.25
+    cpu_shares: 512
+    mem_limit: 128m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+    logging: *logging
+
+volumes:
+  voice-redis-data:

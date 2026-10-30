@@ -28,6 +28,7 @@ import {
   type LangMode,
 } from "../i18n/lang-mode";
 import { buildSystemPromptGu } from "../i18n/prompt-gu";
+import { PROMPT_CACHE_SPLIT } from "../llm/prompt-cache";
 
 // Per-call state: conversation history + resolved context for prompt building.
 // Stamped with lastActivityAt so stale entries can be evicted.
@@ -258,6 +259,18 @@ function hasSideConversation(_text: string): boolean {
 }
 function stripSideConversation(text: string): string {
   return text.replace(new RegExp(SIDE_CONVO_SOURCE, "gi"), "");
+}
+
+// Per-turn cost + latency columns (migration 0005) for the assistant turn, so the
+// real cost per call can be measured from call_turns.
+function turnCostFields(llm: LlmResult, spokenReply: string, ttfaMs: number | null) {
+  return {
+    cacheReadTokens: llm.cacheReadTokens ?? null,
+    cacheWriteTokens: llm.cacheWriteTokens ?? null,
+    llmCostUsd: llm.costUsd != null ? String(llm.costUsd) : null,
+    ttsChars: spokenReply.length,
+    ttfaMs,
+  };
 }
 
 // Sentence boundary for streaming dispatch: ., !, ?, or Devanagari danda,
@@ -650,15 +663,23 @@ export class CallRuntimeService implements OnApplicationShutdown {
     let ttfaMs: number | null = null;
     let ttsMsTotal = 0;
 
-    // Gujarati streams the greeting through the SAME turn-level Sarvam WS session
+    // PRE-RECORDED FIRST: the greeting is the same words on every call, so it is
+    // played from a stored take (assets/clips, the live Sarvam voice) when one
+    // matches this exact text — ₹0 TTS and ~0 ms to first audio. Several takes
+    // ROTATE (never the same twice in a row): an earlier build replayed ONE frozen
+    // take on every call and callers heard it as "robotic"; distinct takes keep the
+    // natural variation that came from synthesizing fresh. A greeting with no
+    // matching take (e.g. reconfirm with a time in it) is synthesized live below.
+    const greetingLangCode =
+      this.langMode(state.locale) === "gu"
+        ? (this.ttsLanguageCode(state.locale) ?? "hi")
+        : this.replyLanguageCode(reply, state.locale);
+    const storedTake = this.tts.storedClip(reply, { languageCode: greetingLangCode, outputFormat });
+
+    // Live path, Gujarati: streams through the SAME turn-level Sarvam WS session
     // the live turns use (openWsSession): one coherent synthesis — steady pitch,
-    // human pauses, first audio ~200ms — so the opening sounds identical to the
-    // rest of the call. It is synthesized FRESH every call ON PURPOSE: Sarvam's
-    // temperature gives natural variation, so the greeting sounds spoken, not
-    // recorded. (An earlier version cached the audio and replayed one frozen take —
-    // that identical-every-call delivery is exactly what read as "robotic".) hi/en
-    // stay on the single synthesizeStream request, unchanged.
-    const useWs = this.langMode(state.locale) === "gu";
+    // human pauses, first audio ~200ms. hi/en: one synthesizeStream request.
+    const useWs = !storedTake && this.langMode(state.locale) === "gu";
 
     this.activeTurns += 1;
     try {
@@ -666,7 +687,11 @@ export class CallRuntimeService implements OnApplicationShutdown {
       // audio follows immediately below with no lag.
       sink.onReplyDelta?.(reply);
 
-      if (useWs && !turnController.signal.aborted) {
+      if (storedTake && !turnController.signal.aborted) {
+        ttfaMs = Date.now() - turnStart;
+        sink.onAudioChunk(storedTake, { sentenceIndex: 0, last: false });
+        sink.onAudioChunk(Buffer.alloc(0), { sentenceIndex: 0, last: true });
+      } else if (useWs && !turnController.signal.aborted) {
         await new Promise<void>((resolve) => {
           let done = false;
           const finish = () => {
@@ -727,7 +752,7 @@ export class CallRuntimeService implements OnApplicationShutdown {
       }
 
       this.logger.log(
-        `Greeting call=${callId} templated ttfa=${ttfaMs ?? "?"}ms tts=${ttsMsTotal}ms`,
+        `Greeting call=${callId} ${storedTake ? "pre-recorded" : "templated"} ttfa=${ttfaMs ?? "?"}ms tts=${ttsMsTotal}ms`,
       );
       return { reply, canceled: false, skipped: false };
     } finally {
@@ -750,47 +775,11 @@ export class CallRuntimeService implements OnApplicationShutdown {
     }
   }
 
-  // Short acknowledgment phrases that commonly open a reply. Pre-synthesizing
-  // them means the first sentence of every turn is served from cache with zero
-  // TTS round-trip latency.
-  private readonly ACK_CLIPS_HI = [
-    "Perfect.",
-    "Certainly.",
-    "हाँ, बिल्कुल.",
-    "समझ गई.",
-    "Absolutely.",
-  ];
-  private readonly ACK_CLIPS_EN = [
-    "Perfect.",
-    "Certainly.",
-    "Absolutely.",
-    "Right.",
-    "Of course.",
-  ];
-  private readonly ACK_CLIPS_GU = [
-    "Perfect.",
-    "Certainly.",
-    "હા, બિલકુલ.",
-    "સમજી ગઈ.",
-    "Absolutely.",
-  ];
-
-  private ackClips(locale: string): string[] {
-    switch (this.langMode(locale)) {
-      case "gu":
-        return this.ACK_CLIPS_GU;
-      case "hi":
-        return this.ACK_CLIPS_HI;
-      default:
-        return this.ACK_CLIPS_EN;
-    }
-  }
-
   async warmCall(callId: string, locale?: string) {
     try {
       const state = await this.getOrCreateState(callId, locale);
       this.tts.prewarmClips(
-        [...this.allFallbackLines(state.locale), ...this.ackClips(state.locale)],
+        this.allFallbackLines(state.locale),
         { languageCode: this.ttsLanguageCode(state.locale) },
       );
     } catch (err) {
@@ -1158,8 +1147,8 @@ Always close on a gracious note, as you would see a guest to the door.`;
       : `You do not have their name — confirm WITHOUT any name, and still never ask for it.`;
     const step6 = isOutbound
       ? mode === "hi"
-        ? `6. NAME — इस call पर SKIP कीजिए: यह एक OUTBOUND call है, आपने ख़ुद उन्हें call किया है। नाम कभी मत पूछिए — न "और आपका नाम क्या है?", न कोई variation। ${nameNoteHi} Time confirm होते ही सीधे step 7 (CONFIRM) पर जाइए।`
-        : `6. NAME — SKIP IT ON THIS CALL: this is an OUTBOUND call, you dialed them. NEVER ask for their name — not "may I know your good name", not any variation. ${nameNoteEn} The moment the time is agreed, go straight to step 7 (CONFIRM).`
+        ? `6. NAME — इस call पर SKIP कीजिए: यह एक OUTBOUND call है, आपने ख़ुद उन्हें call किया है। नाम कभी मत पूछिए — न "और आपका नाम क्या है?", न कोई variation। Time confirm होते ही सीधे step 7 (CONFIRM) पर जाइए।`
+        : `6. NAME — SKIP IT ON THIS CALL: this is an OUTBOUND call, you dialed them. NEVER ask for their name — not "may I know your good name", not any variation. The moment the time is agreed, go straight to step 7 (CONFIRM).`
       : mode === "hi"
         ? `6. NAME: Once they confirm a time, immediately ask for their name — "और आपका नाम क्या है?" NAME NOT CLEAR — CRITICAL: names are hard to hear; if what you got sounds garbled, incomplete, or like a random ordinary word rather than a real name, do NOT guess and do NOT echo back a random word — warmly ask ONCE: "माफ़ करें, आपका नाम एक बार फिर बता दीजिए?" Only use a name you actually heard clearly. Name is collected only ONCE per call: if they already gave it earlier — या इसी call में वो एक apartment के अलावा कोई bungalow/plot या दूसरी property भी book कर रहे हों — तो दोबारा नाम कभी न पूछें, सीधे नई visit confirm करें।`
         : `6. NAME: Once they confirm a time, immediately ask for their name — "And may I know your good name?" NAME NOT CLEAR — CRITICAL: names are hard to hear; if what you got sounds garbled, incomplete, or like a random ordinary word rather than a real name, do NOT guess and do NOT echo back a random word — warmly ask ONCE: "Sorry, could you tell me your name once more?" Only use a name you actually heard clearly. Name is collected only ONCE per call: if they already gave it earlier — or they are booking a bungalow/plot or another property in addition to an apartment in this same call — never ask for the name again; just confirm the new visit.`;
@@ -1170,6 +1159,15 @@ Always close on a gracious note, as you would see a guest to the door.`;
       : mode === "hi"
         ? `8. KNOW THEM (after confirmation, casually, ONE at a time): "Sir, just to know you well — आप क्या business या profession में हैं?" → then "Ahmedabad में कहाँ रहते हैं आप?" NEVER ask where their office, clinic, or workplace is. These know-them questions (profession, area of residence) are asked only ONCE per call — अगर client पहले ही answer दे चुके हैं, या इसी call में दूसरी property/house-type भी book कर रहे हैं, तो दोबारा कभी न पूछें; बस नई visit confirm करके closing पर जाएँ। When they tell you where they stay, ALWAYS just acknowledge warmly with a brief word ("अच्छा।", "Got it.", "Great.") — for ANY area, whether you recognise it or not — and move straight to the close; NEVER repeat the area back, probe, or ask them to clarify or spell it.`
         : `8. KNOW THEM (after confirmation, casually, ONE at a time): "Just to know you well — what business or profession are you into?" → then "and which area of Ahmedabad do you stay in?" NEVER ask where their office, clinic, or workplace is. These know-them questions (profession, area of residence) are asked only ONCE per call — if they already answered earlier, or they're booking another property/house-type in this same call, never ask again; just confirm the new visit and move to the close. When they tell you where they stay, ALWAYS just acknowledge warmly with a brief word ("Got it.", "Great.", "Understood.") — for ANY area, whether you recognise it or not — and move straight to the close; NEVER repeat the area back, probe, or ask them to clarify or spell it.`;
+
+    // PROMPT CACHING: everything that differs per call (lead name, campaign, briefing,
+    // the outbound name note) sits AFTER PROMPT_CACHE_SPLIT, at the very end. The
+    // ~20k-token body before it is then byte-identical for every call of the same
+    // language + direction, so one cached copy is shared across calls instead of
+    // being re-written (at 1.25x the input price) at the start of every call.
+    const callContext =
+      `You are on a phone call with ${leadName} about ${campaignName}.${notesBlock}` +
+      (isOutbound ? `\n${mode === "hi" ? nameNoteHi : nameNoteEn}` : "");
 
     // Gujarati is a real third persona, NOT an alias for Hindi. See i18n/prompt-gu.ts.
     if (mode === "gu") {
@@ -1184,7 +1182,7 @@ Always close on a gracious note, as you would see a guest to the door.`;
     }
 
     if (mode === "hi") {
-      return `You are Maya — a warm, poised, and deeply knowledgeable relationship manager at PIKORUA Group, Ahmedabad's most exclusive ultra-luxury real estate consultancy. You are on a phone call with ${leadName} about ${campaignName}.${notesBlock}${nowLine}
+      return `You are Maya — a warm, poised, and deeply knowledgeable relationship manager at PIKORUA Group, Ahmedabad's most exclusive ultra-luxury real estate consultancy. ${nowLine}
 
 WHO YOU ARE: A warm, well-spoken 28-year-old woman from Ahmedabad — NOT an AI, NOT a call-center agent, NOT a salesperson reading a script. There is a gentle, natural smile in your voice — the easy warmth of a young, confident professional who genuinely enjoys speaking with people. You represent Ahmedabad's finest addresses and speak with the quiet confidence of someone who knows the value of what she offers. Sophisticated, warm, never transactional, never pushy. You treat every caller like a distinguished guest, not a prospect.
 
@@ -1374,10 +1372,10 @@ RECOMMENDATION RULES:
    - नंदोली (Plot): "नंदोली में exceptional plots available हैं — 2,000 से 2,300 square yards तक, शिलज Circle से सिर्फ 3 km, Ready to Move In। सुबह 10 बजे से शाम 5 बजे के बीच कौन-सा time convenient रहेगा?"
 
 OUTPUT FORMAT: Reply with ONLY the exact words Maya speaks — plain text. No JSON, no markdown, no quotes around the reply, no stage directions, no explanations.
-ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your reply ONLY when: (1) the appointment is confirmed AND you've asked the know-them questions AND given the final sign-off, OR (2) they're clearly not interested and you've closed warmly. Otherwise NEVER output ${END_CALL_TOKEN}.`;
+ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your reply ONLY when: (1) the appointment is confirmed AND you've asked the know-them questions AND given the final sign-off, OR (2) they're clearly not interested and you've closed warmly. Otherwise NEVER output ${END_CALL_TOKEN}.${PROMPT_CACHE_SPLIT}${callContext}`;
     }
 
-    return `You are Maya — a warm, poised, and deeply knowledgeable relationship manager at PIKORUA Group, Ahmedabad's most exclusive ultra-luxury real estate consultancy. You are on a phone call with ${leadName} about ${campaignName}.${notesBlock}${nowLine}
+    return `You are Maya — a warm, poised, and deeply knowledgeable relationship manager at PIKORUA Group, Ahmedabad's most exclusive ultra-luxury real estate consultancy. ${nowLine}
 
 WHO YOU ARE: A warm, well-spoken 28-year-old woman from Ahmedabad — NOT an AI, NOT a call-center agent, NOT a salesperson reading a script. There is a gentle, natural smile in your voice — the easy warmth of a young, confident professional who genuinely enjoys speaking with people. You represent Ahmedabad's finest addresses and speak with the quiet confidence of someone who knows the value of what she offers. Sophisticated, warm, never transactional, never pushy. You treat every caller like a distinguished guest, not a prospect.
 
@@ -1554,7 +1552,7 @@ RECOMMENDATION RULES:
     we have exceptional plots available — 2,000 to 2,300 square yards, just 3 km from Shilaj Circle, Ready to Move In. What time between 10 in the morning and 5 in the evening would be convenient for you?"
 
 OUTPUT FORMAT: Reply with ONLY the exact words Maya speaks — plain text. No JSON, no markdown, no quotes around the reply, no stage directions, no explanations.
-ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your reply ONLY when: (1) the appointment is confirmed AND you've asked the know-them questions AND given the final sign-off, OR (2) they're clearly not interested and you've closed warmly. Otherwise NEVER output ${END_CALL_TOKEN}.`;
+ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your reply ONLY when: (1) the appointment is confirmed AND you've asked the know-them questions AND given the final sign-off, OR (2) they're clearly not interested and you've closed warmly. Otherwise NEVER output ${END_CALL_TOKEN}.${PROMPT_CACHE_SPLIT}${callContext}`;
   }
 
   // Parse the LLM's reply. Primary format is plain text with an optional
@@ -1737,6 +1735,8 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
     callId: string,
     utteranceText: string,
     localeHint?: string,
+    // Never hold this one: it IS a held fragment the caller didn't continue.
+    noHold = false,
   ): Promise<{ state: CallState; utterance: string; hold: boolean }> {
     const state = await this.getOrCreateState(callId, localeHint);
     // Follow a mid-call language switch. The gateway flips its session locale the
@@ -1763,7 +1763,7 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
     // If this segment looks cut off mid-thought, hold it and let the caller
     // finish. Only hold once per turn — a merged utterance always proceeds,
     // so a caller can't get stuck in an endless wait loop.
-    if (!mergedFromFragment && looksIncomplete(utterance)) {
+    if (!mergedFromFragment && !noHold && looksIncomplete(utterance)) {
       state.pendingFragment = utterance;
       this.logger.log(`Holding mid-thought fragment call=${callId}: "${utterance.slice(0, 80)}"`);
       return { state, utterance, hold: true };
@@ -2095,6 +2095,7 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
         llmModel: model ?? "",
         promptTokens: promptTokens ?? null,
         completionTokens: completionTokens ?? null,
+        ...turnCostFields(llmResolved, spokenReply, null),
         guardrailTriggered,
         guardrailRule,
         fallbackUsed: guardrailTriggered,
@@ -2147,6 +2148,8 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
       // When set, the LLM call is skipped and these pre-collected deltas are
       // replayed instead. Used by speculative turn adoption.
       preStreamed?: PreStreamedData;
+      // Answer this utterance even if it looks mid-thought (see takePendingFragment).
+      noHold?: boolean;
     },
     sink: TurnStreamSink,
   ): Promise<{
@@ -2174,7 +2177,7 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
       };
     }
 
-    const prep = await this.prepareUtterance(callId, utteranceText, opts.locale);
+    const prep = await this.prepareUtterance(callId, utteranceText, opts.locale, opts.noHold);
     if (prep.hold) {
       return {
         transcript: prep.utterance,
@@ -2609,6 +2612,7 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
         llmModel: llmResolved.model ?? "",
         promptTokens: llmResolved.promptTokens ?? null,
         completionTokens: llmResolved.completionTokens ?? null,
+        ...turnCostFields(llmResolved, spokenReply, ttfaMs),
         guardrailTriggered,
         guardrailRule,
         fallbackUsed: guardrailTriggered,
@@ -2687,6 +2691,21 @@ ENDING THE CALL: append the token ${END_CALL_TOKEN} at the very END of your repl
   }
 
   // Called by webhook handler when a call reaches a terminal state.
+  // A mid-thought fragment held from the last utterance ("मुझे 4 BHK चाहिए और…"),
+  // removed from the call state. The gateway takes it when the caller stays silent
+  // after the fragment and answers it with noHold — otherwise Maya would wait
+  // silently for a continuation that never comes.
+  hasPendingFragment(callId: string): boolean {
+    return Boolean(this.calls.get(callId)?.pendingFragment);
+  }
+
+  takePendingFragment(callId: string): string | null {
+    const state = this.calls.get(callId);
+    const fragment = state?.pendingFragment ?? null;
+    if (state) state.pendingFragment = null;
+    return fragment;
+  }
+
   clearHistory(callId: string) {
     this.calls.delete(callId);
     this.unpersistableCalls.delete(callId);

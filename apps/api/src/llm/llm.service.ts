@@ -1,6 +1,7 @@
 import { Injectable, Logger, ServiceUnavailableException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import axios from "axios";
+import { splitPromptForCache } from "./prompt-cache";
 
 export type LlmMessage = { role: "user" | "assistant"; content: string };
 
@@ -10,6 +11,10 @@ export type LlmResult = {
   model: string;
   promptTokens: number | null;
   completionTokens: number | null;
+  // Cost metrics from OpenRouter's usage object (absent on non-OpenRouter paths).
+  cacheReadTokens?: number | null;
+  cacheWriteTokens?: number | null;
+  costUsd?: number | null;
 };
 
 export type LlmOptions = {
@@ -90,13 +95,18 @@ export class LlmService {
     const out: OrMessage[] = [];
     if (systemPrompt) {
       const supportsCaching = /anthropic|claude/i.test(model);
+      // One breakpoint per part: the first caches the shared body across calls,
+      // the second caches the per-call tail for the rest of this call.
+      const parts = splitPromptForCache(systemPrompt);
       out.push(
         supportsCaching
           ? {
               role: "system",
-              content: [{ type: "text", text: systemPrompt, cache_control: { type: "ephemeral" } }],
+              content: parts.map(
+                (text): OrContentPart => ({ type: "text", text, cache_control: { type: "ephemeral" } }),
+              ),
             }
-          : { role: "system", content: systemPrompt },
+          : { role: "system", content: parts.join("\n\n") },
       );
     }
     for (const m of messages) out.push({ role: m.role, content: m.content });
@@ -112,19 +122,23 @@ export class LlmService {
     completionTokens: number | null;
     cachedRead: number | null;
     cacheWrite: number | null;
+    costUsd: number | null;
   } {
     const u = (usage ?? {}) as {
       prompt_tokens?: number;
       completion_tokens?: number;
-      prompt_tokens_details?: { cached_tokens?: number };
+      prompt_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
       cache_read_input_tokens?: number;
       cache_creation_input_tokens?: number;
+      cost?: number;
     };
     return {
       promptTokens: u.prompt_tokens ?? null,
       completionTokens: u.completion_tokens ?? null,
       cachedRead: u.prompt_tokens_details?.cached_tokens ?? u.cache_read_input_tokens ?? null,
-      cacheWrite: u.cache_creation_input_tokens ?? null,
+      cacheWrite:
+        u.prompt_tokens_details?.cache_write_tokens ?? u.cache_creation_input_tokens ?? null,
+      costUsd: typeof u.cost === "number" ? u.cost : null,
     };
   }
 
@@ -219,6 +233,8 @@ export class LlmService {
           // Emit a final usage event on the stream so we can see prompt/cache
           // token counts (confirms the system-prompt cache is being hit).
           stream_options: { include_usage: true },
+          // OpenRouter usage accounting: adds the billed `cost` to the usage object.
+          usage: { include: true },
           provider: { sort: "latency" },
         },
         {
@@ -245,12 +261,22 @@ export class LlmService {
         }
       });
       const ms = Date.now() - start;
-      const { promptTokens, completionTokens, cachedRead, cacheWrite } = this.readUsage(usage);
+      const { promptTokens, completionTokens, cachedRead, cacheWrite, costUsd } =
+        this.readUsage(usage);
       this.logger.log(
         `LLM-stream(openrouter/${model}) ${ms}ms prompt=${promptTokens ?? "?"} cachedRead=${cachedRead ?? "?"} cacheWrite=${cacheWrite ?? "?"}`,
       );
       this.recordSuccess(breakerKey);
-      return { text, llmMs: ms, model, promptTokens, completionTokens };
+      return {
+        text,
+        llmMs: ms,
+        model,
+        promptTokens,
+        completionTokens,
+        cacheReadTokens: cachedRead,
+        cacheWriteTokens: cacheWrite,
+        costUsd,
+      };
     } catch (err) {
       // A barge-in aborts the turn, which surfaces here as an axios CanceledError.
       // That is US hanging up on the provider, not the provider failing — counting
@@ -311,6 +337,7 @@ export class LlmService {
           model: openRouterModel,
           max_tokens: maxTokens,
           messages: orMessages,
+          usage: { include: true },
           // Route to the lowest-latency upstream for this model
           provider: { sort: "latency" },
         },
@@ -325,12 +352,23 @@ export class LlmService {
       );
       const text: string = res.data?.choices?.[0]?.message?.content ?? "";
       const ms = Date.now() - start;
-      const { promptTokens, completionTokens, cachedRead } = this.readUsage(res.data?.usage ?? null);
+      const { promptTokens, completionTokens, cachedRead, cacheWrite, costUsd } = this.readUsage(
+        res.data?.usage ?? null,
+      );
       this.logger.log(
         `LLM(openrouter/${openRouterModel}) ${ms}ms prompt=${promptTokens ?? "?"} cachedRead=${cachedRead ?? "?"} completion=${completionTokens ?? "?"}`,
       );
       this.recordSuccess("openrouter");
-      return { text, llmMs: ms, model: openRouterModel, promptTokens, completionTokens };
+      return {
+        text,
+        llmMs: ms,
+        model: openRouterModel,
+        promptTokens,
+        completionTokens,
+        cacheReadTokens: cachedRead,
+        cacheWriteTokens: cacheWrite,
+        costUsd,
+      };
     } catch (err) {
       // Same as the streaming path: an aborted turn is not a provider fault.
       if (opts?.signal?.aborted) return null;

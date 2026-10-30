@@ -13,11 +13,12 @@ test("LlmService passes the system prompt to OpenRouter as a system-role message
 
   assert.match(src, /systemPrompt/, "systemPrompt option must be present in LlmService.generate");
   // Built in buildOrMessages(): a system-role message whose content is the
-  // systemPrompt — either a plain string, or a cached content-part (text: systemPrompt).
+  // systemPrompt, split at PROMPT_CACHE_SPLIT into cached parts (or joined back
+  // into one string for non-caching models). See prompt-cache-layout.test.js.
   assert.match(src, /role:\s*"system"/, "system prompt must be sent as a system-role message");
   assert.match(
     src,
-    /content:\s*systemPrompt|text:\s*systemPrompt/,
+    /splitPromptForCache\(systemPrompt\)/,
     "the systemPrompt must be the system message content",
   );
 });

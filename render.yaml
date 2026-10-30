@@ -4,7 +4,7 @@ services:
     name: pikorua-voice-api
     plan: free
     env: docker
-    dockerfilePath: ./Dockerfile
+    dockerfilePath: ./apps/api/Dockerfile
     dockerContext: .
     healthCheckPath: /api/health
     envVars:
@@ -85,12 +85,16 @@ services:
       # works but speaks Hindi. Set the key in the dashboard to enable Gujarati.
       - key: SARVAM_API_KEY
         sync: false # paste the Sarvam subscription key
-      - key: SARVAM_MODEL
-        value: bulbul:v3
-      - key: SARVAM_SPEAKER
-        value: simran
+      - key: SARVAM_TTS_MODEL
+        value: bulbul:v4-flash
+      - key: SARVAM_SPEAKER_HI
+        value: aparna_hi_customer
+      - key: SARVAM_SPEAKER_EN
+        value: aparna_en_companion
+      - key: SARVAM_SPEAKER_GU
+        value: aparna_hi_customer
       - key: SARVAM_PACE
-        value: "1.15"
+        value: "1.0"
       - key: SARVAM_TEMPERATURE
         value: "0.7"
       - key: SARVAM_PREPROCESS

@@ -3,15 +3,18 @@
 #
 #   deploy/vm.sh setup        # once: Docker check, folder, DB + user, backups
 #   deploy/vm.sh migrate-db   # once, before the first deploy: copy Neon → VM
-#   deploy/vm.sh deploy       # every release: git pull on the VM, build, restart
+#   deploy/vm.sh deploy       # every release: send the code to the VM, build, restart
+#   deploy/vm.sh deploy --working-tree   # same, but send uncommitted edits too
 #   deploy/vm.sh status
 #   deploy/vm.sh logs [service]
 # The VM defaults to root@187.126.115.164. Another login: VM=ubuntu@187.126.115.164 deploy/vm.sh …
 #
-# Reads the repo-root .env (app config) and .compose.env (BRANCH + tunnel token).
-# The VM clones the repo into $REMOTE_DIR/repo and builds the images itself.
-# Optional env: VM, SSH_OPTS="-p 2222 -i ~/.ssh/key", REMOTE_DIR (default /opt/pikorua-voice),
-# GITHUB_TOKEN (read access to the repo) if the VM can't already git-pull it.
+# Reads the repo-root .env (app config) and .compose.env (tunnel token).
+# The code goes straight from this PC to the VM over SSH — GitHub is not involved.
+# By default it sends the files COMMITTED at HEAD (so unfinished edits can't go live
+# by accident); --working-tree sends your folder as it is now (minus git-ignored files).
+# The VM builds the images itself, in $REMOTE_DIR/repo.
+# Optional env: VM, SSH_OPTS="-p 2222 -i ~/.ssh/key", REMOTE_DIR (default /opt/pikorua-voice).
 set -euo pipefail
 
 CMD="${1:-}"
@@ -25,7 +28,7 @@ COMPOSE="docker compose --env-file ../.compose.env -f deploy/docker-compose.prod
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 say() { echo "==> $*"; }
-usage() { sed -n '2,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 1; }
+usage() { sed -n '2,13p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 1; }
 
 [[ -n "$CMD" ]] || usage
 
@@ -63,24 +66,6 @@ check_local_files() {
   [[ "$(env_value PUBLIC_BASE_URL)" == https://* ]] || die "PUBLIC_BASE_URL in .env must be https://…"
 }
 
-# Branch the VM deploys (BRANCH= in .compose.env, default v2).
-deploy_branch() { grep -E '^BRANCH=' "$ROOT/.compose.env" | head -1 | cut -d= -f2- || true; }
-
-# The VM pulls the branch from GitHub, so unpushed commits would silently not be deployed.
-check_pushed() {
-  local want branch
-  want="$(deploy_branch)"; want="${want:-v2}"
-  branch="$(git -C "$ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "?")"
-  if [[ "$branch" == "$want" ]]; then
-    git -C "$ROOT" fetch -q origin "$branch" 2>/dev/null || true
-    if [[ -n "$(git -C "$ROOT" log "origin/$branch..HEAD" --oneline 2>/dev/null)" ]]; then
-      die "branch $branch has commits not pushed to GitHub — git push first (the VM pulls from GitHub)"
-    fi
-  else
-    echo "    note: the VM will deploy branch '$want' from GitHub (you are on '$branch')"
-  fi
-}
-
 cmd_setup() {
   parse_db_url
   say "Checking Docker on $VM"
@@ -88,7 +73,7 @@ cmd_setup() {
   Install Docker Engine (https://docs.docker.com/engine/install/), then:
   sudo usermod -aG docker \$USER   (and log in again)"
   remote 'docker compose version >/dev/null' || die "install the docker compose plugin on the VM"
-  remote 'command -v git >/dev/null' || die "install git on the VM (e.g. sudo apt install git)"
+  remote 'command -v tar >/dev/null' || die "tar is missing on the VM"
 
   say "Creating $REMOTE_DIR"
   remote_tty "sudo mkdir -p '$REMOTE_DIR' && sudo chown \"\$(id -un)\": '$REMOTE_DIR' && chmod 750 '$REMOTE_DIR'"
@@ -163,41 +148,35 @@ JOB
 
 cmd_deploy() {
   check_local_files
-  check_pushed
-  local branch url
-  branch="$(deploy_branch)"; branch="${branch:-v2}"
-  url="$(git -C "$ROOT" remote get-url origin | sed -E 's#//[^@/]*@#//#')"
+  local mode="${1:-}" label
+  [[ -z "$mode" || "$mode" == "--working-tree" ]] || die "unknown option '$mode' (only --working-tree)"
+  git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1 || die "run this from the project's git checkout"
+
+  if [[ "$mode" == "--working-tree" ]]; then
+    label="working tree (includes uncommitted edits)"
+  else
+    label="commit $(git -C "$ROOT" rev-parse --short HEAD) on $(git -C "$ROOT" rev-parse --abbrev-ref HEAD)"
+    if [[ -n "$(git -C "$ROOT" status --porcelain --untracked-files=no)" ]]; then
+      echo "    note: you have uncommitted edits — they are NOT sent (use --working-tree to include them)"
+    fi
+  fi
 
   say "Uploading .env and .compose.env to $VM:$REMOTE_DIR"
   upload "$ROOT/.env" "$VM:$REMOTE_DIR/.env"
   upload "$ROOT/.compose.env" "$VM:$REMOTE_DIR/.compose.env"
   remote "chmod 600 '$REMOTE_DIR/.env' '$REMOTE_DIR/.compose.env'"
 
-  say "Pulling $branch from GitHub on the VM"
-  local sync
-  sync="$(mktemp)"
-  # The token (if any) arrives on stdin, never on a command line.
-  cat >"$sync" <<SYNC
-set -euo pipefail
-read -r T || true
-if [ -n "\${T:-}" ]; then
-  export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraHeader
-  export GIT_CONFIG_VALUE_0="Authorization: Basic \$(printf 'x-access-token:%s' "\$T" | base64 -w0)"
-fi
-if [ -d '$REPO_DIR/.git' ]; then
-  git -C '$REPO_DIR' fetch --prune origin '+refs/heads/$branch:refs/remotes/origin/$branch'
-else
-  git clone --single-branch --branch '$branch' '$url' '$REPO_DIR'
-fi
-git -C '$REPO_DIR' checkout -q -B '$branch' 'origin/$branch'
-git -C '$REPO_DIR' reset -q --hard 'origin/$branch'
-echo "    VM is on: \$(git -C '$REPO_DIR' log --oneline -1)"
-SYNC
-  upload "$sync" "$VM:$REMOTE_DIR/.sync.sh"
-  rm -f "$sync"
-  printf '%s\n' "${GITHUB_TOKEN:-}" |
-    remote "bash '$REMOTE_DIR/.sync.sh'; rc=\$?; rm -f '$REMOTE_DIR/.sync.sh'; exit \$rc" ||
-    die "git pull failed on the VM — a private repo needs read access: export GITHUB_TOKEN=<token> and re-run"
+  say "Sending the code ($label) to $REPO_DIR"
+  # Unpacked into a fresh folder and swapped in, so a dropped connection can't leave
+  # a half-updated checkout. Docker's build cache lives in Docker, not in this folder.
+  if [[ "$mode" == "--working-tree" ]]; then
+    (cd "$ROOT" && git ls-files -z --cached --others --exclude-standard | tar --null --ignore-failed-read -T - -cf -)
+  else
+    git -C "$ROOT" archive --format=tar HEAD
+  fi | remote "rm -rf '$REPO_DIR.new' && mkdir -p '$REPO_DIR.new' && tar -xf - -C '$REPO_DIR.new' &&
+      echo '$label' > '$REPO_DIR.new/.deployed-from' &&
+      rm -rf '$REPO_DIR' && mv '$REPO_DIR.new' '$REPO_DIR'" ||
+    die "sending the code failed"
 
   say "Building images on the VM (uses both CPU cores for a few minutes)"
   remote "cd '$REPO_DIR' && $COMPOSE build" || die "image build failed (output above)"
@@ -241,7 +220,7 @@ cmd_logs() {
 case "$CMD" in
   setup) cmd_setup ;;
   migrate-db) cmd_migrate_db ;;
-  deploy) cmd_deploy ;;
+  deploy) shift; cmd_deploy "$@" ;;
   status) cmd_status ;;
   logs) cmd_logs "$@" ;;
   *) usage ;;

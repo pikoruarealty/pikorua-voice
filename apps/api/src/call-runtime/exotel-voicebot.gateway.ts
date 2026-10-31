@@ -164,6 +164,9 @@ function agcNumber(raw: string | undefined, fallback: number): number {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 const INBOUND_AGC_ENABLED = process.env.STT_INBOUND_AGC !== "0";
+
+// Max inbound calls ever accepted from one phone number (0 = unlimited).
+const MAX_INBOUND_CALLS_PER_CALLER = Number(process.env.MAX_INBOUND_CALLS_PER_CALLER ?? 3);
 // Target RMS for boosted speech (~-18 dBFS at 16-bit full scale) — loud enough to
 // engage the STT VAD reliably, with headroom before the ceiling.
 const INBOUND_AGC_TARGET_RMS = agcNumber(process.env.STT_INBOUND_AGC_TARGET_RMS, 4000);
@@ -787,6 +790,19 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
         // inbound call while draining for a deploy — hears the busy line instead
         // of a broken call; their number still reaches the CRM via post-call.
         const kind: SlotKind = state.isOutbound ? "outbound" : "inbound";
+
+        // Per-caller cap: a number that already called MAX times gets a polite
+        // goodbye. Fails open on DB errors so a hiccup never blocks a real caller.
+        if (!state.isOutbound && fromNumber && state.hasDbRow && MAX_INBOUND_CALLS_PER_CALLER > 0) {
+          const prior = await this.callRepo
+            .countInboundFrom(fromNumber, state.callId)
+            .catch(() => 0);
+          if (prior >= MAX_INBOUND_CALLS_PER_CALLER) {
+            this.logger.log(`Caller limit reached from=${fromNumber} prior=${prior}`);
+            this.playBusyLine(client, state, true);
+            break;
+          }
+        }
         if (!this.draining || state.isOutbound) {
           state.holdsSlot = await this.acquireSlot(state.callId, kind, state.isOutbound);
           // Hung up while we were acquiring: disconnect already ran, so free it here.
@@ -1436,18 +1452,24 @@ export class ExotelVoicebotGateway implements OnGatewayConnection, OnGatewayDisc
   // All lines busy (or draining for a deploy): say so and hang up without opening
   // STT or calling the LLM. The call row still goes through post-call, so the
   // caller's number reaches the CRM and the sales team calls them back.
-  private playBusyLine(client: WebSocket, state: SessionState): void {
+  private playBusyLine(client: WebSocket, state: SessionState, callerLimit = false): void {
     state.closing = true;
     if (state.hasDbRow && state.callId) {
       void this.callRepo
-        .update(state.callId, { hangupCause: "all_lines_busy" })
+        .update(state.callId, { hangupCause: callerLimit ? "caller_limit" : "all_lines_busy" })
         .catch(() => undefined);
     }
-    const busy = pickByLangMode(state.locale, {
-      hi: "नमस्ते, अभी हमारी सभी lines busy हैं — हमारी team आपको जल्द ही call back करेगी। Thank you.",
-      gu: "નમસ્તે, અત્યારે અમારી બધી lines busy છે — અમારી team તમને જલ્દી જ call back કરશે. Thank you.",
-      en: "Hello, all our lines are busy right now — our team will call you back shortly. Thank you.",
-    });
+    const busy = callerLimit
+      ? pickByLangMode(state.locale, {
+          hi: "नमस्ते, आप हमसे पहले ही कई बार बात कर चुके हैं — हमारी team आपसे जल्द ही संपर्क करेगी। Thank you.",
+          gu: "નમસ્તે, તમે અમારી સાથે પહેલેથી ઘણી વાર વાત કરી છે — અમારી team તમારો જલ્દી જ સંપર્ક કરશે. Thank you.",
+          en: "Hello, you've already spoken with us several times — our team will contact you shortly. Thank you.",
+        })
+      : pickByLangMode(state.locale, {
+          hi: "नमस्ते, अभी हमारी सभी lines busy हैं — हमारी team आपको जल्द ही call back करेगी। Thank you.",
+          gu: "નમસ્તે, અત્યારે અમારી બધી lines busy છે — અમારી team તમને જલ્દી જ call back કરશે. Thank you.",
+          en: "Hello, all our lines are busy right now — our team will call you back shortly. Thank you.",
+        });
     state.queue = state.queue
       .then(async () => {
         if (client.readyState !== WebSocket.OPEN) return;

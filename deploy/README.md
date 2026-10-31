@@ -50,14 +50,14 @@ deploy/vm.sh logs voice-api
 The VM is `root@187.126.115.164` by default; for another login run
 `VM=ubuntu@187.126.115.164 deploy/vm.sh deploy`.
 
-`deploy` sends `.env` (chmod 600 on the VM) and the code
-straight from your PC to `/opt/pikorua-voice/repo` over SSH (**GitHub isn't involved**),
-**builds the images on the VM**, restarts, and waits for `/api/health`.
+Images are **built by GitHub Actions** (`.github/workflows/images.yml`, on every push to
+`main`/`v2`) and stored in GHCR. The VM never builds. `deploy` sends only the compose file
+and `.env` (chmod 600), pulls the images for a commit, restarts, and waits for `/api/health`.
 
-- By default it sends what is **committed** at `HEAD`, so unfinished edits can't go live
-  by accident; it tells you if you have uncommitted edits. `deploy --working-tree` sends
-  your folder as it is now (git-ignored files such as `.env`, `node_modules`, `dist` are
-  never sent).
+- Order: `git push` → wait for the green **Build images** run → `deploy/vm.sh deploy`
+  (deploys your `HEAD`; `deploy/vm.sh deploy <full-sha>` deploys/rolls back to any built commit).
+- One time: `deploy/vm.sh registry-login` — gives the VM a read-only GitHub token
+  (`read:packages`) so it can pull the private images.
 - The VM keeps a note of what it runs in `/opt/pikorua-voice/repo/.deployed-from`.
 - Use `SSH_OPTS="-p 2222 -i key"` for a non-default SSH port or key.
 
@@ -235,14 +235,12 @@ needs no new inbound port for voice.
 
 ## 3. Deploy
 
-The images are built on the VM from the code in `/opt/pikorua-voice/repo`
-(`deploy/vm.sh deploy` sends the code and does all of this). By hand, once the code
-is in that folder:
+`deploy/vm.sh deploy` does all of this. By hand, in `/opt/pikorua-voice` on the VM:
 
 ```bash
-cd /opt/pikorua-voice/repo
-docker compose --env-file ../.env -f deploy/docker-compose.prod.yml build
-docker compose --env-file ../.env -f deploy/docker-compose.prod.yml up -d
+export IMAGE_TAG=<full commit sha>
+docker compose --env-file .env -f docker-compose.prod.yml pull
+docker compose --env-file .env -f docker-compose.prod.yml up -d
 curl -fsS http://127.0.0.1:4100/api/health && curl -fsS https://voice.pikoruarealty.com/api/health
 ```
 
@@ -251,12 +249,8 @@ curl -fsS http://127.0.0.1:4100/api/health && curl -fsS https://voice.pikoruarea
   finish. Deploy outside the dial window anyway when you can.
 - **Migrations run automatically** when the API starts, under a Postgres lock,
   so two instances can't race.
-- **Build load:** the build runs while the old containers still serve calls, so
-  it can slow them. Pick a quiet time.
 
-**Rollback:** on your PC, `git checkout <previous-commit>` and run
-`deploy/vm.sh deploy`. Commit old versions are in your local git history (and on
-GitHub, if you push there as a backup).
+**Rollback:** `deploy/vm.sh deploy <previous-full-sha>` — the old images are still in GHCR.
 Voice vendors roll back without a deploy: set `TTS_PROVIDER_HI=elevenlabs` or
 `STT_PROVIDER=deepgram` in `.env` and run `up -d`.
 

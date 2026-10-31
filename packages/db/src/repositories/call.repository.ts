@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, count, eq, ne } from "drizzle-orm";
 import type { Database } from "../client";
 import { calls } from "../schema";
 import type { Call, NewCall } from "../schema";
@@ -31,6 +31,21 @@ export class CallRepository {
         and(eqOp(t.direction, "outbound"), eqOp(t.status, "initiated"), gt(t.createdAt, cutoff)),
       orderBy: (t, { desc }) => [desc(t.createdAt)],
     });
+  }
+
+  // Inbound calls from this number, not counting `excludeCallId` (the live one).
+  async countInboundFrom(fromNumber: string, excludeCallId: string): Promise<number> {
+    const [row] = await this.db
+      .select({ n: count() })
+      .from(calls)
+      .where(
+        and(
+          eq(calls.direction, "inbound"),
+          eq(calls.fromNumber, fromNumber),
+          ne(calls.id, excludeCallId),
+        ),
+      );
+    return row?.n ?? 0;
   }
 
   async findByCampaignId(campaignId: string): Promise<Call[]> {

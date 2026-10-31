@@ -3,17 +3,17 @@
 #
 #   deploy/vm.sh setup        # once: Docker check, folder, DB + user, backups
 #   deploy/vm.sh migrate-db   # once, before the first deploy: copy Neon → VM
-#   deploy/vm.sh deploy       # every release: send the code to the VM, build, restart
-#   deploy/vm.sh deploy --working-tree   # same, but send uncommitted edits too
+#   deploy/vm.sh deploy [sha] # every release: VM pulls the GitHub-built images, restarts
+#   deploy/vm.sh registry-login   # once: let the VM pull from GHCR (GitHub token, read:packages)
 #   deploy/vm.sh status
 #   deploy/vm.sh logs [service]
 # The VM defaults to root@187.126.115.164. Another login: VM=ubuntu@187.126.115.164 deploy/vm.sh …
 #
 # Reads the repo-root .env (app config + CLOUDFLARE_TUNNEL_TOKEN).
-# The code goes straight from this PC to the VM over SSH — GitHub is not involved.
-# By default it sends the files COMMITTED at HEAD (so unfinished edits can't go live
-# by accident); --working-tree sends your folder as it is now (minus git-ignored files).
-# The VM builds the images itself, in $REMOTE_DIR/repo.
+# Images are built by GitHub Actions (.github/workflows/images.yml) on every push to
+# main/v2 and stored in GHCR. The VM never builds: deploy sends only the compose file
+# and .env, then pulls the images for commit [sha] (default: your HEAD — push it first
+# and wait for the green "Build images" run).
 # Optional env: VM, SSH_OPTS="-p 2222 -i ~/.ssh/key", REMOTE_DIR (default /opt/pikorua-voice).
 set -euo pipefail
 
@@ -22,13 +22,12 @@ VM="${VM:-root@187.126.115.164}"
 REMOTE_DIR="${REMOTE_DIR:-/opt/pikorua-voice}"
 SSH_OPTS="${SSH_OPTS:-}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-REPO_DIR="$REMOTE_DIR/repo"
-# Run from $REPO_DIR (the checkout), where the compose file and build context live.
-COMPOSE="docker compose --env-file ../.env -f deploy/docker-compose.prod.yml"
+# Run from $REMOTE_DIR, where .env and the compose file live. IMAGE_TAG is set by deploy.
+COMPOSE="docker compose --env-file .env -f docker-compose.prod.yml"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 say() { echo "==> $*"; }
-usage() { sed -n '2,13p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 1; }
+usage() { sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 1; }
 
 [[ -n "$CMD" ]] || usage
 
@@ -146,47 +145,47 @@ JOB
   say "Data copied. Once the VM is live and checked, delete the NEON_DATABASE_URL line from .env."
 }
 
+cmd_registry_login() {
+  echo "Create a GitHub token (classic) with ONLY the read:packages scope:"
+  echo "  https://github.com/settings/tokens/new?scopes=read:packages"
+  read -r -p "GitHub username: " gh_user
+  read -r -s -p "Token: " gh_token
+  echo
+  # Token goes over stdin, never into the command line or shell history on the VM.
+  printf '%s' "$gh_token" | remote "docker login ghcr.io -u '$gh_user' --password-stdin"
+}
+
 cmd_deploy() {
   check_local_files
-  local mode="${1:-}" label
-  [[ -z "$mode" || "$mode" == "--working-tree" ]] || die "unknown option '$mode' (only --working-tree)"
+  local tag="${1:-}"
   git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1 || die "run this from the project's git checkout"
-
-  if [[ "$mode" == "--working-tree" ]]; then
-    label="working tree (includes uncommitted edits)"
-  else
-    label="commit $(git -C "$ROOT" rev-parse --short HEAD) on $(git -C "$ROOT" rev-parse --abbrev-ref HEAD)"
-    if [[ -n "$(git -C "$ROOT" status --porcelain --untracked-files=no)" ]]; then
-      echo "    note: you have uncommitted edits — they are NOT sent (use --working-tree to include them)"
-    fi
+  [[ -n "$tag" ]] || tag="$(git -C "$ROOT" rev-parse HEAD)"
+  [[ "$tag" =~ ^[0-9a-f]{40}$ ]] || die "give the full 40-character commit sha (or nothing for HEAD)"
+  if [[ -n "$(git -C "$ROOT" status --porcelain --untracked-files=no)" ]]; then
+    echo "    note: uncommitted edits are not part of the images (they are built from the pushed commit)"
   fi
 
-  # Everything travels in ONE tar stream over ONE ssh connection, so a password
-  # login asks for the password a single time: the code, the .env, and the script
-  # that builds and restarts on the VM.
+  # ONE tar stream over ONE ssh connection (one password prompt): the compose file,
+  # .env, and the script that pulls the images and restarts.
   local stage
   stage="$(mktemp -d)"
   trap 'rm -rf "$stage"' RETURN
-  mkdir -p "$stage/repo"
-  if [[ "$mode" == "--working-tree" ]]; then
-    (cd "$ROOT" && git ls-files -z --cached --others --exclude-standard | tar --null --ignore-failed-read -T - -cf -) | tar -xf - -C "$stage/repo"
-  else
-    git -C "$ROOT" archive --format=tar HEAD | tar -xf - -C "$stage/repo"
-  fi
   cp "$ROOT/.env" "$stage/env"
+  cp "$ROOT/deploy/docker-compose.prod.yml" "$stage/docker-compose.prod.yml"
   cat >"$stage/run.sh" <<RUN
 set -euo pipefail
 D='$REMOTE_DIR'
 I="\$D/.incoming"
 install -m 600 "\$I/env" "\$D/.env"
-rm -rf "\$D/repo" && mv "\$I/repo" "\$D/repo"
-echo '$label' > "\$D/repo/.deployed-from"
-rm -rf "\$I"
-cd "\$D/repo"
-echo "==> Building images on the VM (uses both CPU cores for a few minutes)"
-$COMPOSE build
+install -m 644 "\$I/docker-compose.prod.yml" "\$D/docker-compose.prod.yml"
+rm -rf "\$I" "\$D/repo"
+cd "\$D"
+export IMAGE_TAG='$tag'
+echo "==> Pulling images for $tag"
+$COMPOSE pull voice-api voice-worker || { echo "ERROR: pull failed. Is the 'Build images' run for this commit green, and did you run 'deploy/vm.sh registry-login' once?" >&2; exit 1; }
 echo "==> Restarting (live calls drain first — up to 4 min)"
 $COMPOSE up -d --remove-orphans
+echo '$tag' > "\$D/.image-tag"
 echo "==> Waiting for the API health check"
 for i in \$(seq 1 40); do
   if curl -fsS -m 5 http://127.0.0.1:4100/api/health >/dev/null 2>&1 || wget -qO- -T 5 http://127.0.0.1:4100/api/health >/dev/null 2>&1; then
@@ -202,7 +201,7 @@ echo "ERROR: API not healthy after 2 min (logs above). Database unreachable? See
 exit 1
 RUN
 
-  say "Sending the code ($label) and .env to $VM — one connection, one password prompt"
+  say "Deploying commit ${tag:0:7} to $VM — compose file + .env only, images come from GHCR"
   tar -cf - -C "$stage" . |
     remote "rm -rf '$REMOTE_DIR/.incoming' && mkdir -p '$REMOTE_DIR/.incoming' && tar -xf - -C '$REMOTE_DIR/.incoming' && bash '$REMOTE_DIR/.incoming/run.sh'" ||
     die "deploy failed on the VM (output above)"
@@ -218,16 +217,17 @@ RUN
 }
 
 cmd_status() {
-  remote "cd '$REPO_DIR' && $COMPOSE ps && echo && curl -fsS -m 5 http://127.0.0.1:4100/api/health; echo"
+  remote "cd '$REMOTE_DIR' && export IMAGE_TAG=\$(cat .image-tag) && $COMPOSE ps && echo && curl -fsS -m 5 http://127.0.0.1:4100/api/health; echo"
 }
 
 cmd_logs() {
-  remote "cd '$REPO_DIR' && $COMPOSE logs --tail 200 ${2:-}"
+  remote "cd '$REMOTE_DIR' && export IMAGE_TAG=\$(cat .image-tag) && $COMPOSE logs --tail 200 ${2:-}"
 }
 
 case "$CMD" in
   setup) cmd_setup ;;
   migrate-db) cmd_migrate_db ;;
+  registry-login) cmd_registry_login ;;
   deploy) shift; cmd_deploy "$@" ;;
   status) cmd_status ;;
   logs) cmd_logs "$@" ;;

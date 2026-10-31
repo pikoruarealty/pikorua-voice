@@ -56,8 +56,9 @@ and `.env` (chmod 600), pulls the images for a commit, restarts, and waits for `
 
 - Order: `git push` → wait for the green **Build images** run → `deploy/vm.sh deploy`
   (deploys your `HEAD`; `deploy/vm.sh deploy <full-sha>` deploys/rolls back to any built commit).
-- One time: `deploy/vm.sh registry-login` — gives the VM a read-only GitHub token
-  (`read:packages`) so it can pull the private images.
+- One time: put `GHCR_USER` and `GHCR_TOKEN` in `.env` — a GitHub token with **only**
+  `read:packages` (https://github.com/settings/tokens/new?scopes=read:packages). Each
+  deploy logs the VM in to GHCR with it, so the private images can be pulled.
 - The VM keeps a note of what it runs in `/opt/pikorua-voice/repo/.deployed-from`.
 - Use `SSH_OPTS="-p 2222 -i key"` for a non-default SSH port or key.
 

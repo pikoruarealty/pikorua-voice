@@ -4,12 +4,12 @@
 #   deploy/vm.sh setup        # once: Docker check, folder, DB + user, backups
 #   deploy/vm.sh migrate-db   # once, before the first deploy: copy Neon → VM
 #   deploy/vm.sh deploy [sha] # every release: VM pulls the GitHub-built images, restarts
-#   deploy/vm.sh registry-login   # once: let the VM pull from GHCR (GitHub token, read:packages)
 #   deploy/vm.sh status
 #   deploy/vm.sh logs [service]
 # The VM defaults to root@187.126.115.164. Another login: VM=ubuntu@187.126.115.164 deploy/vm.sh …
 #
-# Reads the repo-root .env (app config + CLOUDFLARE_TUNNEL_TOKEN).
+# Reads the repo-root .env (app config + CLOUDFLARE_TUNNEL_TOKEN + GHCR_USER/GHCR_TOKEN,
+# the read-only GitHub login the VM uses to pull the images).
 # Images are built by GitHub Actions (.github/workflows/images.yml) on every push to
 # main/v2 and stored in GHCR. The VM never builds: deploy sends only the compose file
 # and .env, then pulls the images for commit [sha] (default: your HEAD — push it first
@@ -27,7 +27,7 @@ COMPOSE="docker compose --env-file .env -f docker-compose.prod.yml"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 say() { echo "==> $*"; }
-usage() { sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 1; }
+usage() { sed -n '2,13p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 1; }
 
 [[ -n "$CMD" ]] || usage
 
@@ -62,6 +62,8 @@ check_local_files() {
   token="$(env_value CLOUDFLARE_TUNNEL_TOKEN)"
   [[ -n "$token" && "$token" != *PASTE_TUNNEL_TOKEN_HERE* ]] ||
     die "add your Cloudflare tunnel token to .env:  CLOUDFLARE_TUNNEL_TOKEN=\"...\""
+  [[ -n "$(env_value GHCR_USER)" && "$(env_value GHCR_TOKEN)" != "" && "$(env_value GHCR_TOKEN)" != *PASTE_GITHUB_TOKEN_HERE* ]] ||
+    die "add GHCR_USER and GHCR_TOKEN (GitHub token with only read:packages) to .env"
   [[ "$(env_value PUBLIC_BASE_URL)" == https://* ]] || die "PUBLIC_BASE_URL in .env must be https://…"
 }
 
@@ -145,16 +147,6 @@ JOB
   say "Data copied. Once the VM is live and checked, delete the NEON_DATABASE_URL line from .env."
 }
 
-cmd_registry_login() {
-  echo "Create a GitHub token (classic) with ONLY the read:packages scope:"
-  echo "  https://github.com/settings/tokens/new?scopes=read:packages"
-  read -r -p "GitHub username: " gh_user
-  read -r -s -p "Token: " gh_token
-  echo
-  # Token goes over stdin, never into the command line or shell history on the VM.
-  printf '%s' "$gh_token" | remote "docker login ghcr.io -u '$gh_user' --password-stdin"
-}
-
 cmd_deploy() {
   check_local_files
   local tag="${1:-}"
@@ -181,8 +173,10 @@ install -m 644 "\$I/docker-compose.prod.yml" "\$D/docker-compose.prod.yml"
 rm -rf "\$I" "\$D/repo"
 cd "\$D"
 export IMAGE_TAG='$tag'
+ev() { grep -E "^\$1=" "\$D/.env" | head -1 | cut -d= -f2- | sed -E 's/^["'"'"']//; s/["'"'"']\$//'; }
+ev GHCR_TOKEN | docker login ghcr.io -u "\$(ev GHCR_USER)" --password-stdin >/dev/null
 echo "==> Pulling images for $tag"
-$COMPOSE pull voice-api voice-worker || { echo "ERROR: pull failed. Is the 'Build images' run for this commit green, and did you run 'deploy/vm.sh registry-login' once?" >&2; exit 1; }
+$COMPOSE pull voice-api voice-worker || { echo "ERROR: pull failed. Is the 'Build images' run for this commit green, and are GHCR_USER / GHCR_TOKEN in .env valid?" >&2; exit 1; }
 echo "==> Restarting (live calls drain first — up to 4 min)"
 $COMPOSE up -d --remove-orphans
 echo '$tag' > "\$D/.image-tag"
@@ -227,7 +221,6 @@ cmd_logs() {
 case "$CMD" in
   setup) cmd_setup ;;
   migrate-db) cmd_migrate_db ;;
-  registry-login) cmd_registry_login ;;
   deploy) shift; cmd_deploy "$@" ;;
   status) cmd_status ;;
   logs) cmd_logs "$@" ;;
